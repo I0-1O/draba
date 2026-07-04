@@ -303,6 +303,11 @@ packages/
           IdentityPicker.tsx
           IdentityTrigger.tsx
           IdentityWidget.tsx
+        import/
+          importFields.ts
+          ImportMappingStep.tsx
+          ImportPreviewStep.tsx
+          ImportWizard.tsx
         kanban/
           KanbanBoard.tsx
           KanbanCard.tsx
@@ -358,6 +363,7 @@ packages/
         useForceLightDocument.ts
         useFormatDate.test.ts
         useFormatDate.ts
+        useImport.ts
         useMemberManagement.ts
         usePreferences.ts
         usePublicSettings.ts
@@ -23201,6 +23207,359 @@ export function IdentityWidget({ identity, name, shape = 'square', onChange }: P
 }
 ````
 
+## File: packages/web/src/components/kanban/KanbanCard.tsx
+````typescript
+/**
+ * KanbanCard — a single draggable activity card.
+ *
+ * Renders the card accent border (driven by colorBy), title, and the
+ * configured optional fields. Uses @dnd-kit useDraggable for drag support.
+ */
+
+import { useDraggable } from '@dnd-kit/core';
+import { Calendar, GitBranch, ChevronDown, ChevronRight } from 'lucide-react';
+import { formatActivityDate } from '@/components/list/ListView';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+import { Badge } from '@/components/identity/Badge';
+import type { Member } from '@/types';
+import type { components } from '@draba/shared';
+import type { KanbanCardField } from './kanbanColumns';
+
+type ApiActivity = components['schemas']['Activity'];
+type Status = components['schemas']['Status'];
+type Tag = components['schemas']['Tag'];
+
+interface Props {
+  activity: ApiActivity;
+  accentColor: string;
+  members: Member[];
+  statusById: Map<string, Status>;
+  tagById: Map<string, Tag>;
+  /** Activity ID → title, used to show the parent's name when "Parent" field is on. */
+  activityTitleById?: Map<string, string>;
+  cardFields: KanbanCardField[];
+  /** Fields suppressed because they duplicate the current Group by axis. */
+  suppressedFields: Set<KanbanCardField>;
+  isSelected: boolean;
+  /** True when Find is active and this card doesn't match. */
+  dimmed: boolean;
+  /** True when Find is active and this card is the active match. */
+  activeMatch: boolean;
+  isDragOverlay?: boolean;
+  onClick: () => void;
+
+  // ── Hierarchy ────────────────────────────────────────────────────────────────
+  /** True when hierarchy mode is on and this card has children to show/hide. */
+  hasHierarchyChildren?: boolean;
+  /** Whether the children are currently hidden. */
+  isHierarchyCollapsed?: boolean;
+  /**
+   * Click handler for the collapse/expand chevron.
+   * Receives the mouse event so the handler can stopPropagation (prevents
+   * the card-click from also opening the detail panel).
+   */
+  onToggleHierarchy?: (e: React.MouseEvent) => void;
+  /** True when this card is nested under a parent — disables drag. */
+  isChildCard?: boolean;
+  /** When false (public share viewer), drag and clicks are inert. Defaults to true. */
+  interactive?: boolean;
+}
+
+export default function KanbanCard({
+  activity,
+  accentColor,
+  members,
+  statusById,
+  tagById,
+  cardFields,
+  suppressedFields,
+  isSelected,
+  dimmed,
+  activeMatch,
+  isDragOverlay = false,
+  onClick,
+  hasHierarchyChildren = false,
+  isHierarchyCollapsed = false,
+  onToggleHierarchy,
+  isChildCard = false,
+  activityTitleById,
+  interactive = true,
+}: Props) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: activity.id,
+    data: { activityId: activity.id },
+    // Drag overlay renders separately, and child cards travel with their parent.
+    disabled: isDragOverlay || isChildCard || !interactive,
+  });
+
+  // Do NOT apply the dnd-kit transform to the original card.
+  //
+  // We use DragOverlay for the visual movement, so the overlay card floats as
+  // the user drags and the original stays in place as an invisible placeholder.
+  // Applying the transform here causes the column's overflow container to expand
+  // its scroll area as the mouse moves, producing a growing scrollbar.
+  const style: React.CSSProperties = isDragging && !isDragOverlay
+    ? { visibility: 'hidden' }   // placeholder: preserves layout space, no transform, no scrollbar growth
+    : { opacity: dimmed ? 0.3 : 1, transition: dimmed ? 'opacity 150ms' : undefined };
+
+  const showField = (f: KanbanCardField) =>
+    cardFields.includes(f) && !suppressedFields.has(f);
+
+  const status = activity.statusId ? statusById.get(activity.statusId) : undefined;
+  const statusColor = status?.color ? resolveColorHex(status.color) : undefined;
+
+  const assignedMembers = (activity.assignedMemberIds ?? [])
+    .map(id => members.find(m => m.id === id))
+    .filter((m): m is Member => Boolean(m));
+
+  const tags = (activity.tagIds ?? [])
+    .map(id => tagById.get(id))
+    .filter((t): t is Tag => Boolean(t));
+
+  const formatDate = (iso: string | null | undefined) =>
+    iso ? formatActivityDate(iso) : null;
+
+  const startLabel = formatDate(activity.startAt);
+  const endLabel   = formatDate(activity.endAt);
+  const dateLabel  = startLabel && endLabel
+    ? startLabel === endLabel ? startLabel : `${startLabel} – ${endLabel}`
+    : startLabel ?? endLabel ?? null;
+
+  const cardStyle: React.CSSProperties = {
+    ...style,
+    background: 'var(--card)',
+    border: `1px solid ${isSelected ? accentColor : activeMatch ? '#f59e0b' : 'var(--border)'}`,
+    borderLeft: `3px solid ${accentColor}`,
+    borderRadius: 6,
+    padding: '8px 10px',
+    cursor: !interactive ? 'default' : isDragOverlay ? 'grabbing' : 'pointer',
+    boxShadow: isDragOverlay
+      ? '0 8px 24px rgba(0,0,0,0.2)'
+      : isSelected
+      ? `0 0 0 2px ${accentColor}40`
+      : activeMatch
+      ? '0 0 0 2px #f59e0b80'
+      : undefined,
+    userSelect: 'none',
+    marginBottom: 6,
+    transition: 'box-shadow 100ms, border-color 100ms',
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      {...(interactive ? listeners : {})}
+      {...(interactive ? attributes : {})}
+      style={cardStyle}
+      onClick={interactive ? onClick : undefined}
+      role={interactive ? 'button' : undefined}
+      tabIndex={interactive ? 0 : undefined}
+      onKeyDown={interactive ? (e => { if (e.key === 'Enter' || e.key === ' ') onClick(); }) : undefined}
+    >
+      {/* Title row — with optional collapse chevron for hierarchy parents */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 4, marginBottom: 4 }}>
+        {hasHierarchyChildren && (
+          <button
+            onClick={interactive ? (e => { e.stopPropagation(); onToggleHierarchy?.(e); }) : undefined}
+            title={isHierarchyCollapsed ? 'Expand children' : 'Collapse children'}
+            style={{
+              flexShrink: 0,
+              marginTop: 1,
+              background: 'none',
+              border: 'none',
+              padding: 0,
+              cursor: interactive ? 'pointer' : 'default',
+              color: 'var(--muted-foreground)',
+              display: 'flex',
+              alignItems: 'center',
+            }}
+          >
+            {isHierarchyCollapsed
+              ? <ChevronRight size={13} strokeWidth={2} />
+              : <ChevronDown  size={13} strokeWidth={2} />
+            }
+          </button>
+        )}
+        <div
+          style={{
+            flex: 1,
+            fontSize: 13,
+            fontWeight: 500,
+            color: 'var(--foreground)',
+            lineHeight: 1.4,
+            display: '-webkit-box',
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: 'vertical',
+            overflow: 'hidden',
+          }}
+        >
+          {activity.title}
+        </div>
+      </div>
+
+      {/* Description snippet */}
+      {showField('description') && activity.description && (
+        <div
+          style={{
+            fontSize: 11,
+            color: 'var(--muted-foreground)',
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            marginBottom: 4,
+          }}
+        >
+          {activity.description}
+        </div>
+      )}
+
+      {/* Status pill */}
+      {showField('status') && status && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
+          <span
+            style={{
+              width: 8,
+              height: 8,
+              borderRadius: '50%',
+              background: statusColor ?? '#6b7280',
+              flexShrink: 0,
+            }}
+          />
+          <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>{status.name}</span>
+        </div>
+      )}
+
+      {/* Date range */}
+      {showField('dateRange') && dateLabel && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 4,
+            fontSize: 11,
+            color: 'var(--muted-foreground)',
+            marginBottom: 4,
+          }}
+        >
+          <Calendar size={11} strokeWidth={1.6} />
+          {dateLabel}
+        </div>
+      )}
+
+      {/* Tags */}
+      {showField('tags') && tags.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3, marginBottom: 4 }}>
+          {tags.slice(0, 3).map(t => (
+            <span
+              key={t.id}
+              style={{
+                fontSize: 10,
+                fontWeight: 500,
+                padding: '1px 6px',
+                borderRadius: 10,
+                background: resolveColorHex(t.color ?? null) ? `${resolveColorHex(t.color ?? null)}22` : 'var(--muted)',
+                color: resolveColorHex(t.color ?? null) ?? 'var(--muted-foreground)',
+                border: `1px solid ${resolveColorHex(t.color ?? null) ?? 'var(--border)'}44`,
+              }}
+            >
+              {t.name}
+            </span>
+          ))}
+          {tags.length > 3 && (
+            <span style={{ fontSize: 10, color: 'var(--muted-foreground)' }}>+{tags.length - 3}</span>
+          )}
+        </div>
+      )}
+
+      {/* % complete bar */}
+      {showField('percentComplete') && activity.percentComplete != null && (
+        <div style={{ marginBottom: 4 }}>
+          <div
+            style={{
+              height: 3,
+              background: 'var(--muted)',
+              borderRadius: 2,
+              overflow: 'hidden',
+            }}
+          >
+            <div
+              style={{
+                height: '100%',
+                width: `${activity.percentComplete}%`,
+                background: accentColor,
+                borderRadius: 2,
+                transition: 'width 200ms',
+              }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Footer: parent pill + member avatars */}
+      {(showField('parent') || showField('members')) && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 2 }}>
+          {/* Parent badge — shows the parent activity's title */}
+          {showField('parent') && activity.parentActivityId && (
+            <span
+              style={{
+                fontSize: 10,
+                color: 'var(--muted-foreground)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 3,
+                overflow: 'hidden',
+                flex: 1,
+              }}
+            >
+              <GitBranch size={9} strokeWidth={1.6} style={{ flexShrink: 0 }} />
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {activityTitleById?.get(activity.parentActivityId) ?? 'Parent'}
+              </span>
+            </span>
+          )}
+
+          {/* Member avatars */}
+          {showField('members') && assignedMembers.length > 0 && (
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                marginLeft: 'auto',
+              }}
+            >
+              {assignedMembers.slice(0, 3).map((m, i) => (
+                <div
+                  key={m.id}
+                  style={{
+                    marginLeft: i === 0 ? 0 : -6,
+                    zIndex: assignedMembers.length - i,
+                    outline: '2px solid var(--card)',
+                    borderRadius: '50%',
+                  }}
+                  title={m.name}
+                >
+                  <Badge
+                    identity={{ color: m.color, icon: '__name_2__' }}
+                    name={m.name}
+                    shape="circle"
+                    size={20}
+                  />
+                </div>
+              ))}
+              {assignedMembers.length > 3 && (
+                <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginLeft: 4 }}>
+                  +{assignedMembers.length - 3}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+````
+
 ## File: packages/web/src/components/kanban/kanbanColumns.ts
 ````typescript
 /**
@@ -24816,6 +25175,2604 @@ describe('buildListRows — groupBy: parent', () => {
     expect(actRows(rows).map(r => r.id).sort()).toEqual(['x', 'y'])
   })
 })
+````
+
+## File: packages/web/src/components/list/ListView.tsx
+````typescript
+/**
+ * ListView — inline-editable, curated table view of the active timeline's
+ * activities.
+ *
+ * Uses TanStack Table v8 for column management (visibility, order, sizing,
+ * pinning, sorting). Row rendering is manual to support group-by headers
+ * interleaved between activity rows and to give full control over
+ * keyboard selection/edit behavior.
+ *
+ * Integrates with FilterContext and FindContext so the same filter and find
+ * query that drives the Gantt view also drives this view.
+ */
+
+import { createPortal } from 'react-dom';
+import {
+  useState,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useCallback,
+  useMemo,
+  KeyboardEvent,
+} from 'react';
+import {
+  useReactTable,
+  getCoreRowModel,
+  getSortedRowModel,
+  type ColumnDef,
+  type SortingState,
+  type ColumnOrderState,
+  type VisibilityState,
+  type ColumnSizingState,
+  type ColumnPinningState,
+} from '@tanstack/react-table';
+import {
+  DndContext,
+  type DragEndEvent,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  horizontalListSortingStrategy,
+  useSortable,
+  arrayMove,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import { ChevronRight, ChevronDown, GripVertical, Search, Trash2, Archive, Check } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
+import { useTimelineActivities, useTeamMembers, useUpdateActivity, useCreateActivity, useDeleteActivity, useArchiveActivity } from '@/hooks/useTeamActivities';
+import { usePreferenceMap, useUpsertPreference, usePreferences } from '@/hooks/usePreferences';
+import { useFilter } from '@/contexts/FilterContext';
+import { useFind } from '@/contexts/FindContext';
+import { applyActiveFilter } from '@/lib/presetFilters';
+import { matchEvents } from '@/lib/findMatcher';
+import { memberComboKey, orderedComboIds, memberComboLabel, comboSortComparator, UNASSIGNED_KEY, SEP } from '@/lib/memberGroups';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+import { Badge } from '@/components/identity/Badge';
+import { IdentityPicker } from '@/components/identity/IdentityPicker';
+import type { Identity } from '@/components/identity/identity-constants';
+import TagInput from '@/components/TagInput';
+import type { components } from '@draba/shared';
+import type { Member } from '@/types';
+import type { ListGroupBy, ListSortBy, ListColorBy, ListDensity, ColumnConfig } from './ListToolbar';
+import { useAuth } from '@/contexts/AuthContext';
+
+type ApiActivity = components['schemas']['Activity'];
+type Status = components['schemas']['Status'];
+type SavedFilter = components['schemas']['SavedFilter'];
+type Tag = components['schemas']['Tag'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+
+// ── Column catalog ─────────────────────────────────────────────────────────────
+
+export interface ColMeta {
+  id: string;
+  label: string;
+  defaultVisible: boolean;
+  defaultWidth: number;
+  editable: boolean;
+  editType: 'text' | 'date' | 'status' | 'number' | 'identity' | 'assignees' | 'tags' | 'parent' | 'none';
+  /** Exclude from the columns toggle menu (e.g. fixed structural columns). */
+  noMenu?: boolean;
+}
+
+export const COL_CATALOG: ColMeta[] = [
+  { id: 'colorBar',    label: '',             defaultVisible: true,  defaultWidth: 18,  editable: false, editType: 'none', noMenu: true },
+  { id: 'identity',    label: '',             defaultVisible: true,  defaultWidth: 52,  editable: true,  editType: 'identity' },
+  { id: 'title',       label: 'Title',        defaultVisible: true,  defaultWidth: 280, editable: true,  editType: 'text' },
+  { id: 'startAt',     label: 'Start',        defaultVisible: true,  defaultWidth: 110, editable: true,  editType: 'date' },
+  { id: 'endAt',       label: 'End',          defaultVisible: true,  defaultWidth: 110, editable: true,  editType: 'date' },
+  { id: 'duration',    label: 'Duration',     defaultVisible: false, defaultWidth: 90,  editable: false, editType: 'none' },
+  { id: 'status',      label: 'Status',       defaultVisible: true,  defaultWidth: 130, editable: true,  editType: 'status' },
+  { id: 'assignees',   label: 'Assigned To',  defaultVisible: true,  defaultWidth: 140, editable: true,  editType: 'assignees' },
+  { id: 'tags',        label: 'Tags',         defaultVisible: true,  defaultWidth: 130, editable: true,  editType: 'tags' },
+  { id: 'progress',    label: 'Progress',     defaultVisible: false, defaultWidth: 90,  editable: true,  editType: 'number' },
+  { id: 'parent',      label: 'Parent',       defaultVisible: false, defaultWidth: 150, editable: true,  editType: 'parent' },
+  { id: 'description', label: 'Description',  defaultVisible: false, defaultWidth: 200, editable: true,  editType: 'text' },
+  { id: 'location',    label: 'Location',     defaultVisible: false, defaultWidth: 130, editable: true,  editType: 'text' },
+  { id: 'url',         label: 'URL',          defaultVisible: false, defaultWidth: 150, editable: true,  editType: 'text' },
+  { id: 'notes',       label: 'Notes',        defaultVisible: false, defaultWidth: 200, editable: true,  editType: 'text' },
+  { id: 'createdAt',   label: 'Created',      defaultVisible: false, defaultWidth: 110, editable: false, editType: 'none' },
+  { id: 'updatedAt',   label: 'Updated',      defaultVisible: false, defaultWidth: 110, editable: false, editType: 'none' },
+];
+
+const DEFAULT_COLUMN_ORDER = COL_CATALOG.map(c => c.id);
+const DEFAULT_VISIBILITY: VisibilityState = Object.fromEntries(
+  COL_CATALOG.map(c => [c.id, c.defaultVisible]),
+);
+const DEFAULT_WIDTHS: ColumnSizingState = Object.fromEntries(
+  COL_CATALOG.map(c => [c.id, c.defaultWidth]),
+);
+
+// ── Group-by row builder (exported for unit tests) ─────────────────────────────
+
+export type ListDisplayRow =
+  | { kind: 'group'; key: string; label: string; count: number; memberColors?: string[] }
+  | { kind: 'activity'; activity: ApiActivity; depth: number; hasChildren: boolean; groupKey: string };
+
+/** Converts a pre-sorted flat activity list into display rows for the given group-by mode. */
+export function buildListRows(
+  sortedActivities: ApiActivity[],
+  groupBy: ListGroupBy,
+  memberById: Map<string, { displayName: string; color?: string | null }>,
+  statusById: Map<string, { name: string }>,
+  timelineStatuses: Status[],
+  collapsedGroups: Set<string>,
+  memberOrder: string[] = [],
+): ListDisplayRow[] {
+  const emptyRow = (a: ApiActivity): ListDisplayRow => ({
+    kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: '',
+  });
+
+  if (groupBy === 'none') return sortedActivities.map(emptyRow);
+
+  if (groupBy === 'member') {
+    const nameById = new Map(
+      [...memberById.entries()].map(([id, m]) => [id, m.displayName]),
+    );
+
+    const buckets = new Map<string, ApiActivity[]>();
+    for (const activity of sortedActivities) {
+      const key = memberComboKey(activity.assignedMemberIds ?? []);
+      const list = buckets.get(key) ?? [];
+      list.push(activity);
+      buckets.set(key, list);
+    }
+
+    const comparator = comboSortComparator(memberOrder);
+    const sortedKeys = [...buckets.keys()].sort(comparator);
+
+    const rows: ListDisplayRow[] = [];
+    for (const key of sortedKeys) {
+      const activities = buckets.get(key)!;
+      const rawIds = key === UNASSIGNED_KEY ? [] : key.split(SEP);
+      const orderedIds = orderedComboIds(rawIds, memberOrder);
+      const label = key === UNASSIGNED_KEY ? 'Unassigned' : memberComboLabel(orderedIds, nameById);
+      const memberColors = orderedIds.map(id => {
+        const raw = memberById.get(id)?.color;
+        return resolveColorHex(raw ?? null) ?? 'var(--muted-foreground)';
+      });
+      rows.push({ kind: 'group', key, label, count: activities.length, memberColors });
+      if (!collapsedGroups.has(key)) {
+        for (const a of activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: key });
+      }
+    }
+    return rows;
+  }
+
+  if (groupBy === 'status') {
+    const groups = new Map<string, { label: string; activities: ApiActivity[] }>();
+    for (const activity of sortedActivities) {
+      const key = activity.statusId ?? '__no_status__';
+      const label = activity.statusId ? (statusById.get(activity.statusId)?.name ?? 'Unknown') : 'No status';
+      const group = groups.get(key) ?? { label, activities: [] };
+      group.activities.push(activity);
+      groups.set(key, group);
+    }
+    const rows: ListDisplayRow[] = [];
+    for (const s of timelineStatuses) {
+      const group = groups.get(s.id);
+      if (!group?.activities.length) continue;
+      rows.push({ kind: 'group', key: s.id, label: s.name, count: group.activities.length });
+      if (!collapsedGroups.has(s.id)) {
+        for (const a of group.activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: s.id });
+      }
+    }
+    const noStatus = groups.get('__no_status__');
+    if (noStatus?.activities.length) {
+      rows.push({ kind: 'group', key: '__no_status__', label: 'No status', count: noStatus.activities.length });
+      if (!collapsedGroups.has('__no_status__')) {
+        for (const a of noStatus.activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: '__no_status__' });
+      }
+    }
+    return rows;
+  }
+
+  if (groupBy === 'parent') {
+    // Tree nesting mirrors Gantt: parent rows are collapsible, children are indented.
+    // Activities whose parent is not in this view render as roots (orphan-safe).
+    const byId = new Map(sortedActivities.map(a => [a.id, a]));
+    const childrenByParent = new Map<string, ApiActivity[]>();
+    const roots: ApiActivity[] = [];
+    for (const a of sortedActivities) {
+      if (a.parentActivityId && byId.has(a.parentActivityId)) {
+        const list = childrenByParent.get(a.parentActivityId) ?? [];
+        list.push(a);
+        childrenByParent.set(a.parentActivityId, list);
+      } else {
+        roots.push(a);
+      }
+    }
+    const rows: ListDisplayRow[] = [];
+    const seen = new Set<string>();
+    const hidden = new Set<string>();
+    const markHidden = (a: ApiActivity) => {
+      if (hidden.has(a.id)) return;
+      hidden.add(a.id);
+      for (const k of childrenByParent.get(a.id) ?? []) markHidden(k);
+    };
+    const visit = (a: ApiActivity, depth: number) => {
+      if (seen.has(a.id)) return;
+      seen.add(a.id);
+      const kids = childrenByParent.get(a.id) ?? [];
+      const hasChildren = kids.length > 0;
+      rows.push({ kind: 'activity', activity: a, depth, hasChildren, groupKey: a.id });
+      if (!hasChildren) return;
+      if (collapsedGroups.has(a.id)) for (const k of kids) markHidden(k);
+      else for (const k of kids) visit(k, depth + 1);
+    };
+    for (const r of roots) visit(r, 0);
+    // Cycle-safe: any activity not yet visited (parent loop) renders at root depth
+    for (const a of sortedActivities) {
+      if (!seen.has(a.id) && !hidden.has(a.id)) visit(a, 0);
+    }
+    return rows;
+  }
+
+  return sortedActivities.map(emptyRow);
+}
+
+// ── Props ──────────────────────────────────────────────────────────────────────
+
+interface Props {
+  teamId: string;
+  timelineId: string;
+  groupBy: ListGroupBy;
+  sortBy: ListSortBy;
+  colorBy: ListColorBy;
+  density?: ListDensity;
+  timelineStatuses?: Status[];
+  savedFilters?: SavedFilter[];
+  tags?: Tag[];
+  onColumnsChange?: (configs: ColumnConfig[]) => void;
+  /** When set, the component applies the toggle and clears it on the next render. */
+  pendingColumnToggle?: { colId: string; visible: boolean; seq: number } | null;
+  onSelectActivity?: (id: string | null) => void;
+  onSelectApiActivity?: (a: ApiActivity | null) => void;
+  selectedActivityId?: string | null;
+  onMembersLoaded?: (members: Member[]) => void;
+  /** Increment to trigger inline creation of a new activity row. */
+  triggerNewRow?: number;
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+/** Formats a genuine timestamp (createdAt, updatedAt) in the user's local timezone. */
+export function formatTimestamp(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? '—' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+/**
+ * Formats an all-day activity date (startAt, endAt) in UTC so that
+ * midnight-UTC dates like "2026-05-31T00:00:00Z" display as "May 31"
+ * regardless of the viewer's local timezone.
+ *
+ * TODO: branch on allDay when timed events ship (Phase 15 calendar sync).
+ */
+export function formatActivityDate(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? '—' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+}
+
+export function formatDuration(startAt: string | null | undefined, endAt: string | null | undefined): string {
+  if (!startAt || !endAt) return '—';
+  const start = new Date(startAt);
+  const end = new Date(endAt);
+  const days = Math.round((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
+  if (days < 0) return '—';
+  if (days === 0) return '1 day';
+  return `${days + 1} days`;
+}
+
+function toDateInput(iso: string | null | undefined): string {
+  if (!iso) return '';
+  return iso.slice(0, 10);
+}
+
+// ── Draggable column header ────────────────────────────────────────────────────
+
+function SortableColHeader({ colId, children, style, onSort, sortDir, resizeHandler, isResizing }: {
+  colId: string;
+  children: React.ReactNode;
+  style?: React.CSSProperties;
+  onSort?: () => void;
+  sortDir?: 'asc' | 'desc' | false;
+  resizeHandler?: (e: React.MouseEvent | React.TouchEvent) => void;
+  isResizing?: boolean;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: colId });
+
+  return (
+    <th
+      ref={setNodeRef}
+      style={{
+        ...style,
+        transform: CSS.Transform.toString(transform),
+        transition,
+        opacity: isDragging ? 0.5 : 1,
+        position: 'sticky',
+        top: 0,
+        background: 'var(--card)',
+        borderBottom: '2px solid var(--border)',
+        userSelect: 'none',
+        whiteSpace: 'nowrap',
+        textOverflow: 'ellipsis',
+        cursor: onSort ? 'pointer' : 'default',
+        fontWeight: 600,
+        fontSize: 11,
+        color: 'var(--muted-foreground)',
+        padding: 0,
+        textTransform: 'uppercase',
+        letterSpacing: '0.05em',
+        textAlign: 'left',
+        overflow: 'visible', // needed for resize handle
+      }}
+      onClick={onSort}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '0 8px', overflow: 'hidden' }}>
+        {/* drag handle */}
+        <span
+          {...attributes}
+          {...listeners}
+          style={{ cursor: 'grab', color: 'var(--muted-foreground)', opacity: 0.4, flexShrink: 0, paddingRight: 2 }}
+          onClick={e => e.stopPropagation()}
+          title="Drag to reorder"
+        >
+          <GripVertical size={12} />
+        </span>
+        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{children}</span>
+        {sortDir === 'asc' && <span style={{ color: 'var(--primary)', flexShrink: 0, fontSize: 9, lineHeight: 1 }}>▲</span>}
+        {sortDir === 'desc' && <span style={{ color: 'var(--primary)', flexShrink: 0, fontSize: 9, lineHeight: 1 }}>▼</span>}
+      </div>
+      {/* Resize handle — absolutely positioned on right edge */}
+      {resizeHandler && (
+        <div
+          onMouseDown={resizeHandler}
+          onTouchStart={resizeHandler}
+          onClick={e => e.stopPropagation()}
+          style={{
+            position: 'absolute',
+            right: 0,
+            top: 0,
+            height: '100%',
+            width: 4,
+            cursor: 'col-resize',
+            background: isResizing ? 'var(--primary)' : 'transparent',
+            zIndex: 1,
+          }}
+          onMouseEnter={e => { if (!isResizing) (e.currentTarget as HTMLElement).style.background = 'var(--border)'; }}
+          onMouseLeave={e => { if (!isResizing) (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+        />
+      )}
+    </th>
+  );
+}
+
+// ── Status pill popover ────────────────────────────────────────────────────────
+
+function StatusPicker({
+  value,
+  statuses,
+  onChange,
+  onClose,
+  positionStyle,
+}: {
+  value: string | null | undefined;
+  statuses: Status[];
+  onChange: (id: string | null) => void;
+  onClose: () => void;
+  positionStyle?: React.CSSProperties;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
+    }
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        ...positionStyle,
+        zIndex: 1000,
+        background: 'var(--card)',
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+        minWidth: 160,
+        padding: '6px 0',
+      }}
+    >
+      <div
+        onClick={() => { onChange(null); onClose(); }}
+        style={{
+          padding: '6px 12px',
+          cursor: 'pointer',
+          fontSize: 12,
+          color: 'var(--muted-foreground)',
+        }}
+        onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+      >
+        No status
+      </div>
+      {statuses.map(s => (
+        <div
+          key={s.id}
+          onClick={() => { onChange(s.id); onClose(); }}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: '6px 12px',
+            cursor: 'pointer',
+            fontSize: 12,
+            color: 'var(--foreground)',
+            background: value === s.id ? 'var(--muted)' : 'transparent',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+          onMouseLeave={e => (e.currentTarget.style.background = value === s.id ? 'var(--muted)' : 'transparent')}
+        >
+          <span
+            style={{
+              width: 10,
+              height: 10,
+              borderRadius: '50%',
+              background: resolveColorHex(s.color ?? null) ?? '#888',
+              flexShrink: 0,
+            }}
+          />
+          {s.name}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Assignee picker popover ────────────────────────────────────────────────────
+
+function AssigneePicker({
+  members,
+  selectedIds,
+  onToggle,
+  onClose,
+  positionStyle,
+}: {
+  members: Member[];
+  selectedIds: string[];
+  onToggle: (id: string) => void;
+  onClose: () => void;
+  positionStyle?: React.CSSProperties;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
+    }
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        ...positionStyle,
+        zIndex: 1000,
+        background: 'var(--card)',
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+        minWidth: 180,
+        padding: '6px 0',
+      }}
+    >
+      {members.length === 0 && (
+        <div style={{ padding: '6px 12px', fontSize: 12, color: 'var(--muted-foreground)' }}>
+          No team members
+        </div>
+      )}
+      {members.map(m => {
+        const assigned = selectedIds.includes(m.id);
+        return (
+          <div
+            key={m.id}
+            onClick={() => onToggle(m.id)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '5px 12px', cursor: 'pointer', fontSize: 12,
+              background: assigned ? 'var(--muted)' : 'transparent',
+              color: 'var(--foreground)',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+            onMouseLeave={e => (e.currentTarget.style.background = assigned ? 'var(--muted)' : 'transparent')}
+          >
+            <Badge
+              identity={{ color: m.color, icon: '__name_2__' }}
+              name={m.name}
+              shape="circle"
+              size={20}
+            />
+            <span style={{ flex: 1 }}>{m.name}</span>
+            {assigned && (
+              <span style={{
+                width: 6, height: 6, borderRadius: '50%',
+                background: m.color, flexShrink: 0, display: 'inline-block',
+              }} />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Tag picker popover ─────────────────────────────────────────────────────────
+
+function TagPicker({
+  teamId,
+  tags,
+  selectedTagIds,
+  onChange,
+  onClose,
+  positionStyle,
+}: {
+  teamId: string;
+  tags: Tag[];
+  selectedTagIds: string[];
+  onChange: (ids: string[]) => void;
+  onClose: () => void;
+  positionStyle?: React.CSSProperties;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
+    }
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        ...positionStyle,
+        zIndex: 1000,
+        background: 'var(--card)',
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+        minWidth: 220,
+        padding: 8,
+      }}
+    >
+      <TagInput teamId={teamId} tags={tags} selectedTagIds={selectedTagIds} onChange={onChange} />
+    </div>
+  );
+}
+
+// ── Parent activity picker popover ─────────────────────────────────────────────
+
+function ParentPicker({
+  activities,
+  value,
+  onChange,
+  onClose,
+  positionStyle,
+}: {
+  activities: ApiActivity[];
+  value: string | null | undefined;
+  onChange: (id: string | null) => void;
+  onClose: () => void;
+  positionStyle?: React.CSSProperties;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const [query, setQuery] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
+    }
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  useEffect(() => { inputRef.current?.focus(); }, []);
+
+  const filtered = activities.filter(a =>
+    a.title.toLowerCase().includes(query.trim().toLowerCase()),
+  );
+
+  function choose(id: string | null) {
+    onChange(id);
+    onClose();
+  }
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        ...positionStyle,
+        zIndex: 1000,
+        background: 'var(--card)',
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+        minWidth: 220,
+        overflow: 'hidden',
+      }}
+    >
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 6,
+        padding: '6px 8px', borderBottom: '1px solid var(--border)',
+      }}>
+        <Search size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+        <input
+          ref={inputRef}
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+          placeholder="Search activities…"
+          style={{
+            flex: 1, border: 'none', outline: 'none', background: 'none',
+            fontSize: 12, color: 'var(--foreground)', fontFamily: 'var(--font-sans)',
+          }}
+        />
+      </div>
+      <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+        <div
+          onClick={() => choose(null)}
+          style={{
+            padding: '6px 10px', fontSize: 12, color: 'var(--muted-foreground)',
+            fontStyle: 'italic', cursor: 'pointer',
+            borderBottom: filtered.length > 0 ? '1px solid var(--border)' : 'none',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+        >
+          — None —
+        </div>
+        {filtered.map(a => (
+          <div
+            key={a.id}
+            onClick={() => choose(a.id)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '6px 10px', fontSize: 12, cursor: 'pointer',
+              background: a.id === value ? 'var(--muted)' : 'transparent',
+              fontWeight: a.id === value ? 600 : 400,
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+            onMouseLeave={e => (e.currentTarget.style.background = a.id === value ? 'var(--muted)' : 'transparent')}
+          >
+            <Badge
+              identity={{ color: a.color ?? '#288C9B', icon: a.icon ?? '__none__' }}
+              name={a.title}
+              size={16}
+            />
+            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {a.title}
+            </span>
+          </div>
+        ))}
+        {filtered.length === 0 && (
+          <div style={{ padding: '8px 10px', fontSize: 11, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>
+            No matching activities
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Row context menu ───────────────────────────────────────────────────────────
+
+function ContextMenu({
+  pos,
+  onArchive,
+  onDelete,
+  onClose,
+}: {
+  pos: { top: number; left: number };
+  onArchive: () => void;
+  onDelete: () => void;
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
+    }
+    function keyHandler(e: globalThis.KeyboardEvent) {
+      if (e.key === 'Escape') onCloseRef.current();
+    }
+    document.addEventListener('mousedown', handler);
+    document.addEventListener('keydown', keyHandler);
+    return () => {
+      document.removeEventListener('mousedown', handler);
+      document.removeEventListener('keydown', keyHandler);
+    };
+  }, []);
+
+  // Clamp so menu doesn't overflow viewport
+  const menuW = 160;
+  const menuH = 80;
+  const left = Math.min(pos.left, window.innerWidth - menuW - 8);
+  const top = pos.top + menuH > window.innerHeight ? pos.top - menuH : pos.top;
+
+  const itemStyle: React.CSSProperties = {
+    display: 'flex', alignItems: 'center', gap: 8,
+    padding: '7px 12px', fontSize: 12, cursor: 'pointer',
+    color: 'var(--foreground)', background: 'transparent',
+    border: 'none', width: '100%', textAlign: 'left',
+    fontFamily: 'var(--font-sans)',
+  };
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        position: 'fixed', top, left,
+        zIndex: 9999,
+        background: 'var(--card)',
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+        minWidth: menuW,
+        padding: '4px 0',
+      }}
+    >
+      <button
+        style={itemStyle}
+        onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+        onClick={onArchive}
+      >
+        <Archive size={13} strokeWidth={2} style={{ flexShrink: 0 }} />
+        Archive
+      </button>
+      <button
+        style={{ ...itemStyle, color: 'var(--destructive)' }}
+        onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+        onClick={onDelete}
+      >
+        <Trash2 size={13} strokeWidth={2} style={{ flexShrink: 0 }} />
+        Delete
+      </button>
+    </div>
+  );
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+/** Position a popover below a cell, flipping above if there isn't enough space below. */
+function popoverPos(rect: DOMRect, w: number, h: number): { top: number; left: number } {
+  const spaceBelow = window.innerHeight - rect.bottom - 2;
+  const top = spaceBelow >= h
+    ? rect.bottom + 2
+    : Math.max(4, rect.top - h - 2);
+  return {
+    top,
+    left: Math.min(rect.left, window.innerWidth - w - 8),
+  };
+}
+
+// ── Sort helpers ───────────────────────────────────────────────────────────────
+
+function sortByToColId(s: ListSortBy): string {
+  switch (s) {
+    case 'startDate': return 'startAt';
+    case 'endDate':   return 'endAt';
+    case 'title':     return 'title';
+    case 'status':    return 'status';
+    case 'progress':  return 'progress';
+  }
+}
+
+// ── Main component ─────────────────────────────────────────────────────────────
+
+export default function ListView({
+  teamId,
+  timelineId,
+  groupBy,
+  sortBy,
+  colorBy,
+  density,
+  timelineStatuses = [],
+  savedFilters = [],
+  tags = [],
+  onColumnsChange,
+  pendingColumnToggle,
+  onSelectActivity,
+  selectedActivityId,
+  onMembersLoaded,
+  triggerNewRow,
+}: Props) {
+  const { user } = useAuth();
+  const { activeFilter } = useFilter();
+  const { debouncedQuery, registerMatches, matchedIds, activeMatchId } = useFind();
+
+  // ── Data fetching ──────────────────────────────────────────────────────────
+  const queryClient = useQueryClient();
+  const { data: rawActivities = [] } = useTimelineActivities(teamId, timelineId);
+  const { data: rawMembers = [] } = useTeamMembers(teamId);
+  const update = useUpdateActivity(timelineId);
+  const create = useCreateActivity(teamId, timelineId);
+  const deleteAct = useDeleteActivity(timelineId);
+  const archiveAct = useArchiveActivity(timelineId);
+
+  useEffect(() => {
+    if (rawMembers.length > 0 && onMembersLoaded) {
+      onMembersLoaded(rawMembers.map(m => ({
+        id: m.id,
+        name: m.displayName,
+        initials: m.displayName.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase(),
+        color: resolveColorHex(m.color ?? null) ?? '#888',
+      })));
+    }
+  }, [rawMembers, onMembersLoaded]);
+
+  function initialsFrom(name: string): string {
+    return name.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase();
+  }
+
+  const members: Member[] = useMemo(
+    () => rawMembers.map(m => ({
+      id: m.id,
+      name: m.displayName,
+      initials: initialsFrom(m.displayName),
+      color: resolveColorHex(m.color ?? null) ?? '#888',
+    })),
+    [rawMembers],
+  );
+
+  // ── Preference persistence ────────────────────────────────────────────────
+  const { isSuccess: prefsSettled } = usePreferences(timelineId);
+  const prefMap = usePreferenceMap(timelineId);
+  const upsert = useUpsertPreference();
+  const prefsApplied = useRef(false);
+
+  // Column state (managed by TanStack Table)
+  const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(DEFAULT_VISIBILITY);
+  const [columnOrder, setColumnOrder] = useState<ColumnOrderState>(DEFAULT_COLUMN_ORDER);
+  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>(DEFAULT_WIDTHS);
+  const [sorting, setSorting] = useState<SortingState>(() => [{ id: sortByToColId(sortBy), desc: false }]);
+
+  // Sync sort column when the toolbar's Sort By control changes
+  useEffect(() => {
+    setSorting([{ id: sortByToColId(sortBy), desc: false }]);
+  }, [sortBy]);
+
+  // Apply saved column prefs once after they load
+  useEffect(() => {
+    if (!prefsSettled || prefsApplied.current) return;
+    prefsApplied.current = true;
+    const raw = prefMap['list_columns'];
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      const config = raw as { order?: string[]; hidden?: string[]; widths?: Record<string, number> };
+      if (Array.isArray(config.order) && config.order.length > 0) {
+        const saved = config.order as string[];
+        const allIds = COL_CATALOG.map(c => c.id);
+        const newCols = allIds.filter(id => !saved.includes(id));
+        setColumnOrder([...saved, ...newCols]);
+      }
+      if (Array.isArray(config.hidden)) {
+        const vis: VisibilityState = { ...DEFAULT_VISIBILITY };
+        for (const id of config.hidden as string[]) {
+          if (id in vis) vis[id] = false;
+        }
+        setColumnVisibility(vis);
+      }
+      if (config.widths && typeof config.widths === 'object') {
+        setColumnSizing(prev => ({ ...prev, ...config.widths }));
+      }
+    }
+  }, [prefsSettled, prefMap]);
+
+  // Persist column config on change (debounced via a ref guard)
+  const saveCols = useCallback(
+    (vis: VisibilityState, order: ColumnOrderState, sizing: ColumnSizingState) => {
+      if (!timelineId) return;
+      const hidden = Object.entries(vis).filter(([, v]) => !v).map(([k]) => k);
+      const config = { order, hidden, widths: sizing };
+      upsert.mutate({ key: 'list_columns', value: JSON.stringify(config), timelineId });
+    },
+    [timelineId, upsert.mutate], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const debouncedSaveCols = useCallback(
+    (vis: VisibilityState, order: ColumnOrderState, sizing: ColumnSizingState) => {
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      saveTimer.current = setTimeout(() => saveCols(vis, order, sizing), 400);
+    },
+    [saveCols],
+  );
+
+  const handleVisibilityChange = useCallback(
+    (updater: VisibilityState | ((prev: VisibilityState) => VisibilityState)) => {
+      setColumnVisibility(prev => {
+        const next = typeof updater === 'function' ? updater(prev) : updater;
+        if (prefsApplied.current) debouncedSaveCols(next, columnOrder, columnSizing);
+        return next;
+      });
+    },
+    [columnOrder, columnSizing, debouncedSaveCols],
+  );
+
+  const handleOrderChange = useCallback(
+    (updater: ColumnOrderState | ((prev: ColumnOrderState) => ColumnOrderState)) => {
+      setColumnOrder(prev => {
+        const next = typeof updater === 'function' ? updater(prev) : updater;
+        if (prefsApplied.current) debouncedSaveCols(columnVisibility, next, columnSizing);
+        return next;
+      });
+    },
+    [columnVisibility, columnSizing, debouncedSaveCols],
+  );
+
+  const handleSizingChange = useCallback(
+    (updater: ColumnSizingState | ((prev: ColumnSizingState) => ColumnSizingState)) => {
+      setColumnSizing(prev => {
+        const next = typeof updater === 'function' ? updater(prev) : updater;
+        if (prefsApplied.current) debouncedSaveCols(columnVisibility, columnOrder, next);
+        return next;
+      });
+    },
+    [columnVisibility, columnOrder, debouncedSaveCols],
+  );
+
+  // ── TanStack Table ─────────────────────────────────────────────────────────
+
+  const columnDefs = useMemo<ColumnDef<ApiActivity>[]>(
+    () =>
+      COL_CATALOG.map(meta => ({
+        id: meta.id,
+        header: meta.label,
+        size: DEFAULT_WIDTHS[meta.id] ?? 120,
+        // colorBar is a fixed-width structural column — lock it so TanStack's
+        // min-size enforcement never stretches it beyond its visual purpose.
+        minSize: meta.id === 'colorBar' ? 18 : 40,
+        maxSize: meta.id === 'colorBar' ? 18 : 800,
+        enableResizing: meta.id !== 'colorBar',
+        enableSorting: meta.editType !== 'none' || meta.id === 'duration',
+      })),
+    [],
+  );
+
+  const table = useReactTable({
+    data: rawActivities,
+    columns: columnDefs,
+    state: {
+      columnVisibility,
+      columnOrder,
+      columnSizing,
+      columnPinning: { left: ['colorBar', 'identity', 'title'] } as ColumnPinningState,
+      sorting,
+    },
+    onSortingChange: setSorting,
+    onColumnVisibilityChange: handleVisibilityChange,
+    onColumnOrderChange: handleOrderChange,
+    onColumnSizingChange: handleSizingChange,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+    columnResizeMode: 'onChange',
+  });
+
+  // Apply external column toggle from the toolbar (via DashboardPage)
+  const lastAppliedSeq = useRef<number | null>(null);
+  useEffect(() => {
+    if (!pendingColumnToggle) return;
+    if (pendingColumnToggle.seq === lastAppliedSeq.current) return;
+    lastAppliedSeq.current = pendingColumnToggle.seq;
+    setColumnVisibility(prev => {
+      const next = { ...prev, [pendingColumnToggle.colId]: pendingColumnToggle.visible };
+      if (prefsApplied.current) debouncedSaveCols(next, columnOrder, columnSizing);
+      return next;
+    });
+  }, [pendingColumnToggle, columnOrder, columnSizing, debouncedSaveCols]);
+
+  // Expose ALL column configs (visible + hidden) to toolbar via callback.
+  // Uses a ref-based equality check to avoid calling onColumnsChange (which
+  // typically calls setListColumns in DashboardPage) with a new array reference
+  // every render — that would create an infinite setState→re-render loop.
+  const lastColConfigsRef = useRef<ColumnConfig[] | null>(null);
+  useEffect(() => {
+    if (!onColumnsChange) return;
+    const configs: ColumnConfig[] = table.getAllLeafColumns()
+      .filter(col => !COL_CATALOG.find(c => c.id === col.id)?.noMenu)
+      .map(col => ({
+        id: col.id,
+        label: COL_CATALOG.find(c => c.id === col.id)?.label ?? col.id,
+        visible: col.getIsVisible(),
+      }));
+    const prev = lastColConfigsRef.current;
+    const changed = !prev || prev.length !== configs.length ||
+      prev.some((c, i) => c.id !== configs[i].id || c.visible !== configs[i].visible || c.label !== configs[i].label);
+    if (changed) {
+      lastColConfigsRef.current = configs;
+      onColumnsChange(configs);
+    }
+  }); // runs every render so order/visibility changes propagate immediately
+
+  // ── Filter + sort ──────────────────────────────────────────────────────────
+
+  const memberIdsByUserId = useMemo<Map<string, string[]>>(() => {
+    const map = new Map<string, string[]>();
+    for (const m of rawMembers) {
+      if (!m.userId) continue;
+      const list = map.get(m.userId) ?? [];
+      list.push(m.id);
+      map.set(m.userId, list);
+    }
+    return map;
+  }, [rawMembers]);
+
+  const closedStatusIds = useMemo(
+    () => new Set(timelineStatuses.filter(s => s.isClosed).map(s => s.id)),
+    [timelineStatuses],
+  );
+
+  const statusesByTimeline = useMemo(() => {
+    const m = new Map<string, Status[]>();
+    m.set(timelineId, timelineStatuses);
+    return m;
+  }, [timelineId, timelineStatuses]);
+
+  const filteredActivities = useMemo(
+    () =>
+      applyActiveFilter(rawActivities, activeFilter, memberIdsByUserId, {
+        closedStatusIds,
+        savedFilters,
+        statuses: statusesByTimeline,
+        tags,
+      }),
+    [rawActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags],
+  );
+
+  // Apply TanStack sorting
+  const sortedActivities = useMemo(() => {
+    const acts = [...filteredActivities];
+    const col = sorting[0];
+    if (!col) {
+      return acts.sort((a, b) => {
+        if (sortBy === 'startDate') return (a.startAt ?? '').localeCompare(b.startAt ?? '');
+        if (sortBy === 'endDate') return (a.endAt ?? '').localeCompare(b.endAt ?? '');
+        if (sortBy === 'title') return a.title.localeCompare(b.title);
+        if (sortBy === 'status') return (a.statusId ?? '').localeCompare(b.statusId ?? '');
+        if (sortBy === 'progress') return (b.percentComplete ?? 0) - (a.percentComplete ?? 0);
+        return 0;
+      });
+    }
+    return acts.sort((a, b) => {
+      let av: string | number = '';
+      let bv: string | number = '';
+      switch (col.id) {
+        case 'title': av = a.title; bv = b.title; break;
+        case 'startAt': av = a.startAt ?? ''; bv = b.startAt ?? ''; break;
+        case 'endAt': av = a.endAt ?? ''; bv = b.endAt ?? ''; break;
+        case 'status': av = a.statusId ?? ''; bv = b.statusId ?? ''; break;
+        case 'progress': av = a.percentComplete ?? 0; bv = b.percentComplete ?? 0; break;
+        default: av = a.title; bv = b.title;
+      }
+      const cmp = typeof av === 'number' ? av - (bv as number) : (av as string).localeCompare(bv as string);
+      return col.desc ? -cmp : cmp;
+    });
+  }, [filteredActivities, sorting, sortBy]);
+
+  // ── Group-by ───────────────────────────────────────────────────────────────
+
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const toggleGroup = useCallback((key: string) => {
+    setCollapsedGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }, []);
+
+  const memberById = useMemo<Map<string, TeamMemberWithUser>>(
+    () => new Map(rawMembers.map(m => [m.id, m])),
+    [rawMembers],
+  );
+  const statusById = useMemo<Map<string, Status>>(
+    () => new Map(timelineStatuses.map(s => [s.id, s])),
+    [timelineStatuses],
+  );
+  const activityById = useMemo<Map<string, ApiActivity>>(
+    () => new Map(rawActivities.map(a => [a.id, a])),
+    [rawActivities],
+  );
+
+  const memberOrder = useMemo(() => members.map(m => m.id), [members]);
+
+  const displayRows = useMemo(
+    () => buildListRows(sortedActivities, groupBy, memberById, statusById, timelineStatuses, collapsedGroups, memberOrder),
+    [sortedActivities, groupBy, memberById, statusById, timelineStatuses, collapsedGroups, memberOrder],
+  );
+
+  // Flat list of activity rows (for keyboard navigation indices)
+  const activityRows = useMemo(
+    () => displayRows.filter((r): r is Extract<ListDisplayRow, { kind: 'activity' }> => r.kind === 'activity'),
+    [displayRows],
+  );
+
+  // ── Find integration ───────────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!debouncedQuery) {
+      registerMatches([], new Map());
+      return;
+    }
+    const results = matchEvents(debouncedQuery, filteredActivities, members, rawActivities);
+    const ids = results.map(r => r.activityId);
+    const reasons = new Map(results.map(r => [r.activityId, r.reasons]));
+    registerMatches(ids, reasons);
+  }, [debouncedQuery, filteredActivities, members, rawActivities, registerMatches]);
+
+  // Auto-scroll to active match
+  const activeRowRef = useRef<HTMLTableRowElement | null>(null);
+  useEffect(() => {
+    if (activeMatchId && activeRowRef.current) {
+      activeRowRef.current.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }, [activeMatchId]);
+
+  // ── Selection & editing state ──────────────────────────────────────────────
+
+  const [selectedRowIdx, setSelectedRowIdx] = useState<number | null>(null);
+  const [selectedColIdx, setSelectedColIdx] = useState<number>(0);
+  const [editingCell, setEditingCell] = useState<{
+    rowIdx: number;
+    colIdx: number;
+    value: string;
+  } | null>(null);
+  const editInputRef = useRef<HTMLInputElement | null>(null);
+  // Tracks which cell is currently open so the layout effect only focuses/selects
+  // on initial open, not on every value change while typing.
+  const editCellKeyRef = useRef<string | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // When a new activity is selected externally, sync row idx
+  useEffect(() => {
+    if (!selectedActivityId) { setSelectedRowIdx(null); return; }
+    const idx = activityRows.findIndex(r => r.activity.id === selectedActivityId);
+    if (idx >= 0) setSelectedRowIdx(idx);
+  }, [selectedActivityId, activityRows]);
+
+  // useLayoutEffect fires synchronously after DOM commit so the focus is set
+  // before any paint — no window in which another element can steal focus.
+  // Guard: only focus/select when the *cell* changes (new rowIdx:colIdx), not
+  // when the value changes while the user is typing — otherwise inp.select()
+  // would re-select-all after every keystroke, leaving only the last character.
+  useLayoutEffect(() => {
+    if (!editingCell) {
+      editCellKeyRef.current = null;
+      return;
+    }
+    // Include the row's activity id in the key so that when an optimistic row
+    // (optimistic_…) is swapped for its real record at the same index, React
+    // remounts the <tr> (keyed by activity.id) and destroys the focused input —
+    // the changed id forces us to re-focus the freshly mounted input rather than
+    // skip it as a value-only change.
+    const rowId = activityRows[editingCell.rowIdx]?.activity.id ?? '';
+    const cellKey = `${rowId}:${editingCell.colIdx}`;
+    if (editCellKeyRef.current === cellKey) return; // value-only change — skip
+    editCellKeyRef.current = cellKey;
+
+    const inp = editInputRef.current;
+    if (!inp) return;
+    inp.focus();
+    inp.scrollIntoView({ block: 'nearest' });
+    const colId = visibleColIds[editingCell.colIdx];
+    const meta = COL_CATALOG.find(c => c.id === colId);
+    if (meta?.editType === 'date') {
+      // showPicker() opens the calendar immediately. Deferred so the browser
+      // has processed the focus event first. Only one date input is ever in
+      // the DOM at a time (single-cell editing), so no range-picker pairing.
+      setTimeout(() => {
+        try { (inp as HTMLInputElement & { showPicker?(): void }).showPicker?.(); } catch { /* not all browsers */ }
+      }, 0);
+    } else {
+      inp.select();
+    }
+  }, [editingCell, activityRows]); // visibleColIds intentionally excluded — always current in this render cycle
+
+  // Visible column ids, in the SAME order the cells are rendered.
+  //
+  // Cells render from `table.getHeaderGroups()`, which moves pinned-left
+  // columns (colorBar, identity, title) to the front. `getVisibleLeafColumns()`
+  // does NOT apply pinning — it follows raw `columnOrder`. When a persisted
+  // `columnOrder` doesn't place the pinned columns first (e.g. a saved order
+  // from before `colorBar`/`identity` existed appends them at the end), the two
+  // orderings diverge and every colIdx→colId lookup (enterEdit, commitEdit,
+  // showPicker, keyboard nav) targets the wrong column. Deriving from the
+  // header groups keeps colIdx aligned with what the user actually clicked.
+  const visibleColIds = useMemo(
+    () => (table.getHeaderGroups()[0]?.headers ?? []).map(h => h.id),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [columnOrder, columnVisibility],
+  );
+
+  const commitEdit = useCallback(
+    (rowIdx: number, colId: string, value: string) => {
+      const row = activityRows[rowIdx];
+      if (!row) return;
+      const a = row.activity;
+
+      // Optimistic row not yet confirmed by server — queue title and return.
+      if (a.id.startsWith('optimistic_')) {
+        if (colId === 'title' && value.trim()) {
+          pendingTitleAfterCreate.current = value.trim();
+        }
+        return;
+      }
+
+      const patch: Partial<ApiActivity> & { notes?: string | null } = {};
+      if (colId === 'title' && value.trim() !== '') patch.title = value.trim();
+      else if (colId === 'startAt') patch.startAt = value ? `${value}T00:00:00Z` : undefined;
+      else if (colId === 'endAt') patch.endAt = value ? `${value}T00:00:00Z` : undefined;
+      else if (colId === 'description') patch.description = value || undefined;
+      else if (colId === 'location') patch.location = value || undefined;
+      else if (colId === 'url') patch.url = value || undefined;
+      else if (colId === 'notes') patch.notes = value || undefined;
+      else if (colId === 'progress') {
+        const n = parseInt(value, 10);
+        if (!isNaN(n) && n >= 0 && n <= 100) patch.percentComplete = n;
+      }
+
+      if (Object.keys(patch).length > 0) {
+        update.mutate({ activityId: a.id, patch });
+      }
+    },
+    [activityRows, update],
+  );
+
+  const enterEdit = useCallback((rowIdx: number, colIdx: number) => {
+    const row = activityRows[rowIdx];
+    if (!row) return;
+    const colId = visibleColIds[colIdx];
+    const meta = COL_CATALOG.find(c => c.id === colId);
+    if (!meta?.editable || meta.editType === 'status') return;
+    const a = row.activity;
+    let val = '';
+    if (colId === 'title') val = a.title;
+    else if (colId === 'startAt') val = toDateInput(a.startAt);
+    else if (colId === 'endAt') val = toDateInput(a.endAt);
+    else if (colId === 'description') val = a.description ?? '';
+    else if (colId === 'location') val = a.location ?? '';
+    else if (colId === 'url') val = a.url ?? '';
+    else if (colId === 'notes') val = (a as ApiActivity & { notes?: string | null }).notes ?? '';
+    else if (colId === 'progress') val = String(a.percentComplete ?? 0);
+    setEditingCell({ rowIdx, colIdx, value: val });
+  }, [activityRows, visibleColIds]);
+
+  const cancelEdit = useCallback(() => setEditingCell(null), []);
+
+  const commitAndMove = useCallback(
+    (dir: 'down' | 'right' | 'left') => {
+      if (!editingCell) return;
+      commitEdit(editingCell.rowIdx, visibleColIds[editingCell.colIdx], editingCell.value);
+      setEditingCell(null);
+
+      if (dir === 'down') {
+        const nextRow = Math.min(editingCell.rowIdx + 1, activityRows.length - 1);
+        setSelectedRowIdx(nextRow);
+      } else if (dir === 'right') {
+        let nextColIdx = editingCell.colIdx + 1;
+        let nextRowIdx = editingCell.rowIdx;
+        if (nextColIdx >= visibleColIds.length) {
+          if (editingCell.rowIdx < activityRows.length - 1) {
+            nextColIdx = 0;
+            nextRowIdx = editingCell.rowIdx + 1;
+          } else {
+            nextColIdx = visibleColIds.length - 1; // clamp at last cell of last row
+          }
+        }
+        setSelectedColIdx(nextColIdx);
+        setSelectedRowIdx(nextRowIdx);
+        const colId = visibleColIds[nextColIdx];
+        const meta = COL_CATALOG.find(c => c.id === colId);
+        const isText = meta?.editable && meta.editType !== 'status' && meta.editType !== 'none' &&
+          meta.editType !== 'identity' && meta.editType !== 'assignees' &&
+          meta.editType !== 'tags' && meta.editType !== 'parent';
+        if (isText) enterEdit(nextRowIdx, nextColIdx);
+      } else if (dir === 'left') {
+        let prevColIdx = editingCell.colIdx - 1;
+        let prevRowIdx = editingCell.rowIdx;
+        if (prevColIdx < 0) {
+          if (editingCell.rowIdx > 0) {
+            prevColIdx = visibleColIds.length - 1;
+            prevRowIdx = editingCell.rowIdx - 1;
+          } else {
+            prevColIdx = 0; // clamp at first cell of first row
+          }
+        }
+        setSelectedColIdx(prevColIdx);
+        setSelectedRowIdx(prevRowIdx);
+        const colId = visibleColIds[prevColIdx];
+        const meta = COL_CATALOG.find(c => c.id === colId);
+        const isText = meta?.editable && meta.editType !== 'status' && meta.editType !== 'none' &&
+          meta.editType !== 'identity' && meta.editType !== 'assignees' &&
+          meta.editType !== 'tags' && meta.editType !== 'parent';
+        if (isText) enterEdit(prevRowIdx, prevColIdx);
+      }
+    },
+    [editingCell, commitEdit, visibleColIds, activityRows.length, enterEdit],
+  );
+
+  const handleKeyDown = useCallback(
+    (e: KeyboardEvent<HTMLDivElement>) => {
+      if (editingCell) {
+        // Edit mode key handling is in the input's own onKeyDown
+        return;
+      }
+
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        if (activityRows.length === 0) return;
+        if (selectedRowIdx === null) {
+          setSelectedRowIdx(0);
+          setSelectedColIdx(0);
+          return;
+        }
+        if (e.shiftKey) {
+          let prevCol = selectedColIdx - 1;
+          let prevRow = selectedRowIdx;
+          if (prevCol < 0) {
+            if (selectedRowIdx > 0) {
+              prevCol = visibleColIds.length - 1;
+              prevRow = selectedRowIdx - 1;
+            } else {
+              prevCol = 0; // clamp at first cell of first row
+            }
+          }
+          setSelectedColIdx(prevCol);
+          setSelectedRowIdx(prevRow);
+        } else {
+          let nextCol = selectedColIdx + 1;
+          let nextRow = selectedRowIdx;
+          if (nextCol >= visibleColIds.length) {
+            if (selectedRowIdx < activityRows.length - 1) {
+              nextCol = 0;
+              nextRow = selectedRowIdx + 1;
+            } else {
+              nextCol = visibleColIds.length - 1; // clamp at last cell of last row
+            }
+          }
+          setSelectedColIdx(nextCol);
+          setSelectedRowIdx(nextRow);
+        }
+        return;
+      }
+
+      if (selectedRowIdx === null) {
+        if (e.key === 'ArrowDown') { setSelectedRowIdx(0); e.preventDefault(); }
+        return;
+      }
+
+      if (e.key === 'ArrowDown') {
+        setSelectedRowIdx(r => Math.min((r ?? 0) + 1, activityRows.length - 1));
+        e.preventDefault();
+      } else if (e.key === 'ArrowUp') {
+        setSelectedRowIdx(r => Math.max((r ?? 0) - 1, 0));
+        e.preventDefault();
+      } else if (e.key === 'ArrowRight') {
+        setSelectedColIdx(c => Math.min(c + 1, visibleColIds.length - 1));
+        e.preventDefault();
+      } else if (e.key === 'ArrowLeft') {
+        setSelectedColIdx(c => Math.max(c - 1, 0));
+        e.preventDefault();
+      } else if (e.key === 'Enter' || e.key === 'F2') {
+        const colId = visibleColIds[selectedColIdx];
+        const meta = COL_CATALOG.find(c => c.id === colId);
+        const isTextEditable = meta?.editable && meta.editType !== 'none' &&
+          meta.editType !== 'status' && meta.editType !== 'identity' &&
+          meta.editType !== 'assignees' && meta.editType !== 'tags' && meta.editType !== 'parent';
+        if (isTextEditable) enterEdit(selectedRowIdx, selectedColIdx);
+        e.preventDefault();
+      } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
+        const colId = visibleColIds[selectedColIdx];
+        const meta = COL_CATALOG.find(c => c.id === colId);
+        const isTextEditable = meta?.editable && meta.editType !== 'none' &&
+          meta.editType !== 'status' && meta.editType !== 'identity' &&
+          meta.editType !== 'assignees' && meta.editType !== 'tags' && meta.editType !== 'parent';
+        if (isTextEditable) setEditingCell({ rowIdx: selectedRowIdx, colIdx: selectedColIdx, value: e.key });
+      }
+    },
+    [editingCell, selectedRowIdx, selectedColIdx, activityRows, visibleColIds, enterEdit],
+  );
+
+  // When triggerNewRow increments, optimistically insert a row and focus the title input
+  // immediately — no network round-trip before the UI responds.
+  useEffect(() => {
+    if (!triggerNewRow || triggerNewRow === prevTriggerNewRow.current) return;
+    prevTriggerNewRow.current = triggerNewRow;
+    const today = new Date().toISOString().slice(0, 10);
+    const startAt = `${today}T00:00:00Z`;
+    const now = new Date().toISOString();
+    const tempId = `optimistic_${Date.now()}`;
+    const optimisticActivity: ApiActivity = {
+      id: tempId,
+      timelineId,
+      title: 'New Activity',
+      startAt,
+      endAt: startAt,
+      allDay: false,
+      createdBy: user?.id ?? '',
+      createdAt: now,
+      updatedAt: now,
+      description: null,
+      notes: null,
+      icon: null,
+      color: null,
+      statusId: null,
+      parentActivityId: null,
+      percentComplete: null,
+      location: null,
+      url: null,
+      archivedAt: null,
+      assignedMemberIds: [],
+      tagIds: [],
+    };
+    queryClient.setQueriesData<ApiActivity[]>(
+      { queryKey: ['timelines', timelineId, 'activities'] },
+      (old) => (old ? [...old, optimisticActivity] : [optimisticActivity]),
+    );
+    pendingEditActivityId.current = tempId;
+    create.mutate(
+      { title: 'New Activity', startAt, endAt: startAt, _tempId: tempId },
+      {
+        onSuccess: (created) => {
+          if (pendingTitleAfterCreate.current !== null) {
+            const queued = pendingTitleAfterCreate.current;
+            pendingTitleAfterCreate.current = null;
+            if (queued && queued !== 'New Activity') {
+              update.mutate({ activityId: created.id, patch: { title: queued } });
+            }
+          }
+        },
+        onError: () => {
+          queryClient.setQueriesData<ApiActivity[]>(
+            { queryKey: ['timelines', timelineId, 'activities'] },
+            (old) => (old ? old.filter(a => a.id !== tempId) : []),
+          );
+          // Discard any queued title so it can't leak into the next create.
+          pendingTitleAfterCreate.current = null;
+          setEditingCell(null);
+        },
+      },
+    );
+  }, [triggerNewRow]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // After an activity (including an optimistic one) appears in activityRows, enter title-edit mode on it.
+  useEffect(() => {
+    if (!pendingEditActivityId.current) return;
+    const rowIdx = activityRows.findIndex(r => r.activity.id === pendingEditActivityId.current);
+    if (rowIdx < 0) return;
+    pendingEditActivityId.current = null;
+    setSelectedRowIdx(rowIdx);
+    const titleColIdx = visibleColIds.indexOf('title');
+    if (titleColIdx >= 0) {
+      setEditingCell({ rowIdx, colIdx: titleColIdx, value: 'New Activity' });
+    }
+  }, [activityRows, visibleColIds]);
+
+  // ── Color-by resolution ────────────────────────────────────────────────────
+
+  const getRowAccentColor = useCallback(
+    (activity: ApiActivity): string | null => {
+      if (colorBy === 'activity') return resolveColorHex(activity.color ?? null);
+      if (colorBy === 'member') {
+        const firstId = (activity.assignedMemberIds ?? [])[0];
+        if (!firstId) return null;
+        const m = memberById.get(firstId);
+        return resolveColorHex(m?.color ?? null);
+      }
+      if (colorBy === 'status') {
+        if (!activity.statusId) return null;
+        const s = statusById.get(activity.statusId);
+        return resolveColorHex(s?.color ?? null);
+      }
+      return null;
+    },
+    [colorBy, memberById, statusById],
+  );
+
+  // ── Picker state — all rendered as portals to escape table overflow ──────
+
+  const [statusPickerFor, setStatusPickerFor] = useState<string | null>(null);
+  const [statusPickerPos, setStatusPickerPos] = useState<{ top: number; left: number } | null>(null);
+  const closeStatusPicker = useCallback(() => {
+    setStatusPickerFor(null);
+    setStatusPickerPos(null);
+  }, []);
+
+  const [assigneePickerFor, setAssigneePickerFor] = useState<string | null>(null);
+  const [assigneePickerPos, setAssigneePickerPos] = useState<{ top: number; left: number } | null>(null);
+  const closeAssigneePicker = useCallback(() => {
+    setAssigneePickerFor(null);
+    setAssigneePickerPos(null);
+  }, []);
+
+  const [tagPickerFor, setTagPickerFor] = useState<string | null>(null);
+  const [tagPickerPos, setTagPickerPos] = useState<{ top: number; left: number } | null>(null);
+  const closeTagPicker = useCallback(() => {
+    setTagPickerFor(null);
+    setTagPickerPos(null);
+  }, []);
+
+  const [parentPickerFor, setParentPickerFor] = useState<string | null>(null);
+  const [parentPickerPos, setParentPickerPos] = useState<{ top: number; left: number } | null>(null);
+  const closeParentPicker = useCallback(() => {
+    setParentPickerFor(null);
+    setParentPickerPos(null);
+  }, []);
+
+  const [identityPickerFor, setIdentityPickerFor] = useState<string | null>(null);
+  const [identityPickerPos, setIdentityPickerPos] = useState<{ top: number; left: number } | null>(null);
+  const identityPickerRef = useRef<HTMLDivElement>(null);
+  const closeIdentityPicker = useCallback(() => {
+    setIdentityPickerFor(null);
+    setIdentityPickerPos(null);
+  }, []);
+
+  // Click-outside closes the identity picker
+  useEffect(() => {
+    if (!identityPickerFor) return;
+    function handler(e: MouseEvent) {
+      if (identityPickerRef.current && !identityPickerRef.current.contains(e.target as Node)) {
+        closeIdentityPicker();
+      }
+    }
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [identityPickerFor, closeIdentityPicker]);
+
+  // Multi-select state for row checkboxes
+  const [selectedActivityIds, setSelectedActivityIds] = useState<Set<string>>(new Set());
+  const [hoveredRowId, setHoveredRowId] = useState<string | null>(null);
+
+  // Toast notification
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showToast = useCallback((msg: string) => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast(msg);
+    toastTimer.current = setTimeout(() => setToast(null), 2600);
+  }, []);
+
+  // Right-click context menu
+  const [contextMenuFor, setContextMenuFor] = useState<string | null>(null);
+  const [contextMenuPos, setContextMenuPos] = useState<{ top: number; left: number } | null>(null);
+  const closeContextMenu = useCallback(() => {
+    setContextMenuFor(null);
+    setContextMenuPos(null);
+  }, []);
+
+  // Holds the ID of a newly created activity (or optimistic temp ID) waiting to enter title-edit mode
+  const pendingEditActivityId = useRef<string | null>(null);
+  // Guards against re-firing triggerNewRow on re-renders
+  const prevTriggerNewRow = useRef<number>(0);
+  // Title typed while the row is still optimistic — flushed to the server once the real ID arrives
+  const pendingTitleAfterCreate = useRef<string | null>(null);
+
+  // ── Multi-select delete / archive ─────────────────────────────────────────
+
+  const handleDeleteSelected = useCallback(() => {
+    const ids = Array.from(selectedActivityIds);
+    for (const id of ids) {
+      deleteAct.mutate(id);
+    }
+    setSelectedActivityIds(new Set());
+    showToast(`${ids.length} ${ids.length === 1 ? 'activity' : 'activities'} deleted`);
+  }, [selectedActivityIds, deleteAct, showToast]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleArchiveSelected = useCallback(() => {
+    const ids = Array.from(selectedActivityIds);
+    for (const id of ids) {
+      archiveAct.mutate(id);
+    }
+    setSelectedActivityIds(new Set());
+    showToast(`${ids.length} ${ids.length === 1 ? 'activity' : 'activities'} archived`);
+  }, [selectedActivityIds, archiveAct, showToast]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── DnD column reorder ─────────────────────────────────────────────────────
+
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
+
+  function handleDragEnd(event: DragEndEvent) {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    setColumnOrder(prev => {
+      const oldIdx = prev.indexOf(String(active.id));
+      const newIdx = prev.indexOf(String(over.id));
+      if (oldIdx === -1 || newIdx === -1) return prev;
+      // Pinned columns can't be reordered past each other
+      const pinnedIds = ['colorBar', 'identity', 'title'];
+      if (pinnedIds.includes(String(active.id)) || pinnedIds.includes(String(over.id))) return prev;
+      const next = arrayMove(prev, oldIdx, newIdx);
+      if (prefsApplied.current) debouncedSaveCols(columnVisibility, next, columnSizing);
+      return next;
+    });
+  }
+
+  // ── Render ─────────────────────────────────────────────────────────────────
+
+  const rowH = density === 'compact' ? 32 : 48;
+
+  const visibleHeaders = table.getHeaderGroups()[0]?.headers ?? [];
+
+  // Build a map from colId → left offset for sticky pinning
+  const pinnedLeft = useMemo(() => {
+    let left = 0;
+    const offsets: Record<string, number> = {};
+    for (const h of visibleHeaders) {
+      if (h.column.getIsPinned() === 'left') {
+        offsets[h.id] = left;
+        left += h.getSize();
+      }
+    }
+    return offsets;
+  }, [visibleHeaders]);
+
+  const tableWidth = visibleHeaders.reduce((acc, h) => acc + h.getSize(), 0);
+
+  // Status picker activity (for the portal)
+  const statusPickerActivity = statusPickerFor ? activityById.get(statusPickerFor) : null;
+
+  return (
+    <div
+      ref={containerRef}
+      tabIndex={0}
+      onKeyDown={handleKeyDown}
+      style={{
+        flex: 1,
+        overflow: 'auto',
+        outline: 'none',
+        background: 'var(--background)',
+        position: 'relative',
+      }}
+      onClick={e => {
+        if ((e.target as HTMLElement) === containerRef.current) {
+          setSelectedRowIdx(null);
+          setEditingCell(null);
+          onSelectActivity?.(null);
+        }
+      }}
+    >
+      {/* Selection action bar — appears above the table when rows are checked */}
+      {selectedActivityIds.size > 0 && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: '0 12px',
+            height: 36,
+            background: 'var(--card)',
+            borderBottom: '1px solid var(--border)',
+            flexShrink: 0,
+            position: 'sticky',
+            top: 0,
+            zIndex: 10,
+          }}
+        >
+          <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>
+            {selectedActivityIds.size} selected
+          </span>
+          <button
+            onClick={handleArchiveSelected}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 4,
+              padding: '3px 10px', fontSize: 12, cursor: 'pointer',
+              background: 'var(--card)', color: 'var(--foreground)',
+              border: '1px solid var(--border)', borderRadius: 4, fontFamily: 'var(--font-sans)',
+            }}
+          >
+            <Archive size={12} />
+            Archive
+          </button>
+          <button
+            onClick={handleDeleteSelected}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 4,
+              padding: '3px 10px', fontSize: 12, cursor: 'pointer',
+              background: 'var(--destructive)', color: 'var(--destructive-foreground)',
+              border: 'none', borderRadius: 4, fontFamily: 'var(--font-sans)',
+            }}
+          >
+            <Trash2 size={12} />
+            Delete
+          </button>
+          <button
+            onClick={() => setSelectedActivityIds(new Set())}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 4,
+              padding: '3px 10px', fontSize: 12, cursor: 'pointer',
+              background: 'none', color: 'var(--foreground)',
+              border: '1px solid var(--border)', borderRadius: 4, fontFamily: 'var(--font-sans)',
+            }}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {/* DndContext must be outside <table> — its accessibility <div> is invalid inside <thead>. */}
+      <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
+      <table
+        style={{
+          width: tableWidth,
+          minWidth: '100%',
+          borderCollapse: 'separate',
+          borderSpacing: 0,
+          tableLayout: 'fixed',
+        }}
+      >
+        {/* Column sizing */}
+        <colgroup>
+          {visibleHeaders.map(h => (
+            <col key={h.id} style={{ width: h.getSize() }} />
+          ))}
+        </colgroup>
+
+        {/* Header */}
+        <thead>
+          <SortableContext
+            items={visibleHeaders.map(h => h.id)}
+            strategy={horizontalListSortingStrategy}
+          >
+            <tr style={{ height: 36 }}>
+              {visibleHeaders.map(header => {
+                  const colId = header.id;
+                  const isPinned = header.column.getIsPinned() === 'left';
+                  const sortState = sorting[0];
+                  const sortDir = sortState?.id === colId ? (sortState.desc ? 'desc' : 'asc') : false;
+                  const meta = COL_CATALOG.find(c => c.id === colId);
+
+                  if (colId === 'colorBar') {
+                    const allChecked = activityRows.length > 0 &&
+                      activityRows.every(r => selectedActivityIds.has(r.activity.id));
+                    const someChecked = !allChecked &&
+                      activityRows.some(r => selectedActivityIds.has(r.activity.id));
+                    return (
+                      <th
+                        key={colId}
+                        style={{
+                          width: 18,
+                          position: 'sticky',
+                          left: pinnedLeft[colId] ?? 0,
+                          top: 0,
+                          zIndex: 4, // below TopBar's stacking context (z-index:10) so dropdowns show above headers
+                          background: 'var(--card)',
+                          borderBottom: '2px solid var(--border)',
+                          padding: 0,
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'stretch', height: '100%' }}>
+                          <div style={{ width: 4, flexShrink: 0 }} />
+                          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                            <input
+                              type="checkbox"
+                              checked={allChecked}
+                              ref={el => { if (el) el.indeterminate = someChecked; }}
+                              onChange={() => {
+                                if (allChecked || someChecked) {
+                                  setSelectedActivityIds(new Set());
+                                } else {
+                                  setSelectedActivityIds(new Set(activityRows.map(r => r.activity.id)));
+                                }
+                              }}
+                              style={{ cursor: 'pointer', width: 13, height: 13 }}
+                              title="Select all"
+                            />
+                          </div>
+                        </div>
+                      </th>
+                    );
+                  }
+
+                  return (
+                    <SortableColHeader
+                      key={colId}
+                      colId={colId}
+                      style={{
+                        width: header.getSize(),
+                        left: isPinned ? pinnedLeft[colId] : undefined,
+                        position: 'sticky',
+                        zIndex: isPinned ? 4 : 3, // below TopBar's z-index:10 stacking context
+                        boxShadow: isPinned ? '2px 0 4px rgba(0,0,0,0.06)' : undefined,
+                      }}
+                      sortDir={meta?.editType !== 'none' ? sortDir : false}
+                      onSort={meta?.editType !== 'none' ? () => {
+                        setSorting(prev => {
+                          if (prev[0]?.id !== colId) return [{ id: colId, desc: false }];
+                          if (!prev[0].desc) return [{ id: colId, desc: true }];
+                          return [];
+                        });
+                      } : undefined}
+                      resizeHandler={colId !== 'identity' ? (header.getResizeHandler() as unknown as (e: React.MouseEvent | React.TouchEvent) => void) : undefined}
+                      isResizing={header.column.getIsResizing()}
+                    >
+                      {header.column.columnDef.header as string}
+                    </SortableColHeader>
+                  );
+                })}
+              </tr>
+            </SortableContext>
+        </thead>
+
+        {/* Body */}
+        <tbody>
+          {displayRows.length === 0 && (
+            <tr>
+              <td
+                colSpan={visibleHeaders.length}
+                style={{
+                  textAlign: 'center',
+                  padding: '48px 0',
+                  color: 'var(--muted-foreground)',
+                  fontSize: 13,
+                }}
+              >
+                No activities to show.
+              </td>
+            </tr>
+          )}
+
+          {displayRows.map((row, displayIdx) => {
+            // ── Group header row ─────────────────────────────────────────────
+            if (row.kind === 'group') {
+              const collapsed = collapsedGroups.has(row.key);
+              return (
+                <tr key={`group-${row.key}`}>
+                  <td
+                    colSpan={visibleHeaders.length}
+                    style={{
+                      padding: '4px 8px',
+                      background: 'var(--muted)',
+                      borderBottom: '1px solid var(--border)',
+                      borderTop: displayIdx > 0 ? '1px solid var(--border)' : undefined,
+                      fontSize: 11,
+                      fontWeight: 600,
+                      color: 'var(--muted-foreground)',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.05em',
+                      cursor: 'pointer',
+                      userSelect: 'none',
+                    }}
+                    onClick={() => toggleGroup(row.key)}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                      {row.memberColors && row.memberColors.length > 0 && (
+                        <div style={{ display: 'flex', flexShrink: 0 }}>
+                          {row.memberColors.map((c, i) => (
+                            <div
+                              key={i}
+                              style={{
+                                width: 9,
+                                height: 9,
+                                borderRadius: '50%',
+                                background: c,
+                                marginLeft: i === 0 ? 0 : -3,
+                                outline: '1.5px solid var(--muted)',
+                              }}
+                            />
+                          ))}
+                        </div>
+                      )}
+                      {row.label}
+                      <span style={{ fontWeight: 400, opacity: 0.6 }}>({row.count})</span>
+                    </div>
+                  </td>
+                </tr>
+              );
+            }
+
+            // ── Activity row ─────────────────────────────────────────────────
+            const { activity, depth, hasChildren, groupKey } = row;
+            const actRowIdx = activityRows.indexOf(row);
+            const isSelected = actRowIdx === selectedRowIdx;
+            const isDetailOpen = activity.id === selectedActivityId;
+            const isMatch = debouncedQuery && matchedIds.includes(activity.id);
+            const isActiveMatch = activity.id === activeMatchId;
+            const isDimmed = debouncedQuery && matchedIds.length > 0 && !isMatch;
+
+            const rowStyle: React.CSSProperties = {
+              height: rowH,
+              opacity: isDimmed ? 0.3 : 1,
+              background: isDetailOpen
+                ? 'var(--muted)'
+                : isSelected
+                ? 'color-mix(in srgb, var(--primary) 8%, var(--background))'
+                : 'transparent',
+              cursor: 'default',
+              outline: isActiveMatch
+                ? '2px solid #f59e0b'
+                : isMatch
+                ? '1px solid rgba(245,158,11,0.6)'
+                : undefined,
+              transition: 'background 0.1s ease, opacity 0.15s ease',
+            };
+
+            return (
+              <tr
+                key={activity.id}
+                ref={isActiveMatch ? el => { (activeRowRef as React.MutableRefObject<HTMLTableRowElement | null>).current = el } : undefined}
+                style={rowStyle}
+                onMouseEnter={() => setHoveredRowId(activity.id)}
+                onMouseLeave={() => setHoveredRowId(null)}
+                onClick={e => {
+                  e.stopPropagation();
+                  setSelectedRowIdx(actRowIdx);
+                  onSelectActivity?.(activity.id);
+                  // intentionally no onSelectApiActivity — edits happen inline
+                }}
+                onContextMenu={e => {
+                  e.preventDefault();
+                  setContextMenuFor(activity.id);
+                  setContextMenuPos({ top: e.clientY, left: e.clientX });
+                }}
+              >
+                {visibleHeaders.map((header, colIdx) => {
+                  const colId = header.id;
+                  const isPinned = header.column.getIsPinned() === 'left';
+                  const isCellSelected = isSelected && colIdx === selectedColIdx;
+                  const isEditing = editingCell?.rowIdx === actRowIdx && editingCell.colIdx === colIdx;
+                  const meta = COL_CATALOG.find(c => c.id === colId)!;
+
+                  const cellStyle: React.CSSProperties = {
+                    width: header.getSize(),
+                    maxWidth: header.getSize(),
+                    padding: '0 8px',
+                    borderBottom: '1px solid color-mix(in srgb, var(--border) 60%, transparent)',
+                    fontSize: 12,
+                    color: 'var(--foreground)',
+                    overflow: 'hidden',
+                    whiteSpace: 'nowrap',
+                    textOverflow: 'ellipsis',
+                    position: isPinned ? 'sticky' : undefined,
+                    left: isPinned ? pinnedLeft[colId] : undefined,
+                    zIndex: isPinned ? 2 : undefined,
+                    background: isPinned
+                      ? (isDetailOpen ? 'var(--muted)' : isSelected ? 'color-mix(in srgb, var(--primary) 8%, var(--background))' : 'var(--background)')
+                      : undefined,
+                    boxShadow: isPinned ? '2px 0 4px rgba(0,0,0,0.06)' : undefined,
+                    outline: isCellSelected && !isEditing ? '2px solid var(--primary)' : undefined,
+                    outlineOffset: '-2px',
+                    verticalAlign: 'middle',
+                    cursor: (meta.editType === 'text' || meta.editType === 'date' || meta.editType === 'number')
+                      ? 'text'
+                      : (meta.editType !== 'none' ? 'pointer' : 'default'),
+                  };
+
+                  // ── Cell content ──────────────────────────────────────────
+
+                  // Editing mode — inline input
+                  if (isEditing && meta.editType !== 'none' && meta.editType !== 'status') {
+                    return (
+                      <td key={colId} style={{ ...cellStyle, padding: 0, overflow: 'visible' }}>
+                        <input
+                          ref={editInputRef}
+                          type={meta.editType === 'date' ? 'date' : meta.editType === 'number' ? 'number' : 'text'}
+                          min={meta.editType === 'number' ? 0 : undefined}
+                          max={meta.editType === 'number' ? 100 : undefined}
+                          value={editingCell.value}
+                          onChange={e => setEditingCell(prev => prev ? { ...prev, value: e.target.value } : prev)}
+                          onKeyDown={e => {
+                            e.stopPropagation();
+                            if (e.key === 'Escape') { cancelEdit(); e.preventDefault(); }
+                            else if (e.key === 'Enter') { commitAndMove('down'); e.preventDefault(); }
+                            else if (e.key === 'Tab') { commitAndMove(e.shiftKey ? 'left' : 'right'); e.preventDefault(); }
+                          }}
+                          onBlur={() => {
+                            commitEdit(editingCell.rowIdx, visibleColIds[editingCell.colIdx], editingCell.value);
+                            setEditingCell(null);
+                          }}
+                          style={{
+                            width: '100%',
+                            height: rowH,
+                            padding: '0 8px',
+                            background: 'var(--background)',
+                            border: 'none',
+                            outline: '2px solid var(--primary)',
+                            outlineOffset: '-2px',
+                            fontSize: 12,
+                            color: 'var(--foreground)',
+                            fontFamily: 'var(--font-sans)',
+                          }}
+                          onClick={e => e.stopPropagation()}
+                        />
+                      </td>
+                    );
+                  }
+
+                  // Color bar + row checkbox — 32px pinned cell
+                  if (colId === 'colorBar') {
+                    const isRowChecked = selectedActivityIds.has(activity.id);
+                    const showCb = isRowChecked || selectedActivityIds.size > 0 || hoveredRowId === activity.id;
+                    return (
+                      <td
+                        key={colId}
+                        style={{
+                          width: 18,
+                          maxWidth: 18,
+                          padding: 0,
+                          borderBottom: '1px solid color-mix(in srgb, var(--border) 60%, transparent)',
+                          position: 'sticky',
+                          left: pinnedLeft[colId] ?? 0,
+                          zIndex: 2, // pinned body cell — below header z-index (4)
+                          background: isDetailOpen
+                              ? 'var(--muted)'
+                              : isSelected
+                              ? 'color-mix(in srgb, var(--primary) 8%, var(--background))'
+                              : 'var(--background)',
+                          cursor: 'default',
+                        }}
+                        onClick={e => {
+                          e.stopPropagation();
+                          setSelectedActivityIds(prev => {
+                            const next = new Set(prev);
+                            if (next.has(activity.id)) next.delete(activity.id);
+                            else next.add(activity.id);
+                            return next;
+                          });
+                        }}
+                      >
+                        <div style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          height: rowH,
+                          opacity: showCb ? 1 : 0,
+                          transition: 'opacity 0.1s',
+                        }}>
+                          <input
+                            type="checkbox"
+                            checked={isRowChecked}
+                            onChange={() => {}}
+                            onClick={e => e.stopPropagation()}
+                            style={{ cursor: 'pointer', width: 13, height: 13, pointerEvents: 'none' }}
+                          />
+                        </div>
+                      </td>
+                    );
+                  }
+
+                  // Identity cell — shows badge; click opens identity picker portal
+                  if (colId === 'identity') {
+                    return (
+                      <td
+                        key={colId}
+                        style={{ ...cellStyle, cursor: 'pointer' }}
+                        onClick={e => {
+                          e.stopPropagation();
+                          setSelectedRowIdx(actRowIdx);
+                          onSelectActivity?.(activity.id);
+                          if (identityPickerFor === activity.id) {
+                            closeIdentityPicker();
+                          } else {
+                            closeStatusPicker(); closeAssigneePicker(); closeTagPicker(); closeParentPicker();
+                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                            setIdentityPickerFor(activity.id);
+                            setIdentityPickerPos(popoverPos(rect, 240, 320));
+                          }
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                          <Badge
+                            identity={{
+                              color: getRowAccentColor(activity) ?? resolveColorHex(activity.color ?? null) ?? '#288C9B',
+                              icon: activity.icon ?? '__name_2__',
+                            }}
+                            name={activity.title}
+                            shape="square"
+                            size={28}
+                          />
+                        </div>
+                      </td>
+                    );
+                  }
+
+                  // Status cell — click to open picker (portal, escapes scroll overflow)
+                  if (colId === 'status') {
+                    const status = activity.statusId ? statusById.get(activity.statusId) : null;
+                    return (
+                      <td
+                        key={colId}
+                        style={{ ...cellStyle, cursor: 'pointer' }}
+                        onClick={e => {
+                          e.stopPropagation();
+                          setSelectedRowIdx(actRowIdx);
+                          onSelectActivity?.(activity.id);
+                          if (statusPickerFor === activity.id) {
+                            closeStatusPicker();
+                          } else {
+                            closeAssigneePicker(); closeTagPicker(); closeParentPicker(); closeIdentityPicker();
+                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                            setStatusPickerFor(activity.id);
+                            setStatusPickerPos(popoverPos(rect, 160, 220));
+                          }
+                        }}
+                      >
+                        {status ? (
+                          <span
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: 5,
+                              padding: '2px 8px',
+                              borderRadius: 4,
+                              fontSize: 11,
+                              fontWeight: 500,
+                              background: `color-mix(in srgb, ${resolveColorHex(status.color ?? null) ?? '#888'} 15%, transparent)`,
+                              color: resolveColorHex(status.color ?? null) ?? 'var(--foreground)',
+                              border: `1px solid ${resolveColorHex(status.color ?? null) ?? '#888'}40`,
+                            }}
+                          >
+                            <span
+                              style={{
+                                width: 7,
+                                height: 7,
+                                borderRadius: '50%',
+                                background: resolveColorHex(status.color ?? null) ?? '#888',
+                                flexShrink: 0,
+                              }}
+                            />
+                            {status.name}
+                          </span>
+                        ) : (
+                          <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>—</span>
+                        )}
+                      </td>
+                    );
+                  }
+
+                  // Assignees cell — overlapping badges; click opens picker
+                  if (colId === 'assignees') {
+                    const ids = activity.assignedMemberIds ?? [];
+                    return (
+                      <td key={colId} style={cellStyle} onClick={e => {
+                        e.stopPropagation();
+                        setSelectedRowIdx(actRowIdx);
+                        onSelectActivity?.(activity.id);
+                        if (assigneePickerFor === activity.id) {
+                          closeAssigneePicker();
+                        } else {
+                          closeStatusPicker(); closeTagPicker(); closeParentPicker(); closeIdentityPicker();
+                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                          setAssigneePickerFor(activity.id);
+                          setAssigneePickerPos(popoverPos(rect, 180, 240));
+                        }
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', overflow: 'hidden' }}>
+                          {ids.slice(0, 4).map((mid, i) => {
+                            const m = memberById.get(mid);
+                            if (!m) return null;
+                            return (
+                              <div key={mid} style={{ marginLeft: i === 0 ? 0 : -6 }} title={m.displayName}>
+                                <Badge
+                                  identity={{ color: resolveColorHex(m.color ?? null) ?? '#288C9B', icon: m.icon ?? '__name_2__' }}
+                                  name={m.displayName}
+                                  shape="circle"
+                                  size={22}
+                                />
+                              </div>
+                            );
+                          })}
+                          {ids.length > 4 && (
+                            <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginLeft: 4 }}>+{ids.length - 4}</span>
+                          )}
+                          {ids.length === 0 && (
+                            <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>—</span>
+                          )}
+                        </div>
+                      </td>
+                    );
+                  }
+
+                  // Tags cell — click opens tag picker
+                  if (colId === 'tags') {
+                    const tagList = (activity.tagIds ?? [])
+                      .map(tid => tags.find(t => t.id === tid))
+                      .filter(Boolean) as Tag[];
+                    return (
+                      <td key={colId} style={cellStyle} onClick={e => {
+                        e.stopPropagation();
+                        setSelectedRowIdx(actRowIdx);
+                        onSelectActivity?.(activity.id);
+                        if (tagPickerFor === activity.id) {
+                          closeTagPicker();
+                        } else {
+                          closeStatusPicker(); closeAssigneePicker(); closeParentPicker(); closeIdentityPicker();
+                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                          setTagPickerFor(activity.id);
+                          setTagPickerPos(popoverPos(rect, 220, 300));
+                        }
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden', flexWrap: 'nowrap' }}>
+                          {tagList.slice(0, 3).map(t => (
+                            <span
+                              key={t.id}
+                              style={{
+                                padding: '1px 6px',
+                                borderRadius: 4,
+                                fontSize: 10,
+                                background: resolveColorHex(t.color ?? null)
+                                  ? `color-mix(in srgb, ${resolveColorHex(t.color ?? null)} 18%, transparent)`
+                                  : 'var(--muted)',
+                                color: resolveColorHex(t.color ?? null) ?? 'var(--foreground)',
+                                border: `1px solid ${resolveColorHex(t.color ?? null) ?? 'var(--border)'}40`,
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {t.name}
+                            </span>
+                          ))}
+                          {tagList.length > 3 && (
+                            <span style={{ fontSize: 10, color: 'var(--muted-foreground)' }}>+{tagList.length - 3}</span>
+                          )}
+                          {tagList.length === 0 && (
+                            <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>—</span>
+                          )}
+                        </div>
+                      </td>
+                    );
+                  }
+
+                  // Progress cell
+                  if (colId === 'progress') {
+                    const pct = activity.percentComplete ?? 0;
+                    return (
+                      <td key={colId} style={cellStyle} onClick={e => {
+                          e.stopPropagation();
+                          setSelectedRowIdx(actRowIdx);
+                          onSelectActivity?.(activity.id);
+                          enterEdit(actRowIdx, colIdx);
+                        }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <div
+                            style={{
+                              flex: 1,
+                              height: 4,
+                              background: 'var(--border)',
+                              borderRadius: 2,
+                              overflow: 'hidden',
+                            }}
+                          >
+                            <div
+                              style={{
+                                height: '100%',
+                                width: `${pct}%`,
+                                background: 'var(--primary)',
+                                borderRadius: 2,
+                                transition: 'width 0.2s',
+                              }}
+                            />
+                          </div>
+                          <span style={{ fontSize: 11, color: 'var(--muted-foreground)', flexShrink: 0 }}>
+                            {pct}%
+                          </span>
+                        </div>
+                      </td>
+                    );
+                  }
+
+                  // Parent cell — click opens parent picker
+                  if (colId === 'parent') {
+                    const parent = activity.parentActivityId ? activityById.get(activity.parentActivityId) : null;
+                    return (
+                      <td key={colId} style={cellStyle} onClick={e => {
+                        e.stopPropagation();
+                        setSelectedRowIdx(actRowIdx);
+                        onSelectActivity?.(activity.id);
+                        if (parentPickerFor === activity.id) {
+                          closeParentPicker();
+                        } else {
+                          closeStatusPicker(); closeAssigneePicker(); closeTagPicker(); closeIdentityPicker();
+                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                          setParentPickerFor(activity.id);
+                          setParentPickerPos(popoverPos(rect, 220, 280));
+                        }
+                      }}>
+                        <span style={{ color: parent ? 'var(--foreground)' : 'var(--muted-foreground)' }}>
+                          {parent ? parent.title : '—'}
+                        </span>
+                      </td>
+                    );
+                  }
+
+                  // Duration cell
+                  if (colId === 'duration') {
+                    return (
+                      <td key={colId} style={cellStyle}>
+                        <span style={{ color: 'var(--muted-foreground)' }}>
+                          {formatDuration(activity.startAt, activity.endAt)}
+                        </span>
+                      </td>
+                    );
+                  }
+
+                  // Date cells — single click to edit
+                  if (colId === 'startAt' || colId === 'endAt') {
+                    const iso = colId === 'startAt' ? activity.startAt : activity.endAt;
+                    return (
+                      <td
+                        key={colId}
+                        style={cellStyle}
+                        onClick={e => {
+                          e.stopPropagation();
+                          setSelectedRowIdx(actRowIdx);
+                          onSelectActivity?.(activity.id);
+                          enterEdit(actRowIdx, colIdx);
+                        }}
+                      >
+                        <span style={{ color: iso ? 'var(--foreground)' : 'var(--muted-foreground)' }}>
+                          {formatActivityDate(iso)}
+                        </span>
+                      </td>
+                    );
+                  }
+
+                  // Created/Updated cells
+                  if (colId === 'createdAt' || colId === 'updatedAt') {
+                    const iso = colId === 'createdAt' ? activity.createdAt : activity.updatedAt;
+                    return (
+                      <td key={colId} style={cellStyle}>
+                        <span style={{ color: 'var(--muted-foreground)' }}>
+                          {formatTimestamp(iso)}
+                        </span>
+                      </td>
+                    );
+                  }
+
+                  // Text cells (title, description, location, url, notes)
+                  let textVal = '';
+                  if (colId === 'title') textVal = activity.title;
+                  else if (colId === 'description') textVal = activity.description ?? '';
+                  else if (colId === 'location') textVal = activity.location ?? '';
+                  else if (colId === 'url') textVal = activity.url ?? '';
+                  else if (colId === 'notes') textVal = (activity as ApiActivity & { notes?: string | null }).notes ?? '';
+
+                  return (
+                    <td
+                      key={colId}
+                      style={{ ...cellStyle, fontWeight: colId === 'title' ? 500 : 400 }}
+                      onClick={e => {
+                        e.stopPropagation();
+                        setSelectedRowIdx(actRowIdx);
+                        onSelectActivity?.(activity.id);
+                        if (meta.editable && meta.editType === 'text') enterEdit(actRowIdx, colIdx);
+                      }}
+                    >
+                      {colId === 'title' && groupBy === 'parent' ? (
+                        // Parent-group mode: show indent + collapse toggle
+                        <span style={{ display: 'flex', alignItems: 'center', gap: 4, paddingLeft: depth * 16 }}>
+                          {hasChildren ? (
+                            <span
+                              onClick={e => { e.stopPropagation(); toggleGroup(groupKey); }}
+                              style={{ cursor: 'pointer', flexShrink: 0, color: 'var(--muted-foreground)', display: 'flex', alignItems: 'center' }}
+                            >
+                              {collapsedGroups.has(groupKey) ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                            </span>
+                          ) : depth > 0 ? (
+                            <span style={{ width: 13, flexShrink: 0 }} />
+                          ) : null}
+                          <span title={textVal} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+                            {textVal || '—'}
+                          </span>
+                        </span>
+                      ) : (
+                        <span
+                          title={textVal}
+                          style={{
+                            display: 'block',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            color: textVal ? 'var(--foreground)' : 'var(--muted-foreground)',
+                          }}
+                        >
+                          {textVal || '—'}
+                        </span>
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      </DndContext>
+
+      {/* Status picker portal */}
+      {statusPickerFor && statusPickerPos && statusPickerActivity &&
+        createPortal(
+          <StatusPicker
+            value={statusPickerActivity.statusId}
+            statuses={timelineStatuses}
+            onChange={statusId => {
+              update.mutate({ activityId: statusPickerFor, patch: { statusId } });
+              closeStatusPicker();
+            }}
+            onClose={closeStatusPicker}
+            positionStyle={{ position: 'fixed', top: statusPickerPos.top, left: statusPickerPos.left }}
+          />,
+          document.body,
+        )
+      }
+
+      {/* Assignee picker portal */}
+      {assigneePickerFor && assigneePickerPos &&
+        createPortal(
+          <AssigneePicker
+            members={members}
+            selectedIds={activityById.get(assigneePickerFor)?.assignedMemberIds ?? []}
+            onToggle={memberId => {
+              const activity = activityById.get(assigneePickerFor);
+              if (!activity) return;
+              const current = activity.assignedMemberIds ?? [];
+              const next = current.includes(memberId)
+                ? current.filter(id => id !== memberId)
+                : [...current, memberId];
+              update.mutate({ activityId: assigneePickerFor, patch: { assignedMemberIds: next } });
+            }}
+            onClose={closeAssigneePicker}
+            positionStyle={{ position: 'fixed', top: assigneePickerPos.top, left: assigneePickerPos.left }}
+          />,
+          document.body,
+        )
+      }
+
+      {/* Tag picker portal */}
+      {tagPickerFor && tagPickerPos &&
+        createPortal(
+          <TagPicker
+            teamId={teamId}
+            tags={tags}
+            selectedTagIds={(activityById.get(tagPickerFor)?.tagIds as string[] | undefined) ?? []}
+            onChange={ids => {
+              update.mutate({ activityId: tagPickerFor, patch: { tagIds: ids } as Partial<ApiActivity> });
+            }}
+            onClose={closeTagPicker}
+            positionStyle={{ position: 'fixed', top: tagPickerPos.top, left: tagPickerPos.left }}
+          />,
+          document.body,
+        )
+      }
+
+      {/* Parent picker portal */}
+      {parentPickerFor && parentPickerPos &&
+        createPortal(
+          <ParentPicker
+            activities={rawActivities.filter(a => a.id !== parentPickerFor)}
+            value={activityById.get(parentPickerFor)?.parentActivityId}
+            onChange={id => {
+              update.mutate({ activityId: parentPickerFor, patch: { parentActivityId: id } as Partial<ApiActivity> });
+              closeParentPicker();
+            }}
+            onClose={closeParentPicker}
+            positionStyle={{ position: 'fixed', top: parentPickerPos.top, left: parentPickerPos.left }}
+          />,
+          document.body,
+        )
+      }
+
+      {/* Identity picker portal */}
+      {identityPickerFor && identityPickerPos && (() => {
+        const identityActivity = activityById.get(identityPickerFor);
+        if (!identityActivity) return null;
+        return createPortal(
+          <div
+            ref={identityPickerRef}
+            style={{
+              position: 'fixed',
+              top: identityPickerPos.top,
+              left: identityPickerPos.left,
+              zIndex: 9999,
+              boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
+              borderRadius: 10,
+              border: '1px solid var(--border)',
+              overflow: 'hidden',
+            }}
+          >
+            <IdentityPicker
+              identity={{
+                color: resolveColorHex(identityActivity.color ?? null) ?? '#288C9B',
+                icon: identityActivity.icon ?? '__name_2__',
+              }}
+              name={identityActivity.title}
+              shape="square"
+              onChange={(next: Identity) => {
+                update.mutate({ activityId: identityPickerFor, patch: { color: next.color, icon: next.icon } });
+              }}
+            />
+          </div>,
+          document.body,
+        );
+      })()}
+
+      {/* Row context menu portal */}
+      {contextMenuFor && contextMenuPos && createPortal(
+        <ContextMenu
+          pos={contextMenuPos}
+          onArchive={() => {
+            archiveAct.mutate(contextMenuFor, {
+              onSuccess: () => showToast('Activity archived'),
+            });
+            closeContextMenu();
+          }}
+          onDelete={() => {
+            deleteAct.mutate(contextMenuFor, {
+              onSuccess: () => showToast('Activity deleted'),
+            });
+            closeContextMenu();
+            if (contextMenuFor === selectedActivityId) onSelectActivity?.(null);
+          }}
+          onClose={closeContextMenu}
+        />,
+        document.body,
+      )}
+
+      {/* Toast notification */}
+      {toast && (
+        <div
+          style={{
+            position: 'fixed',
+            bottom: 20,
+            right: 20,
+            zIndex: 9999,
+            background: 'var(--card)',
+            border: '1px solid var(--border)',
+            borderRadius: 8,
+            padding: '8px 14px',
+            fontSize: 12,
+            color: 'var(--foreground)',
+            boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            pointerEvents: 'none',
+          }}
+        >
+          <Check size={13} strokeWidth={2.5} style={{ color: 'var(--primary)', flexShrink: 0 }} />
+          {toast}
+        </div>
+      )}
+    </div>
+  );
+}
 ````
 
 ## File: packages/web/src/components/shared/activityPanelFields.tsx
@@ -43214,294 +46171,6 @@ func dateOnly(t time.Time) time.Time {
 }
 ````
 
-## File: packages/api/internal/importer/importer.go
-````go
-// Package importer parses CSV/xlsx uploads into validated, resolved activity
-// rows for the Phase 15 tabular import. The contract is "liberal parse, strict
-// write, everything visible": messy-but-unambiguous input is accepted, every
-// interpretation the parser makes surfaces as a per-cell warning, and rows
-// that cannot be made valid are excluded (row-scoped errors, never
-// file-scoped). The package is pure — it never touches the database; callers
-// supply name-to-ID Lookups and write the Resolved payloads themselves.
-package importer
-
-import (
-	"errors"
-	"sort"
-	"strings"
-	"time"
-)
-
-// Size caps for uploaded files. Generous for the target market (small/medium
-// teams); they exist to protect the synchronous request path.
-const (
-	MaxFileBytes = 2 << 20 // 2 MB
-	MaxRows      = 2000    // data rows, excluding the header
-)
-
-// Issue levels. A cell parses ok (no issue recorded), with interpretation
-// (warning — written as stated), or not at all (error — row excluded).
-const (
-	LevelWarning = "warning"
-	LevelError   = "error"
-)
-
-// Row statuses, the roll-up of a row's issue levels.
-const (
-	RowOK      = "ok"
-	RowWarning = "warning"
-	RowError   = "error"
-)
-
-// Field names for the import mapping, matching the camelCase JSON field names
-// used across the API.
-const (
-	FieldTitle       = "title"
-	FieldStart       = "start"
-	FieldEnd         = "end"
-	FieldDescription = "description"
-	FieldStatus      = "status"
-	FieldAssignees   = "assignees"
-	FieldTags        = "tags"
-	FieldParent      = "parent"
-	FieldProgress    = "progress"
-	FieldLocation    = "location"
-	FieldURL         = "url"
-)
-
-// validFields is the set of assignable mapping targets.
-var validFields = map[string]bool{
-	FieldTitle: true, FieldStart: true, FieldEnd: true, FieldDescription: true,
-	FieldStatus: true, FieldAssignees: true, FieldTags: true, FieldParent: true,
-	FieldProgress: true, FieldLocation: true, FieldURL: true,
-}
-
-// FileError is a structural, file-scoped failure (unsupported type, over the
-// caps, no mappable Title column, …). Handlers translate it to a 400; row
-// content problems never produce a FileError.
-type FileError struct {
-	Message string
-}
-
-func (e *FileError) Error() string { return e.Message }
-
-// IsFileError reports whether err is a file-scoped import error.
-func IsFileError(err error) bool {
-	var fe *FileError
-	return errors.As(err, &fe)
-}
-
-// Options are the caller's import settings, decoded from the request's
-// `options` multipart part.
-type Options struct {
-	// DryRun selects the preview pass; false commits.
-	DryRun bool `json:"dryRun"`
-	// Mapping maps file column headers to field names. When nil the server
-	// auto-maps; when set it is authoritative (columns absent from it are
-	// ignored with a warning).
-	Mapping map[string]string `json:"mapping,omitempty"`
-	// DateOrder ("mdy" | "dmy") disambiguates numeric dates only when the
-	// file itself stays ambiguous column-wide. Defaults to "mdy".
-	DateOrder string `json:"dateOrder,omitempty"`
-	// CreateMissingTags opts in to creating unknown tag names instead of
-	// warn-and-skip.
-	CreateMissingTags bool `json:"createMissingTags,omitempty"`
-}
-
-// Lookups carries the target timeline/team's name-to-ID resolution data.
-// All keys are normalized with NormalizeName.
-type Lookups struct {
-	// Statuses maps a normalized status name to its ID on the target timeline.
-	Statuses map[string]string
-	// MembersByName maps a normalized display name to member IDs; more than
-	// one ID means the name is ambiguous ("use email").
-	MembersByName map[string][]string
-	// MembersByEmail maps a normalized email to a member ID.
-	MembersByEmail map[string]string
-	// Tags maps a normalized tag name to its ID.
-	Tags map[string]string
-	// ActivitiesByTitle maps a normalized title to existing activity IDs on
-	// the target timeline, for Parent resolution.
-	ActivitiesByTitle map[string][]string
-	// ExistingKeys holds DuplicateKey values for every existing activity, for
-	// "possible duplicate" warnings.
-	ExistingKeys map[string]bool
-}
-
-// NormalizeName canonicalizes a name for matching: trim, collapse internal
-// whitespace, casefold.
-func NormalizeName(s string) string {
-	return strings.ToLower(strings.Join(strings.Fields(s), " "))
-}
-
-// DuplicateKey builds the identity key used for possible-duplicate detection:
-// normalized title + start + end (ISO dates).
-func DuplicateKey(title, startISO, endISO string) string {
-	return NormalizeName(title) + "\x00" + startISO + "\x00" + endISO
-}
-
-// Issue is one disclosed parser decision or failure, scoped to a field when
-// Field is non-empty.
-type Issue struct {
-	Level   string `json:"level"`
-	Field   string `json:"field,omitempty"`
-	Message string `json:"message"`
-}
-
-// PreviewActivity is the resolved, display-oriented projection of a row for
-// the preview table. Names are shown (not IDs) because the preview's job is
-// to let a human ratify the parser's interpretations.
-type PreviewActivity struct {
-	Title       string   `json:"title"`
-	Start       string   `json:"start,omitempty"`
-	End         string   `json:"end,omitempty"`
-	Description string   `json:"description,omitempty"`
-	Status      string   `json:"status,omitempty"`
-	Assignees   []string `json:"assignees,omitempty"`
-	Tags        []string `json:"tags,omitempty"`
-	Parent      string   `json:"parent,omitempty"`
-	Progress    *int     `json:"progress,omitempty"`
-	Location    string   `json:"location,omitempty"`
-	URL         string   `json:"url,omitempty"`
-}
-
-// Resolved is the validated write payload for one accepted row. It is never
-// serialized; the commit pass in the handler turns it into repository writes.
-type Resolved struct {
-	Title            string
-	Start            time.Time
-	End              time.Time
-	Description      *string
-	StatusID         *string
-	AssigneeIDs      []string
-	TagIDs           []string
-	MissingTags      []string // tag names to create when CreateMissingTags
-	ParentRowIndex   int      // index into Result.Rows; -1 = none or existing
-	ParentActivityID *string  // existing activity, when ParentRowIndex is -1
-	ParentRaw        string   // the Parent cell text, for the resolution pass
-	Progress         *int
-	Location         *string
-	URL              *string
-}
-
-// RowResult is the outcome for one source row.
-type RowResult struct {
-	// Line is the 1-based source line / sheet row, for spreadsheet
-	// cross-reference.
-	Line     int              `json:"line"`
-	Status   string           `json:"status"`
-	Activity *PreviewActivity `json:"activity,omitempty"`
-	Issues   []Issue          `json:"issues"`
-	// CreatedID is filled on the commit pass for written rows.
-	CreatedID string    `json:"createdId,omitempty"`
-	Resolved  *Resolved `json:"-"`
-}
-
-// Summary is the roll-up shown in the preview strip. Created is zero on the
-// dry-run pass.
-type Summary struct {
-	Total    int `json:"total"`
-	OK       int `json:"ok"`
-	Warnings int `json:"warnings"`
-	Errors   int `json:"errors"`
-	Created  int `json:"created"`
-}
-
-// UnknownNames lists the distinct unresolvable names encountered, in first-seen
-// spelling. Tags drives the "Create N missing tags" checkbox label.
-type UnknownNames struct {
-	Statuses  []string `json:"statuses"`
-	Assignees []string `json:"assignees"`
-	Tags      []string `json:"tags"`
-}
-
-// Result is the full outcome of one parse+validate pass — the response body
-// for both the dry-run and (with CreatedID/Created filled) the commit pass.
-type Result struct {
-	// Mapping is the mapping actually used: every file column header mapped
-	// to a field name, or "" when the column was ignored.
-	Mapping      map[string]string `json:"mapping"`
-	Summary      Summary           `json:"summary"`
-	UnknownNames UnknownNames      `json:"unknownNames"`
-	// FileIssues are file-level warnings (encoding fallback, ignored sheets,
-	// ignored columns) that belong to no single row.
-	FileIssues []Issue     `json:"fileIssues"`
-	Rows       []RowResult `json:"rows"`
-}
-
-// Run parses, maps, and validates an uploaded file against the target
-// timeline's lookups. It returns a *FileError for structural failures and a
-// complete Result otherwise. Run never writes anything — the commit pass
-// re-runs it on byte-identical input and writes the Resolved payloads.
-func Run(data []byte, filename string, opts Options, lk Lookups) (*Result, error) {
-	if len(data) == 0 {
-		return nil, &FileError{Message: "file is empty"}
-	}
-	if len(data) > MaxFileBytes {
-		return nil, &FileError{Message: "file exceeds the 2 MB limit"}
-	}
-
-	pf, err := parseFile(data, filename)
-	if err != nil {
-		return nil, err
-	}
-	if len(pf.rows) > MaxRows {
-		return nil, &FileError{Message: "file exceeds the 2,000 row limit"}
-	}
-
-	mapping, fileIssues, err := buildMapping(pf.headers, opts.Mapping)
-	if err != nil {
-		return nil, err
-	}
-	fileIssues = append(pf.issues, fileIssues...)
-
-	res := resolveRows(pf, mapping, opts, lk)
-	res.Mapping = mappingByHeader(pf.headers, mapping)
-	res.FileIssues = fileIssues
-	return res, nil
-}
-
-// AcceptedOrder returns the indices of importable rows (ok and warning —
-// error rows are excluded) ordered so every in-file parent precedes its
-// children, satisfying the parent_activity_id foreign key during the commit
-// transaction. Cycles were already broken by the resolver, so the walk
-// terminates.
-func AcceptedOrder(rows []RowResult) []int {
-	order := make([]int, 0, len(rows))
-	visited := make(map[int]bool, len(rows))
-	var visit func(i int)
-	visit = func(i int) {
-		if visited[i] || rows[i].Resolved == nil || rows[i].Status == RowError {
-			return
-		}
-		visited[i] = true
-		if p := rows[i].Resolved.ParentRowIndex; p >= 0 {
-			visit(p)
-		}
-		order = append(order, i)
-	}
-	for i := range rows {
-		visit(i)
-	}
-	return order
-}
-
-// sortedUnique returns the distinct values in sorted order, so preview
-// output is deterministic across runs.
-func sortedUnique(values []string) []string {
-	seen := make(map[string]bool, len(values))
-	out := make([]string, 0, len(values))
-	for _, v := range values {
-		if !seen[v] {
-			seen[v] = true
-			out = append(out, v)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-````
-
 ## File: packages/api/internal/importer/lookups.go
 ````go
 package importer
@@ -47126,2952 +49795,1877 @@ export default function GanttView({
 }
 ````
 
-## File: packages/web/src/components/kanban/KanbanCard.tsx
+## File: packages/web/src/components/import/importFields.ts
 ````typescript
 /**
- * KanbanCard — a single draggable activity card.
+ * Field vocabulary + result-shape helpers for the bulk-import wizard.
  *
- * Renders the card accent border (driven by colorBy), title, and the
- * configured optional fields. Uses @dnd-kit useDraggable for drag support.
+ * The field names mirror the server's mapping contract (ImportOptions.mapping
+ * accepts: title, start, end, description, status, assignees, tags, parent,
+ * progress, location, url). The wizard drives its mapping dropdowns and its
+ * conditional steps off these helpers rather than re-deriving server rules.
  */
 
-import { useDraggable } from '@dnd-kit/core';
-import { Calendar, GitBranch, ChevronDown, ChevronRight } from 'lucide-react';
-import { formatActivityDate } from '@/components/list/ListView';
-import { resolveColorHex } from '@/components/identity/identity-constants';
-import { Badge } from '@/components/identity/Badge';
+import type { ImportResult } from '@/hooks/useImport'
+
+export interface ImportField {
+  value: string
+  label: string
+}
+
+/** Every mappable draba field, in template column order. */
+export const IMPORT_FIELDS: ImportField[] = [
+  { value: 'title', label: 'Title' },
+  { value: 'start', label: 'Start date' },
+  { value: 'end', label: 'End date' },
+  { value: 'description', label: 'Description' },
+  { value: 'status', label: 'Status' },
+  { value: 'assignees', label: 'Assignees' },
+  { value: 'tags', label: 'Tags' },
+  { value: 'parent', label: 'Parent' },
+  { value: 'progress', label: 'Progress' },
+  { value: 'location', label: 'Location' },
+  { value: 'url', label: 'URL' },
+]
+
+/**
+ * True when auto-mapping left file columns unmapped ("" in the mapping the
+ * server actually used) — the signal to show the map-columns step instead of
+ * skipping straight to preview.
+ */
+export function needsMappingStep(result: ImportResult): boolean {
+  return Object.values(result.mapping).some(field => field === '')
+}
+
+// The server discloses an option-decided (not file-proven) date order with
+// exactly these per-cell warning texts (importer/dates.go); their presence is
+// the only signal that the file stayed ambiguous and the dateOrder option
+// actually mattered.
+const AMBIGUOUS_DATE_RE = / read as (month-day-year|day-month-year)$/
+
+/** True when the file's numeric dates stayed ambiguous and dateOrder decided. */
+export function hasAmbiguousDates(result: ImportResult): boolean {
+  // `?? []` guards servers built before the 15.2 nil-slice fix, which marshal
+  // an empty issue list as JSON null despite the schema's required array.
+  return result.rows.some(row =>
+    (row.issues ?? []).some(issue => AMBIGUOUS_DATE_RE.test(issue.message)),
+  )
+}
+
+/** Rows the commit pass will write: ok + warning (errors are excluded). */
+export function importableCount(result: ImportResult): number {
+  return result.summary.ok + result.summary.warnings
+}
+````
+
+## File: packages/web/src/components/import/ImportMappingStep.tsx
+````typescript
+/**
+ * ImportMappingStep — the wizard's conditional map-columns step.
+ *
+ * One row per file column: the column header, a sample of what the server
+ * mapped it to, and a field dropdown (or "Don't import"). A field already
+ * claimed by another column is disabled — two columns on one field is a
+ * server-side file error, so the UI simply prevents it. The date-order
+ * question renders here only when the file's numeric dates stayed ambiguous
+ * column-wide (see importFields.hasAmbiguousDates).
+ */
+
+import { useState } from 'react'
+import { IMPORT_FIELDS } from './importFields'
+
+export interface ImportMappingStepProps {
+  /** Effective mapping — file column → field name, '' = ignored. */
+  mapping: Record<string, string>
+  /** Called with the full updated mapping whenever one dropdown changes. */
+  onMappingChange: (mapping: Record<string, string>) => void
+  /** Whether to show the ambiguous-date-order question. */
+  showDateOrder: boolean
+  dateOrder: 'mdy' | 'dmy'
+  onDateOrderChange: (order: 'mdy' | 'dmy') => void
+}
+
+export default function ImportMappingStep({
+  mapping,
+  onMappingChange,
+  showDateOrder,
+  dateOrder,
+  onDateOrderChange,
+}: ImportMappingStepProps) {
+  // The server returns the mapping as a JSON object whose keys arrive in
+  // alphabetical order (Go map marshaling), not file order. Sort unmapped
+  // columns — the ones needing attention — to the top, and freeze the order
+  // for this mount so rows don't jump around as the user assigns fields.
+  const [columns] = useState(() =>
+    Object.keys(mapping).sort((a, b) => {
+      const rank = (c: string) => (mapping[c] === '' ? 0 : 1)
+      return rank(a) - rank(b) || a.localeCompare(b)
+    }),
+  )
+  const used = new Set(Object.values(mapping).filter(v => v !== ''))
+
+  const handleChange = (column: string, field: string) => {
+    onMappingChange({ ...mapping, [column]: field })
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="text-[12.5px] leading-[1.5] text-muted-foreground">
+        Match each file column to a draba field. Columns set to
+        {' '}<span className="font-semibold text-foreground">Don't import</span> are skipped.
+      </div>
+
+      <div className="overflow-hidden rounded-[var(--radius-lg)] border border-border">
+        {columns.map((column, i) => {
+          const value = mapping[column]
+          return (
+            <div
+              key={column}
+              className={`flex items-center gap-3 px-3 py-2 ${i > 0 ? 'border-t border-border' : ''} ${value === '' ? 'bg-muted/50' : ''}`}
+            >
+              <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] text-foreground" title={column}>
+                {column}
+              </span>
+              <span className="shrink-0 text-[12px] text-muted-foreground">→</span>
+              <select
+                aria-label={`Field for column ${column}`}
+                value={value}
+                onChange={e => handleChange(column, e.target.value)}
+                className="h-8 w-[180px] shrink-0 rounded-[var(--radius-md)] border border-input bg-background px-2 text-[13px] text-foreground"
+              >
+                <option value="">Don't import</option>
+                {IMPORT_FIELDS.map(f => (
+                  <option
+                    key={f.value}
+                    value={f.value}
+                    disabled={used.has(f.value) && value !== f.value}
+                  >
+                    {f.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )
+        })}
+      </div>
+
+      {showDateOrder && (
+        <div>
+          <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">
+            Date order
+          </div>
+          <div className="mb-2 text-[12.5px] leading-[1.5] text-muted-foreground">
+            Dates like <span className="font-mono">3/5/26</span> are ambiguous in this file — which order are they in?
+          </div>
+          <div className="flex overflow-hidden rounded-[var(--radius-lg)] border border-border">
+            <DateOrderOption
+              label="Month / Day / Year"
+              desc="3/5/26 = March 5, 2026"
+              selected={dateOrder === 'mdy'}
+              onSelect={() => onDateOrderChange('mdy')}
+            />
+            <div className="w-px shrink-0 bg-border" />
+            <DateOrderOption
+              label="Day / Month / Year"
+              desc="3/5/26 = May 3, 2026"
+              selected={dateOrder === 'dmy'}
+              onSelect={() => onDateOrderChange('dmy')}
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function DateOrderOption({ label, desc, selected, onSelect }: {
+  label: string
+  desc: string
+  selected: boolean
+  onSelect: () => void
+}) {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={selected}
+      onClick={onSelect}
+      className={`flex flex-1 flex-col items-start px-3 py-2.5 text-left transition-colors ${selected ? 'bg-[hsl(188_59%_38%/0.09)]' : 'bg-transparent hover:bg-muted'}`}
+    >
+      <span className="text-[13px] font-semibold text-foreground">{label}</span>
+      <span className="text-[11.5px] text-muted-foreground">{desc}</span>
+    </button>
+  )
+}
+````
+
+## File: packages/web/src/components/import/ImportPreviewStep.tsx
+````typescript
+/**
+ * ImportPreviewStep — the wizard's mandatory preview: the disclosure surface
+ * for every interpretation the parser made.
+ *
+ * Renders the summary strip ("42 ready · 5 with warnings · 3 errors"), the
+ * file-level issues, the "Create N missing tags" opt-in (re-runs the dry-run
+ * upstream), All/Warnings/Errors filter chips, and the row table with source
+ * line numbers, status icons, resolved fields, and expandable per-cell
+ * messages.
+ */
+
+import { useState } from 'react'
+import { Check, AlertTriangle, XCircle, ChevronRight, Info } from 'lucide-react'
+import { cn } from '@/lib/utils'
+import type { ImportResult, ImportRowResult } from '@/hooks/useImport'
+
+export type RowFilter = 'all' | 'warnings' | 'errors'
+
+export interface ImportPreviewStepProps {
+  result: ImportResult
+  createMissingTags: boolean
+  /** Toggling re-runs the dry-run with the new option. */
+  onCreateMissingTagsChange: (create: boolean) => void
+  /** True while a dry-run re-run is in flight (mapping/tag option changed). */
+  revalidating: boolean
+}
+
+const STATUS_ICON = {
+  ok: { Icon: Check, className: 'text-success' },
+  warning: { Icon: AlertTriangle, className: 'text-warning' },
+  error: { Icon: XCircle, className: 'text-destructive' },
+} as const
+
+export default function ImportPreviewStep({
+  result,
+  createMissingTags,
+  onCreateMissingTagsChange,
+  revalidating,
+}: ImportPreviewStepProps) {
+  const [filter, setFilter] = useState<RowFilter>('all')
+  const { summary, rows, unknownNames } = result
+  // Servers built before the 15.2 nil-slice fix marshal an empty issue list
+  // as JSON null despite the schema's required array — guard rather than crash.
+  const fileIssues = result.fileIssues ?? []
+
+  const visibleRows = rows.filter(r =>
+    filter === 'all' ? true : filter === 'warnings' ? r.status === 'warning' : r.status === 'error',
+  )
+
+  return (
+    <div className={cn('flex min-h-0 flex-1 flex-col gap-3', revalidating && 'pointer-events-none opacity-60')}>
+      {/* Summary strip */}
+      <div className="shrink-0 rounded-[var(--radius-lg)] bg-muted px-3 py-[9px] text-[12.5px] text-foreground">
+        <span className="font-semibold">{summary.ok} ready</span>
+        {' · '}
+        <span className={summary.warnings > 0 ? 'font-semibold text-warning' : ''}>{summary.warnings} with warnings</span>
+        {' · '}
+        <span className={summary.errors > 0 ? 'font-semibold text-destructive' : ''}>{summary.errors} errors</span>
+        {summary.errors > 0 && <span className="text-muted-foreground"> — errors won't be imported</span>}
+      </div>
+
+      {/* File-level issues (encoding fallback, ignored sheets/columns) */}
+      {fileIssues.length > 0 && (
+        <div className="shrink-0 rounded-[var(--radius-md)] bg-[color-mix(in_srgb,var(--warning)_10%,transparent)] px-3 py-2">
+          {fileIssues.map((issue, i) => (
+            <div key={i} className="flex items-start gap-1.5 py-0.5 text-[12px] text-foreground">
+              <Info size={13} strokeWidth={2} className="mt-0.5 shrink-0 text-warning" />
+              {issue.message}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Missing-tags opt-in */}
+      {unknownNames.tags.length > 0 && (
+        <label className="flex shrink-0 cursor-pointer items-start gap-2 rounded-[var(--radius-md)] border border-border px-3 py-2 text-[12.5px]">
+          <input
+            type="checkbox"
+            checked={createMissingTags}
+            onChange={e => onCreateMissingTagsChange(e.target.checked)}
+            className="mt-0.5 accent-[var(--primary)]"
+          />
+          <span className="text-foreground">
+            Create {unknownNames.tags.length} missing {unknownNames.tags.length === 1 ? 'tag' : 'tags'}:{' '}
+            <span className="text-muted-foreground">{unknownNames.tags.join(', ')}</span>
+          </span>
+        </label>
+      )}
+
+      {/* Filter chips */}
+      <div role="tablist" aria-label="Row filter" className="flex shrink-0 gap-1.5">
+        <FilterChip label={`All (${summary.total})`} selected={filter === 'all'} onSelect={() => setFilter('all')} />
+        <FilterChip label={`Warnings (${summary.warnings})`} selected={filter === 'warnings'} onSelect={() => setFilter('warnings')} />
+        <FilterChip label={`Errors (${summary.errors})`} selected={filter === 'errors'} onSelect={() => setFilter('errors')} />
+      </div>
+
+      {/* Row table */}
+      <div className="min-h-0 flex-1 overflow-y-auto rounded-[var(--radius-lg)] border border-border">
+        {visibleRows.length === 0 ? (
+          <div className="px-3 py-6 text-center text-[12.5px] text-muted-foreground">
+            No rows match this filter.
+          </div>
+        ) : (
+          visibleRows.map(row => <PreviewRow key={row.line} row={row} />)
+        )}
+      </div>
+    </div>
+  )
+}
+
+function FilterChip({ label, selected, onSelect }: { label: string; selected: boolean; onSelect: () => void }) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={selected}
+      onClick={onSelect}
+      className={cn(
+        'rounded-full border px-3 py-1 text-[12px] transition-colors',
+        selected
+          ? 'border-primary bg-[hsl(188_59%_38%/0.1)] font-semibold text-foreground'
+          : 'border-border bg-transparent text-muted-foreground hover:bg-muted',
+      )}
+    >
+      {label}
+    </button>
+  )
+}
+
+function PreviewRow({ row }: { row: ImportRowResult }) {
+  // Rows with issues start collapsed; the chevron discloses the messages.
+  const [expanded, setExpanded] = useState(false)
+  const { Icon, className } = STATUS_ICON[row.status]
+  const a = row.activity
+  // Same pre-fix-server guard as fileIssues above.
+  const issues = row.issues ?? []
+  const hasIssues = issues.length > 0
+
+  const dateRange = a?.start
+    ? a.end && a.end !== a.start ? `${a.start} → ${a.end}` : a.start
+    : ''
+  const extras = [
+    a?.status,
+    a?.assignees?.length ? a.assignees.join(', ') : null,
+    a?.tags?.length ? a.tags.map(t => `#${t}`).join(' ') : null,
+    a?.parent ? `↳ ${a.parent}` : null,
+  ].filter(Boolean).join(' · ')
+
+  return (
+    <div className="border-b border-border last:border-b-0">
+      <button
+        type="button"
+        onClick={() => hasIssues && setExpanded(e => !e)}
+        aria-expanded={hasIssues ? expanded : undefined}
+        className={cn(
+          'flex w-full items-center gap-2 px-3 py-2 text-left',
+          hasIssues ? 'cursor-pointer hover:bg-muted' : 'cursor-default',
+        )}
+      >
+        <span className="w-9 shrink-0 font-mono text-[11px] text-muted-foreground" title="Source line">
+          {row.line}
+        </span>
+        <Icon size={14} strokeWidth={2.2} className={cn('shrink-0', className)} aria-label={row.status} />
+        <span className="min-w-0 flex-1 truncate text-[13px] text-foreground">
+          {a?.title || <span className="italic text-muted-foreground">(no title)</span>}
+        </span>
+        {dateRange && <span className="shrink-0 font-mono text-[11.5px] text-muted-foreground">{dateRange}</span>}
+        {extras && <span className="hidden max-w-[220px] shrink-0 truncate text-[11.5px] text-muted-foreground sm:inline">{extras}</span>}
+        {hasIssues && (
+          <ChevronRight
+            size={14}
+            strokeWidth={2}
+            className={cn('shrink-0 text-muted-foreground transition-transform', expanded && 'rotate-90')}
+          />
+        )}
+      </button>
+      {expanded && hasIssues && (
+        <div className="bg-muted/50 px-3 pb-2 pl-[60px]">
+          {issues.map((issue, i) => (
+            <div key={i} className="flex items-start gap-1.5 py-1 text-[12px]">
+              {issue.level === 'error'
+                ? <XCircle size={12} strokeWidth={2.2} className="mt-0.5 shrink-0 text-destructive" />
+                : <AlertTriangle size={12} strokeWidth={2.2} className="mt-0.5 shrink-0 text-warning" />}
+              <span className="text-foreground">
+                {issue.field && <span className="font-semibold">{issue.field}: </span>}
+                {issue.message}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/components/import/ImportWizard.tsx
+````typescript
+/**
+ * ImportWizard — the "Bulk import" stepped dialog (Phase 15.2).
+ *
+ * Upload → map columns (only when auto-mapping left columns unmapped, or on
+ * "Adjust mapping") → preview → commit + result. Every option change
+ * (mapping, date order, create-missing-tags) re-runs the dry-run against the
+ * stateless import endpoint, so the preview always shows exactly what a
+ * commit would write. Modeled on ExportDialog's portal shell: overlay click
+ * does not close, only Esc / the close button / Cancel do.
+ */
+
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { Upload, X, FileDown, Check, ArrowLeft, Loader2 } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
+import { ApiError } from '@/lib/api'
+import {
+  useImportPreview, useCommitImport, useImportTemplate,
+  type ImportResult, type ImportRequestOptions,
+} from '@/hooks/useImport'
+import { needsMappingStep, hasAmbiguousDates, importableCount } from './importFields'
+import ImportMappingStep from './ImportMappingStep'
+import ImportPreviewStep from './ImportPreviewStep'
+import type { components } from '@draba/shared'
+
+type Timeline = components['schemas']['Timeline']
+
+export interface ImportWizardProps {
+  teamId: string
+  /** Active (non-archived) timelines for the target picker. */
+  timelines: Timeline[]
+  /** Pre-selected target — the currently viewed timeline. */
+  activeTimelineId: string | null
+  /** Switches the dashboard to the given timeline (result step's "View timeline"). */
+  onGoToTimeline?: (timelineId: string) => void
+  onClose: () => void
+}
+
+type Step = 'upload' | 'map' | 'preview' | 'result'
+
+const STEP_TITLES: Record<Step, string> = {
+  upload: 'Upload a file',
+  map: 'Map columns',
+  preview: 'Preview import',
+  result: 'Import complete',
+}
+
+export default function ImportWizard({
+  teamId,
+  timelines,
+  activeTimelineId,
+  onGoToTimeline,
+  onClose,
+}: ImportWizardProps) {
+  const [step, setStep] = useState<Step>('upload')
+  const [timelineId, setTimelineId] = useState(activeTimelineId ?? timelines[0]?.id ?? '')
+  const [file, setFile] = useState<File | null>(null)
+  // null = let the server auto-map; set once the user edits the mapping step.
+  const [mappingOverride, setMappingOverride] = useState<Record<string, string> | null>(null)
+  const [dateOrder, setDateOrder] = useState<'mdy' | 'dmy'>('mdy')
+  const [createMissingTags, setCreateMissingTags] = useState(false)
+  const [previewResult, setPreviewResult] = useState<ImportResult | null>(null)
+  const [commitResult, setCommitResult] = useState<ImportResult | null>(null)
+  const [fileError, setFileError] = useState<string | null>(null)
+  const [dragOver, setDragOver] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const preview = useImportPreview(teamId)
+  const commit = useCommitImport(teamId)
+  const downloadTemplate = useImportTemplate()
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const buildOptions = useCallback((over?: Partial<ImportRequestOptions>): ImportRequestOptions => {
+    // Explicit mapping sends only mapped columns — per the server contract,
+    // columns absent from an explicit mapping are ignored (with a warning).
+    const explicit = mappingOverride
+      ? Object.fromEntries(Object.entries(mappingOverride).filter(([, f]) => f !== ''))
+      : null
+    return {
+      mapping: explicit,
+      dateOrder,
+      createMissingTags,
+      ...over,
+    }
+  }, [mappingOverride, dateOrder, createMissingTags])
+
+  /** Runs the dry-run and lands on the given step (or picks map/preview from the result). */
+  const runPreview = useCallback((f: File, options: ImportRequestOptions, landOn?: Step) => {
+    setFileError(null)
+    preview.mutate(
+      { timelineId, file: f, options },
+      {
+        onSuccess: result => {
+          setPreviewResult(result)
+          setStep(landOn ?? (needsMappingStep(result) ? 'map' : 'preview'))
+        },
+        onError: err => {
+          // File-scoped 400s (wrong type, too big, no Title column) send the
+          // user back to the upload step with the server's message.
+          setFileError(err instanceof ApiError ? err.message : 'Upload failed — try again.')
+          setStep('upload')
+        },
+      },
+    )
+  }, [preview, timelineId])
+
+  const handleFileChosen = (f: File) => {
+    setFile(f)
+    setMappingOverride(null)
+    setCreateMissingTags(false)
+    runPreview(f, buildOptions({ mapping: null, createMissingTags: false }))
+  }
+
+  const handleMappingChange = (mapping: Record<string, string>) => {
+    setMappingOverride(mapping)
+    if (!file) return
+    const explicit = Object.fromEntries(Object.entries(mapping).filter(([, f]) => f !== ''))
+    runPreview(file, buildOptions({ mapping: explicit }), 'map')
+  }
+
+  const handleDateOrderChange = (order: 'mdy' | 'dmy') => {
+    setDateOrder(order)
+    if (!file) return
+    runPreview(file, buildOptions({ dateOrder: order }), 'map')
+  }
+
+  const handleCreateMissingTagsChange = (create: boolean) => {
+    setCreateMissingTags(create)
+    if (!file) return
+    runPreview(file, buildOptions({ createMissingTags: create }), 'preview')
+  }
+
+  const handleCommit = () => {
+    if (!file) return
+    commit.mutate(
+      { timelineId, file, options: buildOptions() },
+      {
+        onSuccess: result => {
+          setCommitResult(result)
+          setStep('result')
+        },
+      },
+    )
+  }
+
+  const timelineName = timelines.find(t => t.id === timelineId)?.name ?? ''
+  const importable = previewResult ? importableCount(previewResult) : 0
+
+  return createPortal(
+    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]">
+      <div className="flex max-h-[88vh] w-[min(720px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]">
+        {/* Header */}
+        <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-[18px]">
+          <div className="flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[hsl(188_59%_38%/0.12)] text-primary">
+            <Upload size={19} strokeWidth={2.2} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Bulk import</h2>
+            <div className="mt-0.5 text-[12.5px] text-muted-foreground">
+              {STEP_TITLES[step]}{timelineName ? ` · ${timelineName}` : ''}
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
+          >
+            <X size={16} strokeWidth={2.2} />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-5">
+          {step === 'upload' && (
+            <div className="flex flex-col gap-4">
+              <div>
+                <label htmlFor="import-timeline" className="mb-1.5 block text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">
+                  Import into
+                </label>
+                <select
+                  id="import-timeline"
+                  value={timelineId}
+                  onChange={e => setTimelineId(e.target.value)}
+                  className="h-9 w-full rounded-[var(--radius-md)] border border-input bg-background px-2.5 text-[13px] text-foreground"
+                >
+                  {timelines.map(t => (
+                    <option key={t.id} value={t.id}>{t.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div
+                role="button"
+                tabIndex={0}
+                aria-label="Choose a file to import"
+                onClick={() => fileInputRef.current?.click()}
+                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') fileInputRef.current?.click() }}
+                onDragOver={e => { e.preventDefault(); setDragOver(true) }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={e => {
+                  e.preventDefault()
+                  setDragOver(false)
+                  const f = e.dataTransfer.files[0]
+                  if (f) handleFileChosen(f)
+                }}
+                className={cn(
+                  'flex cursor-pointer flex-col items-center gap-2 rounded-[var(--radius-lg)] border-2 border-dashed px-6 py-10 text-center transition-colors',
+                  dragOver ? 'border-primary bg-[hsl(188_59%_38%/0.06)]' : 'border-border hover:bg-muted/50',
+                )}
+              >
+                {preview.isPending
+                  ? <Loader2 size={22} strokeWidth={2} className="animate-spin text-primary" />
+                  : <Upload size={22} strokeWidth={1.8} className="text-muted-foreground" />}
+                <div className="text-[13.5px] font-semibold text-foreground">
+                  {preview.isPending ? 'Checking file…' : 'Drop a CSV or Excel file here'}
+                </div>
+                <div className="text-[12px] text-muted-foreground">or click to choose · .csv / .xlsx · up to 2 MB, 2,000 rows</div>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".csv,.xlsx"
+                  aria-label="Import file"
+                  className="hidden"
+                  onChange={e => {
+                    const f = e.target.files?.[0]
+                    if (f) handleFileChosen(f)
+                    e.target.value = '' // allow re-selecting the same file after a fix
+                  }}
+                />
+              </div>
+
+              {fileError && (
+                <div className="rounded-[var(--radius-md)] bg-[color-mix(in_srgb,var(--destructive)_10%,transparent)] px-3 py-2 text-[12.5px] text-destructive">
+                  {fileError}
+                </div>
+              )}
+
+              <div className="flex items-center gap-2 text-[12.5px] text-muted-foreground">
+                <FileDown size={14} strokeWidth={2} className="shrink-0" />
+                Need a starting point? Download the template:
+                <button type="button" onClick={() => void downloadTemplate('csv')} className="cursor-pointer border-none bg-transparent p-0 font-semibold text-primary underline">CSV</button>
+                ·
+                <button type="button" onClick={() => void downloadTemplate('xlsx')} className="cursor-pointer border-none bg-transparent p-0 font-semibold text-primary underline">Excel</button>
+              </div>
+            </div>
+          )}
+
+          {step === 'map' && previewResult && (
+            <ImportMappingStep
+              mapping={mappingOverride ?? previewResult.mapping}
+              onMappingChange={handleMappingChange}
+              showDateOrder={hasAmbiguousDates(previewResult)}
+              dateOrder={dateOrder}
+              onDateOrderChange={handleDateOrderChange}
+            />
+          )}
+
+          {step === 'preview' && previewResult && (
+            <ImportPreviewStep
+              result={previewResult}
+              createMissingTags={createMissingTags}
+              onCreateMissingTagsChange={handleCreateMissingTagsChange}
+              revalidating={preview.isPending}
+            />
+          )}
+
+          {step === 'result' && commitResult && (
+            <div className="flex flex-col items-center gap-3 py-8 text-center">
+              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--success)_14%,transparent)]">
+                <Check size={26} strokeWidth={2.4} className="text-success" />
+              </div>
+              <div className="text-[16px] font-bold text-foreground">
+                {commitResult.summary.created} {commitResult.summary.created === 1 ? 'activity' : 'activities'} imported
+              </div>
+              <div className="text-[12.5px] text-muted-foreground">
+                into {timelineName}
+                {commitResult.summary.errors > 0 && (
+                  <> · {commitResult.summary.errors} {commitResult.summary.errors === 1 ? 'row' : 'rows'} skipped (errors)</>
+                )}
+              </div>
+            </div>
+          )}
+
+          {commit.isError && step === 'preview' && (
+            <div className="mt-3 shrink-0 rounded-[var(--radius-md)] bg-[color-mix(in_srgb,var(--destructive)_10%,transparent)] px-3 py-2 text-[12.5px] text-destructive">
+              {commit.error instanceof ApiError ? commit.error.message : 'Import failed — nothing was written. Try again.'}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="flex shrink-0 items-center gap-2.5 border-t border-border px-5 py-[13px]">
+          {step === 'map' && (
+            <Button variant="ghost" onClick={() => setStep('upload')} className="gap-1.5">
+              <ArrowLeft size={14} strokeWidth={2.2} /> Back
+            </Button>
+          )}
+          {step === 'preview' && (
+            <Button variant="ghost" onClick={() => setStep('map')} className="gap-1.5">
+              <ArrowLeft size={14} strokeWidth={2.2} /> Adjust mapping
+            </Button>
+          )}
+          <div className="flex-1" />
+          {step !== 'result' && <Button variant="outline" onClick={onClose}>Cancel</Button>}
+          {step === 'map' && (
+            <Button onClick={() => setStep('preview')} disabled={preview.isPending}>
+              Continue to preview
+            </Button>
+          )}
+          {step === 'preview' && (
+            <Button
+              onClick={handleCommit}
+              disabled={importable === 0 || preview.isPending || commit.isPending}
+              className="min-w-[168px] justify-center"
+            >
+              {commit.isPending
+                ? <><Loader2 size={14} strokeWidth={2.2} className="animate-spin" /> Importing…</>
+                : `Import ${importable} ${importable === 1 ? 'activity' : 'activities'}`}
+            </Button>
+          )}
+          {step === 'result' && (
+            <>
+              {onGoToTimeline && timelineId !== activeTimelineId && (
+                <Button variant="outline" onClick={() => { onGoToTimeline(timelineId); onClose() }}>
+                  View timeline
+                </Button>
+              )}
+              <Button onClick={onClose}>Done</Button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+````
+
+## File: packages/web/src/components/kanban/KanbanBoard.tsx
+````typescript
+/**
+ * KanbanBoard — the DndContext host that owns all columns and the drag overlay.
+ *
+ * Renders columns in a horizontal scrolling row. On drag-end, derives the
+ * correct PATCH payload for the active groupBy and calls onDrop.
+ */
+
+import { DndContext, DragOverlay, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
+import type { DragEndEvent, DragStartEvent, DragOverEvent } from '@dnd-kit/core';
+import { useState } from 'react';
+import KanbanColumn from './KanbanColumn';
+import KanbanCard from './KanbanCard';
+import type { KanbanColumn as Column, KanbanCardField, KanbanGroupBy } from './kanbanColumns';
 import type { Member } from '@/types';
 import type { components } from '@draba/shared';
-import type { KanbanCardField } from './kanbanColumns';
 
 type ApiActivity = components['schemas']['Activity'];
 type Status = components['schemas']['Status'];
 type Tag = components['schemas']['Tag'];
 
+export interface DropPayload {
+  activityId: string;
+  patch: {
+    statusId?: string | null;
+    assignedMemberIds?: string[];
+    parentActivityId?: string | null;
+  };
+}
+
 interface Props {
-  activity: ApiActivity;
-  accentColor: string;
+  columns: Column[];
+  groupBy: KanbanGroupBy;
   members: Member[];
   statusById: Map<string, Status>;
   tagById: Map<string, Tag>;
-  /** Activity ID → title, used to show the parent's name when "Parent" field is on. */
-  activityTitleById?: Map<string, string>;
+  /** Per-activity resolved hex color for the card accent border. */
+  colorMap: Map<string, string>;
   cardFields: KanbanCardField[];
-  /** Fields suppressed because they duplicate the current Group by axis. */
   suppressedFields: Set<KanbanCardField>;
-  isSelected: boolean;
-  /** True when Find is active and this card doesn't match. */
-  dimmed: boolean;
-  /** True when Find is active and this card is the active match. */
-  activeMatch: boolean;
-  isDragOverlay?: boolean;
-  onClick: () => void;
-
+  selectedActivityId: string | null;
+  matchedIds: Set<string>;
+  activeMatchId: string | null;
+  hasQuery: boolean;
+  collapsedColumnIds: Set<string>;
+  onToggleCollapse: (columnId: string) => void;
+  onCardClick: (activity: ApiActivity) => void;
+  onAddInColumn: (column: Column) => void;
+  onDrop: (payload: DropPayload) => void;
+  /** Map of activity ID → ApiActivity for drag overlay lookup. */
+  activityById: Map<string, ApiActivity>;
+  /** Map of activity ID → title, for showing parent names on child cards. */
+  activityTitleById: Map<string, string>;
   // ── Hierarchy ────────────────────────────────────────────────────────────────
-  /** True when hierarchy mode is on and this card has children to show/hide. */
-  hasHierarchyChildren?: boolean;
-  /** Whether the children are currently hidden. */
-  isHierarchyCollapsed?: boolean;
-  /**
-   * Click handler for the collapse/expand chevron.
-   * Receives the mouse event so the handler can stopPropagation (prevents
-   * the card-click from also opening the detail panel).
-   */
-  onToggleHierarchy?: (e: React.MouseEvent) => void;
-  /** True when this card is nested under a parent — disables drag. */
-  isChildCard?: boolean;
-  /** When false (public share viewer), drag and clicks are inert. Defaults to true. */
+  showHierarchy: boolean;
+  childrenByParentId: Map<string, ApiActivity[]>;
+  collapsedParents: Set<string>;
+  onToggleParent: (activityId: string) => void;
+  /** When false (public share viewer), drag, drop, and clicks are inert. Defaults to true. */
   interactive?: boolean;
 }
 
-export default function KanbanCard({
-  activity,
-  accentColor,
+export default function KanbanBoard({
+  columns,
+  groupBy,
   members,
   statusById,
   tagById,
+  colorMap,
   cardFields,
   suppressedFields,
-  isSelected,
-  dimmed,
-  activeMatch,
-  isDragOverlay = false,
-  onClick,
-  hasHierarchyChildren = false,
-  isHierarchyCollapsed = false,
-  onToggleHierarchy,
-  isChildCard = false,
+  showHierarchy,
+  childrenByParentId,
+  collapsedParents,
+  onToggleParent,
+  selectedActivityId,
+  matchedIds,
+  activeMatchId,
+  hasQuery,
+  collapsedColumnIds,
+  onToggleCollapse,
+  onCardClick,
+  onAddInColumn,
+  onDrop,
+  activityById,
   activityTitleById,
   interactive = true,
 }: Props) {
-  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
-    id: activity.id,
-    data: { activityId: activity.id },
-    // Drag overlay renders separately, and child cards travel with their parent.
-    disabled: isDragOverlay || isChildCard || !interactive,
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [overColumnId, setOverColumnId] = useState<string | null>(null);
+
+  // Require a 5px drag threshold to prevent accidental drags on card clicks.
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+  );
+
+  function handleDragStart({ active }: DragStartEvent) {
+    setDraggingId(active.id as string);
+  }
+
+  function handleDragEnd({ active, over }: DragEndEvent) {
+    setDraggingId(null);
+    setOverColumnId(null);
+    if (!over) return;
+
+    const activityId = typeof active.id === 'string' ? active.id : String(active.id);
+    const columnId = typeof over.id === 'string' ? over.id : String(over.id);
+
+    const column = columns.find(c => c.id === columnId);
+    if (!column || !column.droppable || !column.dropValue) return;
+
+    // Determine if anything actually changed before issuing a PATCH.
+    const activity = activityById.get(activityId);
+    if (!activity) return;
+
+    // Skip if the card is already in this column (no-op drop).
+    const isAlreadyHere = (() => {
+      switch (groupBy) {
+        case 'status': {
+          const currentStatus = (activity as ApiActivity & { statusId?: string | null }).statusId ?? null;
+          return currentStatus === (column.dropValue.statusId ?? null);
+        }
+        case 'member': {
+          const primary = activity.assignedMemberIds?.[0] ?? null;
+          const target = column.dropValue.assignedMemberIds?.[0] ?? null;
+          return primary === target;
+        }
+        default:
+          return false;
+      }
+    })();
+
+    if (isAlreadyHere) return;
+
+    onDrop({ activityId, patch: column.dropValue });
+  }
+
+  function handleDragOver({ over }: DragOverEvent) {
+    setOverColumnId(over ? String(over.id) : null);
+  }
+
+  const draggingActivity = draggingId ? activityById.get(draggingId) : undefined;
+
+  return (
+    <DndContext
+      sensors={sensors}
+      onDragStart={handleDragStart}
+      onDragEnd={handleDragEnd}
+      onDragOver={handleDragOver}
+    >
+      <div
+        data-export-role="kanban-columns-row"
+        style={{
+          display: 'flex',
+          flexDirection: 'row',
+          gap: 12,
+          padding: '12px 16px 16px',
+          overflowX: 'auto',
+          overflowY: 'hidden',
+          height: '100%',
+          alignItems: 'flex-start',
+          boxSizing: 'border-box',
+        }}
+      >
+        {columns.map(col => (
+          <KanbanColumn
+            key={col.id}
+            column={col}
+            members={members}
+            statusById={statusById}
+            tagById={tagById}
+            colorMap={colorMap}
+            activityTitleById={activityTitleById}
+            cardFields={cardFields}
+            suppressedFields={suppressedFields}
+            showHierarchy={showHierarchy}
+            childrenByParentId={childrenByParentId}
+            collapsedParents={collapsedParents}
+            onToggleParent={onToggleParent}
+            selectedActivityId={selectedActivityId}
+            matchedIds={matchedIds}
+            activeMatchId={activeMatchId}
+            hasQuery={hasQuery}
+            isOver={overColumnId === col.id && col.droppable}
+            isCollapsed={collapsedColumnIds.has(col.id)}
+            onToggleCollapse={() => onToggleCollapse(col.id)}
+            onCardClick={onCardClick}
+            onAddClick={() => onAddInColumn(col)}
+            interactive={interactive}
+          />
+        ))}
+      </div>
+
+      {/* Drag overlay — floats above everything while dragging */}
+      <DragOverlay dropAnimation={null}>
+        {interactive && draggingActivity ? (
+          <KanbanCard
+            activity={draggingActivity}
+            accentColor={colorMap.get(draggingActivity.id) ?? '#6b7280'}
+            members={members}
+            statusById={statusById}
+            tagById={tagById}
+            cardFields={cardFields}
+            suppressedFields={suppressedFields}
+            isSelected={false}
+            dimmed={false}
+            activeMatch={false}
+            isDragOverlay
+            onClick={() => {}}
+          />
+        ) : null}
+      </DragOverlay>
+    </DndContext>
+  );
+}
+````
+
+## File: packages/web/src/components/kanban/KanbanColumn.tsx
+````typescript
+/**
+ * KanbanColumn — a single droppable column with a header, card list, and "+ Add" affordance.
+ *
+ * Uses @dnd-kit useDroppable. When the column is non-droppable (combination/none grouping),
+ * the drop-target is simply not registered and DnD events are ignored.
+ *
+ * Hierarchy: when showHierarchy is on, CardTree renders each root activity plus
+ * its descendants indented beneath it. CardTree is defined at module level (outside
+ * KanbanColumn) to give it a stable identity across re-renders — defining a component
+ * inside another component causes React to unmount/remount the subtree on every render.
+ */
+
+import { useDroppable } from '@dnd-kit/core';
+import { ChevronDown, ChevronRight, Plus } from 'lucide-react';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+import KanbanCard from './KanbanCard';
+import type { KanbanColumn as Column, KanbanCardField } from './kanbanColumns';
+import type { Member } from '@/types';
+import type { components } from '@draba/shared';
+
+type ApiActivity = components['schemas']['Activity'];
+type Status = components['schemas']['Status'];
+type Tag = components['schemas']['Tag'];
+
+// ── CardTree ──────────────────────────────────────────────────────────────────
+
+/**
+ * Renders one activity card and, when hierarchy is on, its children indented
+ * beneath it (recursively). Defined at module level so React gives it a stable
+ * component identity and doesn't unmount/remount on every KanbanColumn render.
+ */
+interface CardTreeProps {
+  activity: ApiActivity;
+  depth: number;
+  // Column rendering context
+  accentColor: string;
+  colorMap: Map<string, string>;
+  members: Member[];
+  statusById: Map<string, Status>;
+  tagById: Map<string, Tag>;
+  activityTitleById: Map<string, string>;
+  cardFields: KanbanCardField[];
+  suppressedFields: Set<KanbanCardField>;
+  selectedActivityId: string | null;
+  matchedIds: Set<string>;
+  activeMatchId: string | null;
+  hasQuery: boolean;
+  onCardClick: (activity: ApiActivity) => void;
+  // Hierarchy context
+  showHierarchy: boolean;
+  childrenByParentId: Map<string, ApiActivity[]>;
+  collapsedParents: Set<string>;
+  onToggleParent: (activityId: string) => void;
+  interactive: boolean;
+}
+
+function CardTree({
+  activity,
+  depth,
+  accentColor,
+  colorMap,
+  members,
+  statusById,
+  tagById,
+  activityTitleById,
+  cardFields,
+  suppressedFields,
+  selectedActivityId,
+  matchedIds,
+  activeMatchId,
+  hasQuery,
+  onCardClick,
+  showHierarchy,
+  childrenByParentId,
+  collapsedParents,
+  onToggleParent,
+  interactive,
+}: CardTreeProps) {
+  const children = showHierarchy ? (childrenByParentId.get(activity.id) ?? []) : [];
+  const hasChildren = children.length > 0;
+  const isCollapsed = collapsedParents.has(activity.id);
+  const indentPx = Math.min(depth, 2) * 16;
+
+  const cardTreeProps = {
+    accentColor,
+    colorMap,
+    members,
+    statusById,
+    tagById,
+    activityTitleById,
+    cardFields,
+    suppressedFields,
+    selectedActivityId,
+    matchedIds,
+    activeMatchId,
+    hasQuery,
+    onCardClick,
+    showHierarchy,
+    childrenByParentId,
+    collapsedParents,
+    onToggleParent,
+    interactive,
+  };
+
+  return (
+    <>
+      <div style={depth > 0 ? { paddingLeft: indentPx } : undefined}>
+        <KanbanCard
+          activity={activity}
+          accentColor={colorMap.get(activity.id) ?? accentColor}
+          members={members}
+          statusById={statusById}
+          tagById={tagById}
+          activityTitleById={activityTitleById}
+          cardFields={cardFields}
+          suppressedFields={suppressedFields}
+          isSelected={selectedActivityId === activity.id}
+          dimmed={hasQuery && !matchedIds.has(activity.id)}
+          activeMatch={activeMatchId === activity.id}
+          isChildCard={depth > 0}
+          hasHierarchyChildren={hasChildren}
+          isHierarchyCollapsed={isCollapsed}
+          onToggleHierarchy={() => onToggleParent(activity.id)}
+          onClick={() => onCardClick(activity)}
+          interactive={interactive}
+        />
+      </div>
+      {hasChildren && !isCollapsed && children.map(child => (
+        <CardTree
+          key={child.id}
+          activity={child}
+          depth={depth + 1}
+          {...cardTreeProps}
+        />
+      ))}
+    </>
+  );
+}
+
+interface Props {
+  column: Column;
+  members: Member[];
+  statusById: Map<string, Status>;
+  tagById: Map<string, Tag>;
+  /** Per-activity resolved hex color for card accent borders. */
+  colorMap: Map<string, string>;
+  /** Activity ID → title, for showing the parent name on child cards. */
+  activityTitleById: Map<string, string>;
+  cardFields: KanbanCardField[];
+  suppressedFields: Set<KanbanCardField>;
+  selectedActivityId: string | null;
+  matchedIds: Set<string>;
+  activeMatchId: string | null;
+  hasQuery: boolean;
+  isOver: boolean;
+  isCollapsed: boolean;
+  onToggleCollapse: () => void;
+  onCardClick: (activity: ApiActivity) => void;
+  onAddClick: () => void;
+  // ── Hierarchy ────────────────────────────────────────────────────────────────
+  showHierarchy: boolean;
+  /** Maps parentActivityId → direct child activities. */
+  childrenByParentId: Map<string, ApiActivity[]>;
+  /** Set of parent activity IDs whose children are hidden. */
+  collapsedParents: Set<string>;
+  onToggleParent: (activityId: string) => void;
+  /** When false (public share viewer), drag, drop, and clicks are inert. Defaults to true. */
+  interactive?: boolean;
+}
+
+const COLUMN_WIDTH = 260;
+const COLLAPSED_WIDTH = 40;
+
+export default function KanbanColumn({
+  column,
+  members,
+  statusById,
+  tagById,
+  colorMap,
+  activityTitleById,
+  cardFields,
+  suppressedFields,
+  selectedActivityId,
+  matchedIds,
+  activeMatchId,
+  hasQuery,
+  isOver,
+  isCollapsed,
+  onToggleCollapse,
+  onCardClick,
+  onAddClick,
+  showHierarchy,
+  childrenByParentId,
+  collapsedParents,
+  onToggleParent,
+  interactive = true,
+}: Props) {
+  const { setNodeRef, isOver: dndIsOver } = useDroppable({
+    id: column.id,
+    disabled: !column.droppable || !interactive,
+    data: { columnId: column.id },
   });
 
-  // Do NOT apply the dnd-kit transform to the original card.
-  //
-  // We use DragOverlay for the visual movement, so the overlay card floats as
-  // the user drags and the original stays in place as an invisible placeholder.
-  // Applying the transform here causes the column's overflow container to expand
-  // its scroll area as the mouse moves, producing a growing scrollbar.
-  const style: React.CSSProperties = isDragging && !isDragOverlay
-    ? { visibility: 'hidden' }   // placeholder: preserves layout space, no transform, no scrollbar growth
-    : { opacity: dimmed ? 0.3 : 1, transition: dimmed ? 'opacity 150ms' : undefined };
+  const accentColor = column.color
+    ? (resolveColorHex(column.color) ?? column.color)
+    : '#6b7280';
 
-  const showField = (f: KanbanCardField) =>
-    cardFields.includes(f) && !suppressedFields.has(f);
+  const highlighted = isOver || dndIsOver;
 
-  const status = activity.statusId ? statusById.get(activity.statusId) : undefined;
-  const statusColor = status?.color ? resolveColorHex(status.color) : undefined;
-
-  const assignedMembers = (activity.assignedMemberIds ?? [])
-    .map(id => members.find(m => m.id === id))
-    .filter((m): m is Member => Boolean(m));
-
-  const tags = (activity.tagIds ?? [])
-    .map(id => tagById.get(id))
-    .filter((t): t is Tag => Boolean(t));
-
-  const formatDate = (iso: string | null | undefined) =>
-    iso ? formatActivityDate(iso) : null;
-
-  const startLabel = formatDate(activity.startAt);
-  const endLabel   = formatDate(activity.endAt);
-  const dateLabel  = startLabel && endLabel
-    ? startLabel === endLabel ? startLabel : `${startLabel} – ${endLabel}`
-    : startLabel ?? endLabel ?? null;
-
-  const cardStyle: React.CSSProperties = {
-    ...style,
-    background: 'var(--card)',
-    border: `1px solid ${isSelected ? accentColor : activeMatch ? '#f59e0b' : 'var(--border)'}`,
-    borderLeft: `3px solid ${accentColor}`,
-    borderRadius: 6,
-    padding: '8px 10px',
-    cursor: !interactive ? 'default' : isDragOverlay ? 'grabbing' : 'pointer',
-    boxShadow: isDragOverlay
-      ? '0 8px 24px rgba(0,0,0,0.2)'
-      : isSelected
-      ? `0 0 0 2px ${accentColor}40`
-      : activeMatch
-      ? '0 0 0 2px #f59e0b80'
-      : undefined,
-    userSelect: 'none',
-    marginBottom: 6,
-    transition: 'box-shadow 100ms, border-color 100ms',
+  // Shared props forwarded to each CardTree node.
+  const treeProps = {
+    accentColor,
+    colorMap,
+    members,
+    statusById,
+    tagById,
+    activityTitleById,
+    cardFields,
+    suppressedFields,
+    selectedActivityId,
+    matchedIds,
+    activeMatchId,
+    hasQuery,
+    onCardClick,
+    showHierarchy,
+    childrenByParentId,
+    collapsedParents,
+    onToggleParent,
+    interactive,
   };
+
+  if (isCollapsed) {
+    return (
+      <div
+        style={{
+          width: COLLAPSED_WIDTH,
+          flexShrink: 0,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          background: 'var(--muted)',
+          borderRadius: 8,
+          padding: '8px 0',
+          cursor: interactive ? 'pointer' : 'default',
+          border: '1px solid var(--border)',
+          minHeight: 120,
+          gap: 8,
+        }}
+        onClick={interactive ? onToggleCollapse : undefined}
+        title={`${column.label} (${column.items.length})`}
+      >
+        <ChevronRight size={14} strokeWidth={2} style={{ color: 'var(--muted-foreground)' }} />
+        <span
+          style={{
+            fontSize: 11,
+            fontWeight: 600,
+            color: 'var(--muted-foreground)',
+            writingMode: 'vertical-rl',
+            transform: 'rotate(180deg)',
+            letterSpacing: '0.04em',
+          }}
+        >
+          {column.label}
+        </span>
+        <span
+          style={{
+            fontSize: 10,
+            color: 'var(--muted-foreground)',
+            background: 'var(--border)',
+            borderRadius: 9,
+            padding: '1px 5px',
+          }}
+        >
+          {column.items.length}
+        </span>
+      </div>
+    );
+  }
 
   return (
     <div
       ref={setNodeRef}
-      {...(interactive ? listeners : {})}
-      {...(interactive ? attributes : {})}
-      style={cardStyle}
-      onClick={interactive ? onClick : undefined}
-      role={interactive ? 'button' : undefined}
-      tabIndex={interactive ? 0 : undefined}
-      onKeyDown={interactive ? (e => { if (e.key === 'Enter' || e.key === ' ') onClick(); }) : undefined}
+      data-export-role="kanban-column"
+      style={{
+        width: COLUMN_WIDTH,
+        flexShrink: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        background: highlighted ? `${accentColor}0d` : 'var(--muted)',
+        border: `1px solid ${highlighted ? accentColor + '80' : 'var(--border)'}`,
+        borderRadius: 8,
+        transition: 'background 120ms, border-color 120ms',
+        maxHeight: '100%',
+      }}
     >
-      {/* Title row — with optional collapse chevron for hierarchy parents */}
-      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 4, marginBottom: 4 }}>
-        {hasHierarchyChildren && (
-          <button
-            onClick={interactive ? (e => { e.stopPropagation(); onToggleHierarchy?.(e); }) : undefined}
-            title={isHierarchyCollapsed ? 'Expand children' : 'Collapse children'}
-            style={{
-              flexShrink: 0,
-              marginTop: 1,
-              background: 'none',
-              border: 'none',
-              padding: 0,
-              cursor: interactive ? 'pointer' : 'default',
-              color: 'var(--muted-foreground)',
-              display: 'flex',
-              alignItems: 'center',
-            }}
-          >
-            {isHierarchyCollapsed
-              ? <ChevronRight size={13} strokeWidth={2} />
-              : <ChevronDown  size={13} strokeWidth={2} />
-            }
-          </button>
-        )}
-        <div
+      {/* Column header */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '8px 10px',
+          borderBottom: '1px solid var(--border)',
+          flexShrink: 0,
+        }}
+      >
+        {/* Accent dot */}
+        <span
+          style={{
+            width: 9,
+            height: 9,
+            borderRadius: '50%',
+            background: accentColor,
+            flexShrink: 0,
+          }}
+        />
+
+        {/* Column label */}
+        <span
           style={{
             flex: 1,
-            fontSize: 13,
-            fontWeight: 500,
+            fontSize: 12,
+            fontWeight: 600,
             color: 'var(--foreground)',
-            lineHeight: 1.4,
-            display: '-webkit-box',
-            WebkitLineClamp: 2,
-            WebkitBoxOrient: 'vertical',
             overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
           }}
         >
-          {activity.title}
-        </div>
-      </div>
+          {column.label}
+        </span>
 
-      {/* Description snippet */}
-      {showField('description') && activity.description && (
-        <div
+        {/* Count badge */}
+        <span
           style={{
             fontSize: 11,
             color: 'var(--muted-foreground)',
-            whiteSpace: 'nowrap',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            marginBottom: 4,
+            background: 'var(--border)',
+            borderRadius: 9,
+            padding: '1px 6px',
+            fontWeight: 600,
           }}
         >
-          {activity.description}
-        </div>
-      )}
+          {column.items.length}
+        </span>
 
-      {/* Status pill */}
-      {showField('status') && status && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
-          <span
+        {/* Collapse toggle — hidden in read-only public views */}
+        {interactive && (
+        <button
+          onClick={onToggleCollapse}
+          title="Collapse column"
+          style={{
+            background: 'none',
+            border: 'none',
+            cursor: 'pointer',
+            padding: 2,
+            color: 'var(--muted-foreground)',
+            display: 'flex',
+            alignItems: 'center',
+          }}
+        >
+          <ChevronDown size={13} strokeWidth={2} />
+        </button>
+        )}
+      </div>
+
+      {/* Card list — scrolls independently */}
+      <div
+        style={{
+          flex: 1,
+          overflowY: 'auto',
+          padding: '8px 8px 4px',
+          minHeight: 80,
+        }}
+      >
+        {column.items.length === 0 ? (
+          <div
             style={{
-              width: 8,
-              height: 8,
-              borderRadius: '50%',
-              background: statusColor ?? '#6b7280',
-              flexShrink: 0,
+              padding: '12px 8px',
+              fontSize: 12,
+              color: 'var(--muted-foreground)',
+              textAlign: 'center',
+              fontStyle: 'italic',
             }}
-          />
-          <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>{status.name}</span>
-        </div>
-      )}
+          >
+            No activities
+          </div>
+        ) : (
+          column.items.map(act => (
+            <CardTree
+              key={act.id}
+              activity={act}
+              depth={0}
+              {...treeProps}
+            />
+          ))
+        )}
+      </div>
 
-      {/* Date range */}
-      {showField('dateRange') && dateLabel && (
-        <div
+      {/* + Add affordance — hidden in read-only public views */}
+      {interactive && (
+      <div style={{ padding: '4px 8px 8px', flexShrink: 0 }}>
+        <button
+          onClick={onAddClick}
           style={{
             display: 'flex',
             alignItems: 'center',
             gap: 4,
-            fontSize: 11,
+            width: '100%',
+            padding: '5px 8px',
+            background: 'none',
+            border: '1px dashed var(--border)',
+            borderRadius: 6,
+            cursor: 'pointer',
+            fontSize: 12,
             color: 'var(--muted-foreground)',
-            marginBottom: 4,
+            transition: 'border-color 120ms, color 120ms',
+          }}
+          onMouseEnter={e => {
+            e.currentTarget.style.borderColor = accentColor;
+            e.currentTarget.style.color = accentColor;
+          }}
+          onMouseLeave={e => {
+            e.currentTarget.style.borderColor = 'var(--border)';
+            e.currentTarget.style.color = 'var(--muted-foreground)';
           }}
         >
-          <Calendar size={11} strokeWidth={1.6} />
-          {dateLabel}
-        </div>
-      )}
-
-      {/* Tags */}
-      {showField('tags') && tags.length > 0 && (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3, marginBottom: 4 }}>
-          {tags.slice(0, 3).map(t => (
-            <span
-              key={t.id}
-              style={{
-                fontSize: 10,
-                fontWeight: 500,
-                padding: '1px 6px',
-                borderRadius: 10,
-                background: resolveColorHex(t.color ?? null) ? `${resolveColorHex(t.color ?? null)}22` : 'var(--muted)',
-                color: resolveColorHex(t.color ?? null) ?? 'var(--muted-foreground)',
-                border: `1px solid ${resolveColorHex(t.color ?? null) ?? 'var(--border)'}44`,
-              }}
-            >
-              {t.name}
-            </span>
-          ))}
-          {tags.length > 3 && (
-            <span style={{ fontSize: 10, color: 'var(--muted-foreground)' }}>+{tags.length - 3}</span>
-          )}
-        </div>
-      )}
-
-      {/* % complete bar */}
-      {showField('percentComplete') && activity.percentComplete != null && (
-        <div style={{ marginBottom: 4 }}>
-          <div
-            style={{
-              height: 3,
-              background: 'var(--muted)',
-              borderRadius: 2,
-              overflow: 'hidden',
-            }}
-          >
-            <div
-              style={{
-                height: '100%',
-                width: `${activity.percentComplete}%`,
-                background: accentColor,
-                borderRadius: 2,
-                transition: 'width 200ms',
-              }}
-            />
-          </div>
-        </div>
-      )}
-
-      {/* Footer: parent pill + member avatars */}
-      {(showField('parent') || showField('members')) && (
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 2 }}>
-          {/* Parent badge — shows the parent activity's title */}
-          {showField('parent') && activity.parentActivityId && (
-            <span
-              style={{
-                fontSize: 10,
-                color: 'var(--muted-foreground)',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 3,
-                overflow: 'hidden',
-                flex: 1,
-              }}
-            >
-              <GitBranch size={9} strokeWidth={1.6} style={{ flexShrink: 0 }} />
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {activityTitleById?.get(activity.parentActivityId) ?? 'Parent'}
-              </span>
-            </span>
-          )}
-
-          {/* Member avatars */}
-          {showField('members') && assignedMembers.length > 0 && (
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                marginLeft: 'auto',
-              }}
-            >
-              {assignedMembers.slice(0, 3).map((m, i) => (
-                <div
-                  key={m.id}
-                  style={{
-                    marginLeft: i === 0 ? 0 : -6,
-                    zIndex: assignedMembers.length - i,
-                    outline: '2px solid var(--card)',
-                    borderRadius: '50%',
-                  }}
-                  title={m.name}
-                >
-                  <Badge
-                    identity={{ color: m.color, icon: '__name_2__' }}
-                    name={m.name}
-                    shape="circle"
-                    size={20}
-                  />
-                </div>
-              ))}
-              {assignedMembers.length > 3 && (
-                <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginLeft: 4 }}>
-                  +{assignedMembers.length - 3}
-                </span>
-              )}
-            </div>
-          )}
-        </div>
+          <Plus size={12} strokeWidth={2} />
+          Add
+        </button>
+      </div>
       )}
     </div>
   );
 }
 ````
 
-## File: packages/web/src/components/list/ListView.tsx
+## File: packages/web/src/components/kanban/KanbanToolbar.tsx
 ````typescript
 /**
- * ListView — inline-editable, curated table view of the active timeline's
- * activities.
+ * KanbanToolbar — sub-toolbar for the Kanban view.
  *
- * Uses TanStack Table v8 for column management (visibility, order, sizing,
- * pinning, sorting). Row rendering is manual to support group-by headers
- * interleaved between activity rows and to give full control over
- * keyboard selection/edit behavior.
- *
- * Integrates with FilterContext and FindContext so the same filter and find
- * query that drives the Gantt view also drives this view.
+ * Controls: Group by · Sort by · Color by · Card fields multi-select · Export/Share stubs.
+ * Follows the same visual idiom as GanttToolbar and CalendarToolbar.
  */
 
-import { createPortal } from 'react-dom';
-import {
-  useState,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useCallback,
-  useMemo,
-  KeyboardEvent,
-} from 'react';
-import {
-  useReactTable,
-  getCoreRowModel,
-  getSortedRowModel,
-  type ColumnDef,
-  type SortingState,
-  type ColumnOrderState,
-  type VisibilityState,
-  type ColumnSizingState,
-  type ColumnPinningState,
-} from '@tanstack/react-table';
-import {
-  DndContext,
-  type DragEndEvent,
-  PointerSensor,
-  useSensor,
-  useSensors,
-} from '@dnd-kit/core';
-import {
-  SortableContext,
-  horizontalListSortingStrategy,
-  useSortable,
-  arrayMove,
-} from '@dnd-kit/sortable';
-import { CSS } from '@dnd-kit/utilities';
-import { ChevronRight, ChevronDown, GripVertical, Search, Trash2, Archive, Check } from 'lucide-react';
-import { useQueryClient } from '@tanstack/react-query';
-import { useTimelineActivities, useTeamMembers, useUpdateActivity, useCreateActivity, useDeleteActivity, useArchiveActivity } from '@/hooks/useTeamActivities';
-import { usePreferenceMap, useUpsertPreference, usePreferences } from '@/hooks/usePreferences';
-import { useFilter } from '@/contexts/FilterContext';
-import { useFind } from '@/contexts/FindContext';
-import { applyActiveFilter } from '@/lib/presetFilters';
-import { matchEvents } from '@/lib/findMatcher';
-import { memberComboKey, orderedComboIds, memberComboLabel, comboSortComparator, UNASSIGNED_KEY, SEP } from '@/lib/memberGroups';
-import { resolveColorHex } from '@/components/identity/identity-constants';
-import { Badge } from '@/components/identity/Badge';
-import { IdentityPicker } from '@/components/identity/IdentityPicker';
-import type { Identity } from '@/components/identity/identity-constants';
-import TagInput from '@/components/TagInput';
-import type { components } from '@draba/shared';
-import type { Member } from '@/types';
-import type { ListGroupBy, ListSortBy, ListColorBy, ListDensity, ColumnConfig } from './ListToolbar';
-import { useAuth } from '@/contexts/AuthContext';
+import { useState, useRef, useEffect } from 'react';
+import { Download, Share2, ChevronDown, Check, Network } from 'lucide-react';
+import type { ColorBy } from '@/components/gantt/GanttToolbar';
+import type { KanbanGroupBy, KanbanSortBy, KanbanCardField } from './kanbanColumns';
+import { DEFAULT_CARD_FIELDS } from './kanbanColumns';
 
-type ApiActivity = components['schemas']['Activity'];
-type Status = components['schemas']['Status'];
-type SavedFilter = components['schemas']['SavedFilter'];
-type Tag = components['schemas']['Tag'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-
-// ── Column catalog ─────────────────────────────────────────────────────────────
-
-export interface ColMeta {
-  id: string;
-  label: string;
-  defaultVisible: boolean;
-  defaultWidth: number;
-  editable: boolean;
-  editType: 'text' | 'date' | 'status' | 'number' | 'identity' | 'assignees' | 'tags' | 'parent' | 'none';
-  /** Exclude from the columns toggle menu (e.g. fixed structural columns). */
-  noMenu?: boolean;
-}
-
-export const COL_CATALOG: ColMeta[] = [
-  { id: 'colorBar',    label: '',             defaultVisible: true,  defaultWidth: 18,  editable: false, editType: 'none', noMenu: true },
-  { id: 'identity',    label: '',             defaultVisible: true,  defaultWidth: 52,  editable: true,  editType: 'identity' },
-  { id: 'title',       label: 'Title',        defaultVisible: true,  defaultWidth: 280, editable: true,  editType: 'text' },
-  { id: 'startAt',     label: 'Start',        defaultVisible: true,  defaultWidth: 110, editable: true,  editType: 'date' },
-  { id: 'endAt',       label: 'End',          defaultVisible: true,  defaultWidth: 110, editable: true,  editType: 'date' },
-  { id: 'duration',    label: 'Duration',     defaultVisible: false, defaultWidth: 90,  editable: false, editType: 'none' },
-  { id: 'status',      label: 'Status',       defaultVisible: true,  defaultWidth: 130, editable: true,  editType: 'status' },
-  { id: 'assignees',   label: 'Assigned To',  defaultVisible: true,  defaultWidth: 140, editable: true,  editType: 'assignees' },
-  { id: 'tags',        label: 'Tags',         defaultVisible: true,  defaultWidth: 130, editable: true,  editType: 'tags' },
-  { id: 'progress',    label: 'Progress',     defaultVisible: false, defaultWidth: 90,  editable: true,  editType: 'number' },
-  { id: 'parent',      label: 'Parent',       defaultVisible: false, defaultWidth: 150, editable: true,  editType: 'parent' },
-  { id: 'description', label: 'Description',  defaultVisible: false, defaultWidth: 200, editable: true,  editType: 'text' },
-  { id: 'location',    label: 'Location',     defaultVisible: false, defaultWidth: 130, editable: true,  editType: 'text' },
-  { id: 'url',         label: 'URL',          defaultVisible: false, defaultWidth: 150, editable: true,  editType: 'text' },
-  { id: 'notes',       label: 'Notes',        defaultVisible: false, defaultWidth: 200, editable: true,  editType: 'text' },
-  { id: 'createdAt',   label: 'Created',      defaultVisible: false, defaultWidth: 110, editable: false, editType: 'none' },
-  { id: 'updatedAt',   label: 'Updated',      defaultVisible: false, defaultWidth: 110, editable: false, editType: 'none' },
-];
-
-const DEFAULT_COLUMN_ORDER = COL_CATALOG.map(c => c.id);
-const DEFAULT_VISIBILITY: VisibilityState = Object.fromEntries(
-  COL_CATALOG.map(c => [c.id, c.defaultVisible]),
-);
-const DEFAULT_WIDTHS: ColumnSizingState = Object.fromEntries(
-  COL_CATALOG.map(c => [c.id, c.defaultWidth]),
-);
-
-// ── Group-by row builder (exported for unit tests) ─────────────────────────────
-
-export type ListDisplayRow =
-  | { kind: 'group'; key: string; label: string; count: number; memberColors?: string[] }
-  | { kind: 'activity'; activity: ApiActivity; depth: number; hasChildren: boolean; groupKey: string };
-
-/** Converts a pre-sorted flat activity list into display rows for the given group-by mode. */
-export function buildListRows(
-  sortedActivities: ApiActivity[],
-  groupBy: ListGroupBy,
-  memberById: Map<string, { displayName: string; color?: string | null }>,
-  statusById: Map<string, { name: string }>,
-  timelineStatuses: Status[],
-  collapsedGroups: Set<string>,
-  memberOrder: string[] = [],
-): ListDisplayRow[] {
-  const emptyRow = (a: ApiActivity): ListDisplayRow => ({
-    kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: '',
-  });
-
-  if (groupBy === 'none') return sortedActivities.map(emptyRow);
-
-  if (groupBy === 'member') {
-    const nameById = new Map(
-      [...memberById.entries()].map(([id, m]) => [id, m.displayName]),
-    );
-
-    const buckets = new Map<string, ApiActivity[]>();
-    for (const activity of sortedActivities) {
-      const key = memberComboKey(activity.assignedMemberIds ?? []);
-      const list = buckets.get(key) ?? [];
-      list.push(activity);
-      buckets.set(key, list);
-    }
-
-    const comparator = comboSortComparator(memberOrder);
-    const sortedKeys = [...buckets.keys()].sort(comparator);
-
-    const rows: ListDisplayRow[] = [];
-    for (const key of sortedKeys) {
-      const activities = buckets.get(key)!;
-      const rawIds = key === UNASSIGNED_KEY ? [] : key.split(SEP);
-      const orderedIds = orderedComboIds(rawIds, memberOrder);
-      const label = key === UNASSIGNED_KEY ? 'Unassigned' : memberComboLabel(orderedIds, nameById);
-      const memberColors = orderedIds.map(id => {
-        const raw = memberById.get(id)?.color;
-        return resolveColorHex(raw ?? null) ?? 'var(--muted-foreground)';
-      });
-      rows.push({ kind: 'group', key, label, count: activities.length, memberColors });
-      if (!collapsedGroups.has(key)) {
-        for (const a of activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: key });
-      }
-    }
-    return rows;
-  }
-
-  if (groupBy === 'status') {
-    const groups = new Map<string, { label: string; activities: ApiActivity[] }>();
-    for (const activity of sortedActivities) {
-      const key = activity.statusId ?? '__no_status__';
-      const label = activity.statusId ? (statusById.get(activity.statusId)?.name ?? 'Unknown') : 'No status';
-      const group = groups.get(key) ?? { label, activities: [] };
-      group.activities.push(activity);
-      groups.set(key, group);
-    }
-    const rows: ListDisplayRow[] = [];
-    for (const s of timelineStatuses) {
-      const group = groups.get(s.id);
-      if (!group?.activities.length) continue;
-      rows.push({ kind: 'group', key: s.id, label: s.name, count: group.activities.length });
-      if (!collapsedGroups.has(s.id)) {
-        for (const a of group.activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: s.id });
-      }
-    }
-    const noStatus = groups.get('__no_status__');
-    if (noStatus?.activities.length) {
-      rows.push({ kind: 'group', key: '__no_status__', label: 'No status', count: noStatus.activities.length });
-      if (!collapsedGroups.has('__no_status__')) {
-        for (const a of noStatus.activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: '__no_status__' });
-      }
-    }
-    return rows;
-  }
-
-  if (groupBy === 'parent') {
-    // Tree nesting mirrors Gantt: parent rows are collapsible, children are indented.
-    // Activities whose parent is not in this view render as roots (orphan-safe).
-    const byId = new Map(sortedActivities.map(a => [a.id, a]));
-    const childrenByParent = new Map<string, ApiActivity[]>();
-    const roots: ApiActivity[] = [];
-    for (const a of sortedActivities) {
-      if (a.parentActivityId && byId.has(a.parentActivityId)) {
-        const list = childrenByParent.get(a.parentActivityId) ?? [];
-        list.push(a);
-        childrenByParent.set(a.parentActivityId, list);
-      } else {
-        roots.push(a);
-      }
-    }
-    const rows: ListDisplayRow[] = [];
-    const seen = new Set<string>();
-    const hidden = new Set<string>();
-    const markHidden = (a: ApiActivity) => {
-      if (hidden.has(a.id)) return;
-      hidden.add(a.id);
-      for (const k of childrenByParent.get(a.id) ?? []) markHidden(k);
-    };
-    const visit = (a: ApiActivity, depth: number) => {
-      if (seen.has(a.id)) return;
-      seen.add(a.id);
-      const kids = childrenByParent.get(a.id) ?? [];
-      const hasChildren = kids.length > 0;
-      rows.push({ kind: 'activity', activity: a, depth, hasChildren, groupKey: a.id });
-      if (!hasChildren) return;
-      if (collapsedGroups.has(a.id)) for (const k of kids) markHidden(k);
-      else for (const k of kids) visit(k, depth + 1);
-    };
-    for (const r of roots) visit(r, 0);
-    // Cycle-safe: any activity not yet visited (parent loop) renders at root depth
-    for (const a of sortedActivities) {
-      if (!seen.has(a.id) && !hidden.has(a.id)) visit(a, 0);
-    }
-    return rows;
-  }
-
-  return sortedActivities.map(emptyRow);
-}
-
-// ── Props ──────────────────────────────────────────────────────────────────────
+export type { KanbanGroupBy, KanbanSortBy, KanbanCardField };
 
 interface Props {
-  teamId: string;
-  timelineId: string;
-  groupBy: ListGroupBy;
-  sortBy: ListSortBy;
-  colorBy: ListColorBy;
-  density?: ListDensity;
-  timelineStatuses?: Status[];
-  savedFilters?: SavedFilter[];
-  tags?: Tag[];
-  onColumnsChange?: (configs: ColumnConfig[]) => void;
-  /** When set, the component applies the toggle and clears it on the next render. */
-  pendingColumnToggle?: { colId: string; visible: boolean; seq: number } | null;
-  onSelectActivity?: (id: string | null) => void;
-  onSelectApiActivity?: (a: ApiActivity | null) => void;
-  selectedActivityId?: string | null;
-  onMembersLoaded?: (members: Member[]) => void;
-  /** Increment to trigger inline creation of a new activity row. */
-  triggerNewRow?: number;
+  groupBy: KanbanGroupBy;
+  onGroupByChange: (g: KanbanGroupBy) => void;
+  sortBy: KanbanSortBy;
+  onSortByChange: (s: KanbanSortBy) => void;
+  colorBy: ColorBy;
+  onColorByChange: (c: ColorBy) => void;
+  cardFields: KanbanCardField[];
+  onCardFieldsChange: (fields: KanbanCardField[]) => void;
+  showHierarchy: boolean;
+  onShowHierarchyChange: (on: boolean) => void;
+  onExport?: () => void;
+  onShare?: () => void;
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────────
+const btn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0 hover:bg-muted transition-colors';
+const divider = 'w-px h-4 bg-border shrink-0';
+const label = 'text-[11px] text-muted-foreground shrink-0';
+const select = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
 
-/** Formats a genuine timestamp (createdAt, updatedAt) in the user's local timezone. */
-export function formatTimestamp(iso: string | null | undefined): string {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  return isNaN(d.getTime()) ? '—' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-}
+const ALL_CARD_FIELDS: { id: KanbanCardField; label: string }[] = [
+  { id: 'dateRange',       label: 'Date range' },
+  { id: 'status',          label: 'Status' },
+  { id: 'tags',            label: 'Tags' },
+  { id: 'members',         label: 'Assigned to' },
+  { id: 'percentComplete', label: '% Complete' },
+  { id: 'parent',          label: 'Parent' },
+  { id: 'description',     label: 'Description' },
+];
 
-/**
- * Formats an all-day activity date (startAt, endAt) in UTC so that
- * midnight-UTC dates like "2026-05-31T00:00:00Z" display as "May 31"
- * regardless of the viewer's local timezone.
- *
- * TODO: branch on allDay when timed events ship (Phase 15 calendar sync).
- */
-export function formatActivityDate(iso: string | null | undefined): string {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  return isNaN(d.getTime()) ? '—' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
-}
-
-export function formatDuration(startAt: string | null | undefined, endAt: string | null | undefined): string {
-  if (!startAt || !endAt) return '—';
-  const start = new Date(startAt);
-  const end = new Date(endAt);
-  const days = Math.round((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
-  if (days < 0) return '—';
-  if (days === 0) return '1 day';
-  return `${days + 1} days`;
-}
-
-function toDateInput(iso: string | null | undefined): string {
-  if (!iso) return '';
-  return iso.slice(0, 10);
-}
-
-// ── Draggable column header ────────────────────────────────────────────────────
-
-function SortableColHeader({ colId, children, style, onSort, sortDir, resizeHandler, isResizing }: {
-  colId: string;
-  children: React.ReactNode;
-  style?: React.CSSProperties;
-  onSort?: () => void;
-  sortDir?: 'asc' | 'desc' | false;
-  resizeHandler?: (e: React.MouseEvent | React.TouchEvent) => void;
-  isResizing?: boolean;
-}) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: colId });
-
-  return (
-    <th
-      ref={setNodeRef}
-      style={{
-        ...style,
-        transform: CSS.Transform.toString(transform),
-        transition,
-        opacity: isDragging ? 0.5 : 1,
-        position: 'sticky',
-        top: 0,
-        background: 'var(--card)',
-        borderBottom: '2px solid var(--border)',
-        userSelect: 'none',
-        whiteSpace: 'nowrap',
-        textOverflow: 'ellipsis',
-        cursor: onSort ? 'pointer' : 'default',
-        fontWeight: 600,
-        fontSize: 11,
-        color: 'var(--muted-foreground)',
-        padding: 0,
-        textTransform: 'uppercase',
-        letterSpacing: '0.05em',
-        textAlign: 'left',
-        overflow: 'visible', // needed for resize handle
-      }}
-      onClick={onSort}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '0 8px', overflow: 'hidden' }}>
-        {/* drag handle */}
-        <span
-          {...attributes}
-          {...listeners}
-          style={{ cursor: 'grab', color: 'var(--muted-foreground)', opacity: 0.4, flexShrink: 0, paddingRight: 2 }}
-          onClick={e => e.stopPropagation()}
-          title="Drag to reorder"
-        >
-          <GripVertical size={12} />
-        </span>
-        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{children}</span>
-        {sortDir === 'asc' && <span style={{ color: 'var(--primary)', flexShrink: 0, fontSize: 9, lineHeight: 1 }}>▲</span>}
-        {sortDir === 'desc' && <span style={{ color: 'var(--primary)', flexShrink: 0, fontSize: 9, lineHeight: 1 }}>▼</span>}
-      </div>
-      {/* Resize handle — absolutely positioned on right edge */}
-      {resizeHandler && (
-        <div
-          onMouseDown={resizeHandler}
-          onTouchStart={resizeHandler}
-          onClick={e => e.stopPropagation()}
-          style={{
-            position: 'absolute',
-            right: 0,
-            top: 0,
-            height: '100%',
-            width: 4,
-            cursor: 'col-resize',
-            background: isResizing ? 'var(--primary)' : 'transparent',
-            zIndex: 1,
-          }}
-          onMouseEnter={e => { if (!isResizing) (e.currentTarget as HTMLElement).style.background = 'var(--border)'; }}
-          onMouseLeave={e => { if (!isResizing) (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
-        />
-      )}
-    </th>
-  );
-}
-
-// ── Status pill popover ────────────────────────────────────────────────────────
-
-function StatusPicker({
-  value,
-  statuses,
-  onChange,
-  onClose,
-  positionStyle,
-}: {
-  value: string | null | undefined;
-  statuses: Status[];
-  onChange: (id: string | null) => void;
-  onClose: () => void;
-  positionStyle?: React.CSSProperties;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-  useEffect(() => {
-    function handler(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
-    }
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
-
-  return (
-    <div
-      ref={ref}
-      style={{
-        ...positionStyle,
-        zIndex: 1000,
-        background: 'var(--card)',
-        border: '1px solid var(--border)',
-        borderRadius: 8,
-        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-        minWidth: 160,
-        padding: '6px 0',
-      }}
-    >
-      <div
-        onClick={() => { onChange(null); onClose(); }}
-        style={{
-          padding: '6px 12px',
-          cursor: 'pointer',
-          fontSize: 12,
-          color: 'var(--muted-foreground)',
-        }}
-        onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-      >
-        No status
-      </div>
-      {statuses.map(s => (
-        <div
-          key={s.id}
-          onClick={() => { onChange(s.id); onClose(); }}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            padding: '6px 12px',
-            cursor: 'pointer',
-            fontSize: 12,
-            color: 'var(--foreground)',
-            background: value === s.id ? 'var(--muted)' : 'transparent',
-          }}
-          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-          onMouseLeave={e => (e.currentTarget.style.background = value === s.id ? 'var(--muted)' : 'transparent')}
-        >
-          <span
-            style={{
-              width: 10,
-              height: 10,
-              borderRadius: '50%',
-              background: resolveColorHex(s.color ?? null) ?? '#888',
-              flexShrink: 0,
-            }}
-          />
-          {s.name}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ── Assignee picker popover ────────────────────────────────────────────────────
-
-function AssigneePicker({
-  members,
-  selectedIds,
-  onToggle,
-  onClose,
-  positionStyle,
-}: {
-  members: Member[];
-  selectedIds: string[];
-  onToggle: (id: string) => void;
-  onClose: () => void;
-  positionStyle?: React.CSSProperties;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-  useEffect(() => {
-    function handler(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
-    }
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
-
-  return (
-    <div
-      ref={ref}
-      style={{
-        ...positionStyle,
-        zIndex: 1000,
-        background: 'var(--card)',
-        border: '1px solid var(--border)',
-        borderRadius: 8,
-        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-        minWidth: 180,
-        padding: '6px 0',
-      }}
-    >
-      {members.length === 0 && (
-        <div style={{ padding: '6px 12px', fontSize: 12, color: 'var(--muted-foreground)' }}>
-          No team members
-        </div>
-      )}
-      {members.map(m => {
-        const assigned = selectedIds.includes(m.id);
-        return (
-          <div
-            key={m.id}
-            onClick={() => onToggle(m.id)}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 8,
-              padding: '5px 12px', cursor: 'pointer', fontSize: 12,
-              background: assigned ? 'var(--muted)' : 'transparent',
-              color: 'var(--foreground)',
-            }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-            onMouseLeave={e => (e.currentTarget.style.background = assigned ? 'var(--muted)' : 'transparent')}
-          >
-            <Badge
-              identity={{ color: m.color, icon: '__name_2__' }}
-              name={m.name}
-              shape="circle"
-              size={20}
-            />
-            <span style={{ flex: 1 }}>{m.name}</span>
-            {assigned && (
-              <span style={{
-                width: 6, height: 6, borderRadius: '50%',
-                background: m.color, flexShrink: 0, display: 'inline-block',
-              }} />
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ── Tag picker popover ─────────────────────────────────────────────────────────
-
-function TagPicker({
-  teamId,
-  tags,
-  selectedTagIds,
-  onChange,
-  onClose,
-  positionStyle,
-}: {
-  teamId: string;
-  tags: Tag[];
-  selectedTagIds: string[];
-  onChange: (ids: string[]) => void;
-  onClose: () => void;
-  positionStyle?: React.CSSProperties;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-  useEffect(() => {
-    function handler(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
-    }
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
-
-  return (
-    <div
-      ref={ref}
-      style={{
-        ...positionStyle,
-        zIndex: 1000,
-        background: 'var(--card)',
-        border: '1px solid var(--border)',
-        borderRadius: 8,
-        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-        minWidth: 220,
-        padding: 8,
-      }}
-    >
-      <TagInput teamId={teamId} tags={tags} selectedTagIds={selectedTagIds} onChange={onChange} />
-    </div>
-  );
-}
-
-// ── Parent activity picker popover ─────────────────────────────────────────────
-
-function ParentPicker({
-  activities,
-  value,
-  onChange,
-  onClose,
-  positionStyle,
-}: {
-  activities: ApiActivity[];
-  value: string | null | undefined;
-  onChange: (id: string | null) => void;
-  onClose: () => void;
-  positionStyle?: React.CSSProperties;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-  const [query, setQuery] = useState('');
-  const inputRef = useRef<HTMLInputElement>(null);
+export default function KanbanToolbar({
+  groupBy,
+  onGroupByChange,
+  sortBy,
+  onSortByChange,
+  colorBy,
+  onColorByChange,
+  cardFields,
+  onCardFieldsChange,
+  showHierarchy,
+  onShowHierarchyChange,
+  onExport,
+  onShare,
+}: Props) {
+  const [cardFieldsOpen, setCardFieldsOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    function handler(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
+    if (!cardFieldsOpen) return;
+    function handleClick(e: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setCardFieldsOpen(false);
+      }
     }
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [cardFieldsOpen]);
 
-  useEffect(() => { inputRef.current?.focus(); }, []);
-
-  const filtered = activities.filter(a =>
-    a.title.toLowerCase().includes(query.trim().toLowerCase()),
-  );
-
-  function choose(id: string | null) {
-    onChange(id);
-    onClose();
+  function toggleField(id: KanbanCardField) {
+    if (cardFields.includes(id)) {
+      onCardFieldsChange(cardFields.filter(f => f !== id));
+    } else {
+      onCardFieldsChange([...cardFields, id]);
+    }
   }
 
+  const activeFieldCount = cardFields.length;
+
   return (
     <div
-      ref={ref}
       style={{
-        ...positionStyle,
-        zIndex: 1000,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '0 12px',
+        height: 36,
         background: 'var(--card)',
-        border: '1px solid var(--border)',
-        borderRadius: 8,
-        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-        minWidth: 220,
-        overflow: 'hidden',
+        borderBottom: '1px solid var(--border)',
+        flexShrink: 0,
       }}
     >
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 6,
-        padding: '6px 8px', borderBottom: '1px solid var(--border)',
-      }}>
-        <Search size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-        <input
-          ref={inputRef}
-          value={query}
-          onChange={e => setQuery(e.target.value)}
-          placeholder="Search activities…"
-          style={{
-            flex: 1, border: 'none', outline: 'none', background: 'none',
-            fontSize: 12, color: 'var(--foreground)', fontFamily: 'var(--font-sans)',
-          }}
-        />
-      </div>
-      <div style={{ maxHeight: 200, overflowY: 'auto' }}>
-        <div
-          onClick={() => choose(null)}
-          style={{
-            padding: '6px 10px', fontSize: 12, color: 'var(--muted-foreground)',
-            fontStyle: 'italic', cursor: 'pointer',
-            borderBottom: filtered.length > 0 ? '1px solid var(--border)' : 'none',
-          }}
-          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+      {/* Group by */}
+      <span className={label}>Group by</span>
+      <select
+        className={select}
+        value={groupBy}
+        onChange={e => onGroupByChange(e.target.value as KanbanGroupBy)}
+      >
+        <option value="status">Status</option>
+        <option value="member">Assigned to</option>
+        <option value="member-combination">Assigned to (combo)</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Sort by */}
+      <span className={label}>Sort by</span>
+      <select
+        className={select}
+        value={sortBy}
+        onChange={e => onSortByChange(e.target.value as KanbanSortBy)}
+      >
+        <option value="startDate">Start date</option>
+        <option value="endDate">End date</option>
+        <option value="title">Title</option>
+        <option value="percentComplete">% Complete</option>
+        <option value="updatedAt">Recently updated</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Color by */}
+      <span className={label}>Color by</span>
+      <select
+        className={select}
+        value={colorBy}
+        onChange={e => onColorByChange(e.target.value as ColorBy)}
+      >
+        <option value="activity">Activity</option>
+        <option value="member">Member</option>
+        <option value="status">Status</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Card fields multi-select */}
+      <div ref={dropdownRef} style={{ position: 'relative' }}>
+        <button
+          className={btn}
+          onClick={() => setCardFieldsOpen(o => !o)}
+          title="Configure card fields"
         >
-          — None —
-        </div>
-        {filtered.map(a => (
-          <div
-            key={a.id}
-            onClick={() => choose(a.id)}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 8,
-              padding: '6px 10px', fontSize: 12, cursor: 'pointer',
-              background: a.id === value ? 'var(--muted)' : 'transparent',
-              fontWeight: a.id === value ? 600 : 400,
-            }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-            onMouseLeave={e => (e.currentTarget.style.background = a.id === value ? 'var(--muted)' : 'transparent')}
-          >
-            <Badge
-              identity={{ color: a.color ?? '#288C9B', icon: a.icon ?? '__none__' }}
-              name={a.title}
-              size={16}
-            />
-            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {a.title}
+          Card fields
+          {activeFieldCount > 0 && (
+            <span
+              style={{
+                background: 'var(--primary)',
+                color: 'var(--primary-foreground)',
+                borderRadius: 9,
+                fontSize: 10,
+                fontWeight: 700,
+                padding: '0 5px',
+                lineHeight: '16px',
+              }}
+            >
+              {activeFieldCount}
             </span>
-          </div>
-        ))}
-        {filtered.length === 0 && (
-          <div style={{ padding: '8px 10px', fontSize: 11, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>
-            No matching activities
+          )}
+          <ChevronDown size={11} strokeWidth={2} />
+        </button>
+
+        {cardFieldsOpen && (
+          <div
+            style={{
+              position: 'absolute',
+              top: 'calc(100% + 4px)',
+              left: 0,
+              background: 'var(--card)',
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
+              zIndex: 50,
+              minWidth: 160,
+              padding: '4px 0',
+            }}
+          >
+            {ALL_CARD_FIELDS.map(f => {
+              const checked = cardFields.includes(f.id);
+              return (
+                <button
+                  key={f.id}
+                  onClick={() => toggleField(f.id)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    width: '100%',
+                    padding: '6px 12px',
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontSize: 12,
+                    color: 'var(--foreground)',
+                    textAlign: 'left',
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                  onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                >
+                  <span
+                    style={{
+                      width: 14,
+                      height: 14,
+                      border: '1.5px solid var(--border)',
+                      borderRadius: 3,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      background: checked ? 'var(--primary)' : 'transparent',
+                      borderColor: checked ? 'var(--primary)' : 'var(--border)',
+                      flexShrink: 0,
+                    }}
+                  >
+                    {checked && <Check size={9} strokeWidth={3} color="var(--primary-foreground)" />}
+                  </span>
+                  {f.label}
+                </button>
+              );
+            })}
+            <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
+            <button
+              onClick={() => onCardFieldsChange(DEFAULT_CARD_FIELDS)}
+              style={{
+                display: 'flex',
+                width: '100%',
+                padding: '6px 12px',
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                fontSize: 11,
+                color: 'var(--muted-foreground)',
+                textAlign: 'left',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+            >
+              Reset to defaults
+            </button>
           </div>
         )}
       </div>
-    </div>
-  );
-}
 
-// ── Row context menu ───────────────────────────────────────────────────────────
+      <div className={divider} />
 
-function ContextMenu({
-  pos,
-  onArchive,
-  onDelete,
-  onClose,
-}: {
-  pos: { top: number; left: number };
-  onArchive: () => void;
-  onDelete: () => void;
-  onClose: () => void;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-
-  useEffect(() => {
-    function handler(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
-    }
-    function keyHandler(e: globalThis.KeyboardEvent) {
-      if (e.key === 'Escape') onCloseRef.current();
-    }
-    document.addEventListener('mousedown', handler);
-    document.addEventListener('keydown', keyHandler);
-    return () => {
-      document.removeEventListener('mousedown', handler);
-      document.removeEventListener('keydown', keyHandler);
-    };
-  }, []);
-
-  // Clamp so menu doesn't overflow viewport
-  const menuW = 160;
-  const menuH = 80;
-  const left = Math.min(pos.left, window.innerWidth - menuW - 8);
-  const top = pos.top + menuH > window.innerHeight ? pos.top - menuH : pos.top;
-
-  const itemStyle: React.CSSProperties = {
-    display: 'flex', alignItems: 'center', gap: 8,
-    padding: '7px 12px', fontSize: 12, cursor: 'pointer',
-    color: 'var(--foreground)', background: 'transparent',
-    border: 'none', width: '100%', textAlign: 'left',
-    fontFamily: 'var(--font-sans)',
-  };
-
-  return (
-    <div
-      ref={ref}
-      style={{
-        position: 'fixed', top, left,
-        zIndex: 9999,
-        background: 'var(--card)',
-        border: '1px solid var(--border)',
-        borderRadius: 8,
-        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-        minWidth: menuW,
-        padding: '4px 0',
-      }}
-    >
+      {/* Hierarchy toggle */}
       <button
-        style={itemStyle}
-        onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-        onClick={onArchive}
-      >
-        <Archive size={13} strokeWidth={2} style={{ flexShrink: 0 }} />
-        Archive
-      </button>
-      <button
-        style={{ ...itemStyle, color: 'var(--destructive)' }}
-        onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-        onClick={onDelete}
-      >
-        <Trash2 size={13} strokeWidth={2} style={{ flexShrink: 0 }} />
-        Delete
-      </button>
-    </div>
-  );
-}
-
-// ── Helpers ────────────────────────────────────────────────────────────────────
-
-/** Position a popover below a cell, flipping above if there isn't enough space below. */
-function popoverPos(rect: DOMRect, w: number, h: number): { top: number; left: number } {
-  const spaceBelow = window.innerHeight - rect.bottom - 2;
-  const top = spaceBelow >= h
-    ? rect.bottom + 2
-    : Math.max(4, rect.top - h - 2);
-  return {
-    top,
-    left: Math.min(rect.left, window.innerWidth - w - 8),
-  };
-}
-
-// ── Sort helpers ───────────────────────────────────────────────────────────────
-
-function sortByToColId(s: ListSortBy): string {
-  switch (s) {
-    case 'startDate': return 'startAt';
-    case 'endDate':   return 'endAt';
-    case 'title':     return 'title';
-    case 'status':    return 'status';
-    case 'progress':  return 'progress';
-  }
-}
-
-// ── Main component ─────────────────────────────────────────────────────────────
-
-export default function ListView({
-  teamId,
-  timelineId,
-  groupBy,
-  sortBy,
-  colorBy,
-  density,
-  timelineStatuses = [],
-  savedFilters = [],
-  tags = [],
-  onColumnsChange,
-  pendingColumnToggle,
-  onSelectActivity,
-  selectedActivityId,
-  onMembersLoaded,
-  triggerNewRow,
-}: Props) {
-  const { user } = useAuth();
-  const { activeFilter } = useFilter();
-  const { debouncedQuery, registerMatches, matchedIds, activeMatchId } = useFind();
-
-  // ── Data fetching ──────────────────────────────────────────────────────────
-  const queryClient = useQueryClient();
-  const { data: rawActivities = [] } = useTimelineActivities(teamId, timelineId);
-  const { data: rawMembers = [] } = useTeamMembers(teamId);
-  const update = useUpdateActivity(timelineId);
-  const create = useCreateActivity(teamId, timelineId);
-  const deleteAct = useDeleteActivity(timelineId);
-  const archiveAct = useArchiveActivity(timelineId);
-
-  useEffect(() => {
-    if (rawMembers.length > 0 && onMembersLoaded) {
-      onMembersLoaded(rawMembers.map(m => ({
-        id: m.id,
-        name: m.displayName,
-        initials: m.displayName.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase(),
-        color: resolveColorHex(m.color ?? null) ?? '#888',
-      })));
-    }
-  }, [rawMembers, onMembersLoaded]);
-
-  function initialsFrom(name: string): string {
-    return name.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase();
-  }
-
-  const members: Member[] = useMemo(
-    () => rawMembers.map(m => ({
-      id: m.id,
-      name: m.displayName,
-      initials: initialsFrom(m.displayName),
-      color: resolveColorHex(m.color ?? null) ?? '#888',
-    })),
-    [rawMembers],
-  );
-
-  // ── Preference persistence ────────────────────────────────────────────────
-  const { isSuccess: prefsSettled } = usePreferences(timelineId);
-  const prefMap = usePreferenceMap(timelineId);
-  const upsert = useUpsertPreference();
-  const prefsApplied = useRef(false);
-
-  // Column state (managed by TanStack Table)
-  const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(DEFAULT_VISIBILITY);
-  const [columnOrder, setColumnOrder] = useState<ColumnOrderState>(DEFAULT_COLUMN_ORDER);
-  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>(DEFAULT_WIDTHS);
-  const [sorting, setSorting] = useState<SortingState>(() => [{ id: sortByToColId(sortBy), desc: false }]);
-
-  // Sync sort column when the toolbar's Sort By control changes
-  useEffect(() => {
-    setSorting([{ id: sortByToColId(sortBy), desc: false }]);
-  }, [sortBy]);
-
-  // Apply saved column prefs once after they load
-  useEffect(() => {
-    if (!prefsSettled || prefsApplied.current) return;
-    prefsApplied.current = true;
-    const raw = prefMap['list_columns'];
-    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-      const config = raw as { order?: string[]; hidden?: string[]; widths?: Record<string, number> };
-      if (Array.isArray(config.order) && config.order.length > 0) {
-        const saved = config.order as string[];
-        const allIds = COL_CATALOG.map(c => c.id);
-        const newCols = allIds.filter(id => !saved.includes(id));
-        setColumnOrder([...saved, ...newCols]);
-      }
-      if (Array.isArray(config.hidden)) {
-        const vis: VisibilityState = { ...DEFAULT_VISIBILITY };
-        for (const id of config.hidden as string[]) {
-          if (id in vis) vis[id] = false;
-        }
-        setColumnVisibility(vis);
-      }
-      if (config.widths && typeof config.widths === 'object') {
-        setColumnSizing(prev => ({ ...prev, ...config.widths }));
-      }
-    }
-  }, [prefsSettled, prefMap]);
-
-  // Persist column config on change (debounced via a ref guard)
-  const saveCols = useCallback(
-    (vis: VisibilityState, order: ColumnOrderState, sizing: ColumnSizingState) => {
-      if (!timelineId) return;
-      const hidden = Object.entries(vis).filter(([, v]) => !v).map(([k]) => k);
-      const config = { order, hidden, widths: sizing };
-      upsert.mutate({ key: 'list_columns', value: JSON.stringify(config), timelineId });
-    },
-    [timelineId, upsert.mutate], // eslint-disable-line react-hooks/exhaustive-deps
-  );
-
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const debouncedSaveCols = useCallback(
-    (vis: VisibilityState, order: ColumnOrderState, sizing: ColumnSizingState) => {
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(() => saveCols(vis, order, sizing), 400);
-    },
-    [saveCols],
-  );
-
-  const handleVisibilityChange = useCallback(
-    (updater: VisibilityState | ((prev: VisibilityState) => VisibilityState)) => {
-      setColumnVisibility(prev => {
-        const next = typeof updater === 'function' ? updater(prev) : updater;
-        if (prefsApplied.current) debouncedSaveCols(next, columnOrder, columnSizing);
-        return next;
-      });
-    },
-    [columnOrder, columnSizing, debouncedSaveCols],
-  );
-
-  const handleOrderChange = useCallback(
-    (updater: ColumnOrderState | ((prev: ColumnOrderState) => ColumnOrderState)) => {
-      setColumnOrder(prev => {
-        const next = typeof updater === 'function' ? updater(prev) : updater;
-        if (prefsApplied.current) debouncedSaveCols(columnVisibility, next, columnSizing);
-        return next;
-      });
-    },
-    [columnVisibility, columnSizing, debouncedSaveCols],
-  );
-
-  const handleSizingChange = useCallback(
-    (updater: ColumnSizingState | ((prev: ColumnSizingState) => ColumnSizingState)) => {
-      setColumnSizing(prev => {
-        const next = typeof updater === 'function' ? updater(prev) : updater;
-        if (prefsApplied.current) debouncedSaveCols(columnVisibility, columnOrder, next);
-        return next;
-      });
-    },
-    [columnVisibility, columnOrder, debouncedSaveCols],
-  );
-
-  // ── TanStack Table ─────────────────────────────────────────────────────────
-
-  const columnDefs = useMemo<ColumnDef<ApiActivity>[]>(
-    () =>
-      COL_CATALOG.map(meta => ({
-        id: meta.id,
-        header: meta.label,
-        size: DEFAULT_WIDTHS[meta.id] ?? 120,
-        // colorBar is a fixed-width structural column — lock it so TanStack's
-        // min-size enforcement never stretches it beyond its visual purpose.
-        minSize: meta.id === 'colorBar' ? 18 : 40,
-        maxSize: meta.id === 'colorBar' ? 18 : 800,
-        enableResizing: meta.id !== 'colorBar',
-        enableSorting: meta.editType !== 'none' || meta.id === 'duration',
-      })),
-    [],
-  );
-
-  const table = useReactTable({
-    data: rawActivities,
-    columns: columnDefs,
-    state: {
-      columnVisibility,
-      columnOrder,
-      columnSizing,
-      columnPinning: { left: ['colorBar', 'identity', 'title'] } as ColumnPinningState,
-      sorting,
-    },
-    onSortingChange: setSorting,
-    onColumnVisibilityChange: handleVisibilityChange,
-    onColumnOrderChange: handleOrderChange,
-    onColumnSizingChange: handleSizingChange,
-    getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
-    columnResizeMode: 'onChange',
-  });
-
-  // Apply external column toggle from the toolbar (via DashboardPage)
-  const lastAppliedSeq = useRef<number | null>(null);
-  useEffect(() => {
-    if (!pendingColumnToggle) return;
-    if (pendingColumnToggle.seq === lastAppliedSeq.current) return;
-    lastAppliedSeq.current = pendingColumnToggle.seq;
-    setColumnVisibility(prev => {
-      const next = { ...prev, [pendingColumnToggle.colId]: pendingColumnToggle.visible };
-      if (prefsApplied.current) debouncedSaveCols(next, columnOrder, columnSizing);
-      return next;
-    });
-  }, [pendingColumnToggle, columnOrder, columnSizing, debouncedSaveCols]);
-
-  // Expose ALL column configs (visible + hidden) to toolbar via callback.
-  // Uses a ref-based equality check to avoid calling onColumnsChange (which
-  // typically calls setListColumns in DashboardPage) with a new array reference
-  // every render — that would create an infinite setState→re-render loop.
-  const lastColConfigsRef = useRef<ColumnConfig[] | null>(null);
-  useEffect(() => {
-    if (!onColumnsChange) return;
-    const configs: ColumnConfig[] = table.getAllLeafColumns()
-      .filter(col => !COL_CATALOG.find(c => c.id === col.id)?.noMenu)
-      .map(col => ({
-        id: col.id,
-        label: COL_CATALOG.find(c => c.id === col.id)?.label ?? col.id,
-        visible: col.getIsVisible(),
-      }));
-    const prev = lastColConfigsRef.current;
-    const changed = !prev || prev.length !== configs.length ||
-      prev.some((c, i) => c.id !== configs[i].id || c.visible !== configs[i].visible || c.label !== configs[i].label);
-    if (changed) {
-      lastColConfigsRef.current = configs;
-      onColumnsChange(configs);
-    }
-  }); // runs every render so order/visibility changes propagate immediately
-
-  // ── Filter + sort ──────────────────────────────────────────────────────────
-
-  const memberIdsByUserId = useMemo<Map<string, string[]>>(() => {
-    const map = new Map<string, string[]>();
-    for (const m of rawMembers) {
-      if (!m.userId) continue;
-      const list = map.get(m.userId) ?? [];
-      list.push(m.id);
-      map.set(m.userId, list);
-    }
-    return map;
-  }, [rawMembers]);
-
-  const closedStatusIds = useMemo(
-    () => new Set(timelineStatuses.filter(s => s.isClosed).map(s => s.id)),
-    [timelineStatuses],
-  );
-
-  const statusesByTimeline = useMemo(() => {
-    const m = new Map<string, Status[]>();
-    m.set(timelineId, timelineStatuses);
-    return m;
-  }, [timelineId, timelineStatuses]);
-
-  const filteredActivities = useMemo(
-    () =>
-      applyActiveFilter(rawActivities, activeFilter, memberIdsByUserId, {
-        closedStatusIds,
-        savedFilters,
-        statuses: statusesByTimeline,
-        tags,
-      }),
-    [rawActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags],
-  );
-
-  // Apply TanStack sorting
-  const sortedActivities = useMemo(() => {
-    const acts = [...filteredActivities];
-    const col = sorting[0];
-    if (!col) {
-      return acts.sort((a, b) => {
-        if (sortBy === 'startDate') return (a.startAt ?? '').localeCompare(b.startAt ?? '');
-        if (sortBy === 'endDate') return (a.endAt ?? '').localeCompare(b.endAt ?? '');
-        if (sortBy === 'title') return a.title.localeCompare(b.title);
-        if (sortBy === 'status') return (a.statusId ?? '').localeCompare(b.statusId ?? '');
-        if (sortBy === 'progress') return (b.percentComplete ?? 0) - (a.percentComplete ?? 0);
-        return 0;
-      });
-    }
-    return acts.sort((a, b) => {
-      let av: string | number = '';
-      let bv: string | number = '';
-      switch (col.id) {
-        case 'title': av = a.title; bv = b.title; break;
-        case 'startAt': av = a.startAt ?? ''; bv = b.startAt ?? ''; break;
-        case 'endAt': av = a.endAt ?? ''; bv = b.endAt ?? ''; break;
-        case 'status': av = a.statusId ?? ''; bv = b.statusId ?? ''; break;
-        case 'progress': av = a.percentComplete ?? 0; bv = b.percentComplete ?? 0; break;
-        default: av = a.title; bv = b.title;
-      }
-      const cmp = typeof av === 'number' ? av - (bv as number) : (av as string).localeCompare(bv as string);
-      return col.desc ? -cmp : cmp;
-    });
-  }, [filteredActivities, sorting, sortBy]);
-
-  // ── Group-by ───────────────────────────────────────────────────────────────
-
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
-  const toggleGroup = useCallback((key: string) => {
-    setCollapsedGroups(prev => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key); else next.add(key);
-      return next;
-    });
-  }, []);
-
-  const memberById = useMemo<Map<string, TeamMemberWithUser>>(
-    () => new Map(rawMembers.map(m => [m.id, m])),
-    [rawMembers],
-  );
-  const statusById = useMemo<Map<string, Status>>(
-    () => new Map(timelineStatuses.map(s => [s.id, s])),
-    [timelineStatuses],
-  );
-  const activityById = useMemo<Map<string, ApiActivity>>(
-    () => new Map(rawActivities.map(a => [a.id, a])),
-    [rawActivities],
-  );
-
-  const memberOrder = useMemo(() => members.map(m => m.id), [members]);
-
-  const displayRows = useMemo(
-    () => buildListRows(sortedActivities, groupBy, memberById, statusById, timelineStatuses, collapsedGroups, memberOrder),
-    [sortedActivities, groupBy, memberById, statusById, timelineStatuses, collapsedGroups, memberOrder],
-  );
-
-  // Flat list of activity rows (for keyboard navigation indices)
-  const activityRows = useMemo(
-    () => displayRows.filter((r): r is Extract<ListDisplayRow, { kind: 'activity' }> => r.kind === 'activity'),
-    [displayRows],
-  );
-
-  // ── Find integration ───────────────────────────────────────────────────────
-
-  useEffect(() => {
-    if (!debouncedQuery) {
-      registerMatches([], new Map());
-      return;
-    }
-    const results = matchEvents(debouncedQuery, filteredActivities, members, rawActivities);
-    const ids = results.map(r => r.activityId);
-    const reasons = new Map(results.map(r => [r.activityId, r.reasons]));
-    registerMatches(ids, reasons);
-  }, [debouncedQuery, filteredActivities, members, rawActivities, registerMatches]);
-
-  // Auto-scroll to active match
-  const activeRowRef = useRef<HTMLTableRowElement | null>(null);
-  useEffect(() => {
-    if (activeMatchId && activeRowRef.current) {
-      activeRowRef.current.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    }
-  }, [activeMatchId]);
-
-  // ── Selection & editing state ──────────────────────────────────────────────
-
-  const [selectedRowIdx, setSelectedRowIdx] = useState<number | null>(null);
-  const [selectedColIdx, setSelectedColIdx] = useState<number>(0);
-  const [editingCell, setEditingCell] = useState<{
-    rowIdx: number;
-    colIdx: number;
-    value: string;
-  } | null>(null);
-  const editInputRef = useRef<HTMLInputElement | null>(null);
-  // Tracks which cell is currently open so the layout effect only focuses/selects
-  // on initial open, not on every value change while typing.
-  const editCellKeyRef = useRef<string | null>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  // When a new activity is selected externally, sync row idx
-  useEffect(() => {
-    if (!selectedActivityId) { setSelectedRowIdx(null); return; }
-    const idx = activityRows.findIndex(r => r.activity.id === selectedActivityId);
-    if (idx >= 0) setSelectedRowIdx(idx);
-  }, [selectedActivityId, activityRows]);
-
-  // useLayoutEffect fires synchronously after DOM commit so the focus is set
-  // before any paint — no window in which another element can steal focus.
-  // Guard: only focus/select when the *cell* changes (new rowIdx:colIdx), not
-  // when the value changes while the user is typing — otherwise inp.select()
-  // would re-select-all after every keystroke, leaving only the last character.
-  useLayoutEffect(() => {
-    if (!editingCell) {
-      editCellKeyRef.current = null;
-      return;
-    }
-    // Include the row's activity id in the key so that when an optimistic row
-    // (optimistic_…) is swapped for its real record at the same index, React
-    // remounts the <tr> (keyed by activity.id) and destroys the focused input —
-    // the changed id forces us to re-focus the freshly mounted input rather than
-    // skip it as a value-only change.
-    const rowId = activityRows[editingCell.rowIdx]?.activity.id ?? '';
-    const cellKey = `${rowId}:${editingCell.colIdx}`;
-    if (editCellKeyRef.current === cellKey) return; // value-only change — skip
-    editCellKeyRef.current = cellKey;
-
-    const inp = editInputRef.current;
-    if (!inp) return;
-    inp.focus();
-    inp.scrollIntoView({ block: 'nearest' });
-    const colId = visibleColIds[editingCell.colIdx];
-    const meta = COL_CATALOG.find(c => c.id === colId);
-    if (meta?.editType === 'date') {
-      // showPicker() opens the calendar immediately. Deferred so the browser
-      // has processed the focus event first. Only one date input is ever in
-      // the DOM at a time (single-cell editing), so no range-picker pairing.
-      setTimeout(() => {
-        try { (inp as HTMLInputElement & { showPicker?(): void }).showPicker?.(); } catch { /* not all browsers */ }
-      }, 0);
-    } else {
-      inp.select();
-    }
-  }, [editingCell, activityRows]); // visibleColIds intentionally excluded — always current in this render cycle
-
-  // Visible column ids, in the SAME order the cells are rendered.
-  //
-  // Cells render from `table.getHeaderGroups()`, which moves pinned-left
-  // columns (colorBar, identity, title) to the front. `getVisibleLeafColumns()`
-  // does NOT apply pinning — it follows raw `columnOrder`. When a persisted
-  // `columnOrder` doesn't place the pinned columns first (e.g. a saved order
-  // from before `colorBar`/`identity` existed appends them at the end), the two
-  // orderings diverge and every colIdx→colId lookup (enterEdit, commitEdit,
-  // showPicker, keyboard nav) targets the wrong column. Deriving from the
-  // header groups keeps colIdx aligned with what the user actually clicked.
-  const visibleColIds = useMemo(
-    () => (table.getHeaderGroups()[0]?.headers ?? []).map(h => h.id),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [columnOrder, columnVisibility],
-  );
-
-  const commitEdit = useCallback(
-    (rowIdx: number, colId: string, value: string) => {
-      const row = activityRows[rowIdx];
-      if (!row) return;
-      const a = row.activity;
-
-      // Optimistic row not yet confirmed by server — queue title and return.
-      if (a.id.startsWith('optimistic_')) {
-        if (colId === 'title' && value.trim()) {
-          pendingTitleAfterCreate.current = value.trim();
-        }
-        return;
-      }
-
-      const patch: Partial<ApiActivity> & { notes?: string | null } = {};
-      if (colId === 'title' && value.trim() !== '') patch.title = value.trim();
-      else if (colId === 'startAt') patch.startAt = value ? `${value}T00:00:00Z` : undefined;
-      else if (colId === 'endAt') patch.endAt = value ? `${value}T00:00:00Z` : undefined;
-      else if (colId === 'description') patch.description = value || undefined;
-      else if (colId === 'location') patch.location = value || undefined;
-      else if (colId === 'url') patch.url = value || undefined;
-      else if (colId === 'notes') patch.notes = value || undefined;
-      else if (colId === 'progress') {
-        const n = parseInt(value, 10);
-        if (!isNaN(n) && n >= 0 && n <= 100) patch.percentComplete = n;
-      }
-
-      if (Object.keys(patch).length > 0) {
-        update.mutate({ activityId: a.id, patch });
-      }
-    },
-    [activityRows, update],
-  );
-
-  const enterEdit = useCallback((rowIdx: number, colIdx: number) => {
-    const row = activityRows[rowIdx];
-    if (!row) return;
-    const colId = visibleColIds[colIdx];
-    const meta = COL_CATALOG.find(c => c.id === colId);
-    if (!meta?.editable || meta.editType === 'status') return;
-    const a = row.activity;
-    let val = '';
-    if (colId === 'title') val = a.title;
-    else if (colId === 'startAt') val = toDateInput(a.startAt);
-    else if (colId === 'endAt') val = toDateInput(a.endAt);
-    else if (colId === 'description') val = a.description ?? '';
-    else if (colId === 'location') val = a.location ?? '';
-    else if (colId === 'url') val = a.url ?? '';
-    else if (colId === 'notes') val = (a as ApiActivity & { notes?: string | null }).notes ?? '';
-    else if (colId === 'progress') val = String(a.percentComplete ?? 0);
-    setEditingCell({ rowIdx, colIdx, value: val });
-  }, [activityRows, visibleColIds]);
-
-  const cancelEdit = useCallback(() => setEditingCell(null), []);
-
-  const commitAndMove = useCallback(
-    (dir: 'down' | 'right' | 'left') => {
-      if (!editingCell) return;
-      commitEdit(editingCell.rowIdx, visibleColIds[editingCell.colIdx], editingCell.value);
-      setEditingCell(null);
-
-      if (dir === 'down') {
-        const nextRow = Math.min(editingCell.rowIdx + 1, activityRows.length - 1);
-        setSelectedRowIdx(nextRow);
-      } else if (dir === 'right') {
-        let nextColIdx = editingCell.colIdx + 1;
-        let nextRowIdx = editingCell.rowIdx;
-        if (nextColIdx >= visibleColIds.length) {
-          if (editingCell.rowIdx < activityRows.length - 1) {
-            nextColIdx = 0;
-            nextRowIdx = editingCell.rowIdx + 1;
-          } else {
-            nextColIdx = visibleColIds.length - 1; // clamp at last cell of last row
-          }
-        }
-        setSelectedColIdx(nextColIdx);
-        setSelectedRowIdx(nextRowIdx);
-        const colId = visibleColIds[nextColIdx];
-        const meta = COL_CATALOG.find(c => c.id === colId);
-        const isText = meta?.editable && meta.editType !== 'status' && meta.editType !== 'none' &&
-          meta.editType !== 'identity' && meta.editType !== 'assignees' &&
-          meta.editType !== 'tags' && meta.editType !== 'parent';
-        if (isText) enterEdit(nextRowIdx, nextColIdx);
-      } else if (dir === 'left') {
-        let prevColIdx = editingCell.colIdx - 1;
-        let prevRowIdx = editingCell.rowIdx;
-        if (prevColIdx < 0) {
-          if (editingCell.rowIdx > 0) {
-            prevColIdx = visibleColIds.length - 1;
-            prevRowIdx = editingCell.rowIdx - 1;
-          } else {
-            prevColIdx = 0; // clamp at first cell of first row
-          }
-        }
-        setSelectedColIdx(prevColIdx);
-        setSelectedRowIdx(prevRowIdx);
-        const colId = visibleColIds[prevColIdx];
-        const meta = COL_CATALOG.find(c => c.id === colId);
-        const isText = meta?.editable && meta.editType !== 'status' && meta.editType !== 'none' &&
-          meta.editType !== 'identity' && meta.editType !== 'assignees' &&
-          meta.editType !== 'tags' && meta.editType !== 'parent';
-        if (isText) enterEdit(prevRowIdx, prevColIdx);
-      }
-    },
-    [editingCell, commitEdit, visibleColIds, activityRows.length, enterEdit],
-  );
-
-  const handleKeyDown = useCallback(
-    (e: KeyboardEvent<HTMLDivElement>) => {
-      if (editingCell) {
-        // Edit mode key handling is in the input's own onKeyDown
-        return;
-      }
-
-      if (e.key === 'Tab') {
-        e.preventDefault();
-        if (activityRows.length === 0) return;
-        if (selectedRowIdx === null) {
-          setSelectedRowIdx(0);
-          setSelectedColIdx(0);
-          return;
-        }
-        if (e.shiftKey) {
-          let prevCol = selectedColIdx - 1;
-          let prevRow = selectedRowIdx;
-          if (prevCol < 0) {
-            if (selectedRowIdx > 0) {
-              prevCol = visibleColIds.length - 1;
-              prevRow = selectedRowIdx - 1;
-            } else {
-              prevCol = 0; // clamp at first cell of first row
-            }
-          }
-          setSelectedColIdx(prevCol);
-          setSelectedRowIdx(prevRow);
-        } else {
-          let nextCol = selectedColIdx + 1;
-          let nextRow = selectedRowIdx;
-          if (nextCol >= visibleColIds.length) {
-            if (selectedRowIdx < activityRows.length - 1) {
-              nextCol = 0;
-              nextRow = selectedRowIdx + 1;
-            } else {
-              nextCol = visibleColIds.length - 1; // clamp at last cell of last row
-            }
-          }
-          setSelectedColIdx(nextCol);
-          setSelectedRowIdx(nextRow);
-        }
-        return;
-      }
-
-      if (selectedRowIdx === null) {
-        if (e.key === 'ArrowDown') { setSelectedRowIdx(0); e.preventDefault(); }
-        return;
-      }
-
-      if (e.key === 'ArrowDown') {
-        setSelectedRowIdx(r => Math.min((r ?? 0) + 1, activityRows.length - 1));
-        e.preventDefault();
-      } else if (e.key === 'ArrowUp') {
-        setSelectedRowIdx(r => Math.max((r ?? 0) - 1, 0));
-        e.preventDefault();
-      } else if (e.key === 'ArrowRight') {
-        setSelectedColIdx(c => Math.min(c + 1, visibleColIds.length - 1));
-        e.preventDefault();
-      } else if (e.key === 'ArrowLeft') {
-        setSelectedColIdx(c => Math.max(c - 1, 0));
-        e.preventDefault();
-      } else if (e.key === 'Enter' || e.key === 'F2') {
-        const colId = visibleColIds[selectedColIdx];
-        const meta = COL_CATALOG.find(c => c.id === colId);
-        const isTextEditable = meta?.editable && meta.editType !== 'none' &&
-          meta.editType !== 'status' && meta.editType !== 'identity' &&
-          meta.editType !== 'assignees' && meta.editType !== 'tags' && meta.editType !== 'parent';
-        if (isTextEditable) enterEdit(selectedRowIdx, selectedColIdx);
-        e.preventDefault();
-      } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
-        const colId = visibleColIds[selectedColIdx];
-        const meta = COL_CATALOG.find(c => c.id === colId);
-        const isTextEditable = meta?.editable && meta.editType !== 'none' &&
-          meta.editType !== 'status' && meta.editType !== 'identity' &&
-          meta.editType !== 'assignees' && meta.editType !== 'tags' && meta.editType !== 'parent';
-        if (isTextEditable) setEditingCell({ rowIdx: selectedRowIdx, colIdx: selectedColIdx, value: e.key });
-      }
-    },
-    [editingCell, selectedRowIdx, selectedColIdx, activityRows, visibleColIds, enterEdit],
-  );
-
-  // When triggerNewRow increments, optimistically insert a row and focus the title input
-  // immediately — no network round-trip before the UI responds.
-  useEffect(() => {
-    if (!triggerNewRow || triggerNewRow === prevTriggerNewRow.current) return;
-    prevTriggerNewRow.current = triggerNewRow;
-    const today = new Date().toISOString().slice(0, 10);
-    const startAt = `${today}T00:00:00Z`;
-    const now = new Date().toISOString();
-    const tempId = `optimistic_${Date.now()}`;
-    const optimisticActivity: ApiActivity = {
-      id: tempId,
-      timelineId,
-      title: 'New Activity',
-      startAt,
-      endAt: startAt,
-      allDay: false,
-      createdBy: user?.id ?? '',
-      createdAt: now,
-      updatedAt: now,
-      description: null,
-      notes: null,
-      icon: null,
-      color: null,
-      statusId: null,
-      parentActivityId: null,
-      percentComplete: null,
-      location: null,
-      url: null,
-      archivedAt: null,
-      assignedMemberIds: [],
-      tagIds: [],
-    };
-    queryClient.setQueriesData<ApiActivity[]>(
-      { queryKey: ['timelines', timelineId, 'activities'] },
-      (old) => (old ? [...old, optimisticActivity] : [optimisticActivity]),
-    );
-    pendingEditActivityId.current = tempId;
-    create.mutate(
-      { title: 'New Activity', startAt, endAt: startAt, _tempId: tempId },
-      {
-        onSuccess: (created) => {
-          if (pendingTitleAfterCreate.current !== null) {
-            const queued = pendingTitleAfterCreate.current;
-            pendingTitleAfterCreate.current = null;
-            if (queued && queued !== 'New Activity') {
-              update.mutate({ activityId: created.id, patch: { title: queued } });
-            }
-          }
-        },
-        onError: () => {
-          queryClient.setQueriesData<ApiActivity[]>(
-            { queryKey: ['timelines', timelineId, 'activities'] },
-            (old) => (old ? old.filter(a => a.id !== tempId) : []),
-          );
-          // Discard any queued title so it can't leak into the next create.
-          pendingTitleAfterCreate.current = null;
-          setEditingCell(null);
-        },
-      },
-    );
-  }, [triggerNewRow]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // After an activity (including an optimistic one) appears in activityRows, enter title-edit mode on it.
-  useEffect(() => {
-    if (!pendingEditActivityId.current) return;
-    const rowIdx = activityRows.findIndex(r => r.activity.id === pendingEditActivityId.current);
-    if (rowIdx < 0) return;
-    pendingEditActivityId.current = null;
-    setSelectedRowIdx(rowIdx);
-    const titleColIdx = visibleColIds.indexOf('title');
-    if (titleColIdx >= 0) {
-      setEditingCell({ rowIdx, colIdx: titleColIdx, value: 'New Activity' });
-    }
-  }, [activityRows, visibleColIds]);
-
-  // ── Color-by resolution ────────────────────────────────────────────────────
-
-  const getRowAccentColor = useCallback(
-    (activity: ApiActivity): string | null => {
-      if (colorBy === 'activity') return resolveColorHex(activity.color ?? null);
-      if (colorBy === 'member') {
-        const firstId = (activity.assignedMemberIds ?? [])[0];
-        if (!firstId) return null;
-        const m = memberById.get(firstId);
-        return resolveColorHex(m?.color ?? null);
-      }
-      if (colorBy === 'status') {
-        if (!activity.statusId) return null;
-        const s = statusById.get(activity.statusId);
-        return resolveColorHex(s?.color ?? null);
-      }
-      return null;
-    },
-    [colorBy, memberById, statusById],
-  );
-
-  // ── Picker state — all rendered as portals to escape table overflow ──────
-
-  const [statusPickerFor, setStatusPickerFor] = useState<string | null>(null);
-  const [statusPickerPos, setStatusPickerPos] = useState<{ top: number; left: number } | null>(null);
-  const closeStatusPicker = useCallback(() => {
-    setStatusPickerFor(null);
-    setStatusPickerPos(null);
-  }, []);
-
-  const [assigneePickerFor, setAssigneePickerFor] = useState<string | null>(null);
-  const [assigneePickerPos, setAssigneePickerPos] = useState<{ top: number; left: number } | null>(null);
-  const closeAssigneePicker = useCallback(() => {
-    setAssigneePickerFor(null);
-    setAssigneePickerPos(null);
-  }, []);
-
-  const [tagPickerFor, setTagPickerFor] = useState<string | null>(null);
-  const [tagPickerPos, setTagPickerPos] = useState<{ top: number; left: number } | null>(null);
-  const closeTagPicker = useCallback(() => {
-    setTagPickerFor(null);
-    setTagPickerPos(null);
-  }, []);
-
-  const [parentPickerFor, setParentPickerFor] = useState<string | null>(null);
-  const [parentPickerPos, setParentPickerPos] = useState<{ top: number; left: number } | null>(null);
-  const closeParentPicker = useCallback(() => {
-    setParentPickerFor(null);
-    setParentPickerPos(null);
-  }, []);
-
-  const [identityPickerFor, setIdentityPickerFor] = useState<string | null>(null);
-  const [identityPickerPos, setIdentityPickerPos] = useState<{ top: number; left: number } | null>(null);
-  const identityPickerRef = useRef<HTMLDivElement>(null);
-  const closeIdentityPicker = useCallback(() => {
-    setIdentityPickerFor(null);
-    setIdentityPickerPos(null);
-  }, []);
-
-  // Click-outside closes the identity picker
-  useEffect(() => {
-    if (!identityPickerFor) return;
-    function handler(e: MouseEvent) {
-      if (identityPickerRef.current && !identityPickerRef.current.contains(e.target as Node)) {
-        closeIdentityPicker();
-      }
-    }
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [identityPickerFor, closeIdentityPicker]);
-
-  // Multi-select state for row checkboxes
-  const [selectedActivityIds, setSelectedActivityIds] = useState<Set<string>>(new Set());
-  const [hoveredRowId, setHoveredRowId] = useState<string | null>(null);
-
-  // Toast notification
-  const [toast, setToast] = useState<string | null>(null);
-  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const showToast = useCallback((msg: string) => {
-    if (toastTimer.current) clearTimeout(toastTimer.current);
-    setToast(msg);
-    toastTimer.current = setTimeout(() => setToast(null), 2600);
-  }, []);
-
-  // Right-click context menu
-  const [contextMenuFor, setContextMenuFor] = useState<string | null>(null);
-  const [contextMenuPos, setContextMenuPos] = useState<{ top: number; left: number } | null>(null);
-  const closeContextMenu = useCallback(() => {
-    setContextMenuFor(null);
-    setContextMenuPos(null);
-  }, []);
-
-  // Holds the ID of a newly created activity (or optimistic temp ID) waiting to enter title-edit mode
-  const pendingEditActivityId = useRef<string | null>(null);
-  // Guards against re-firing triggerNewRow on re-renders
-  const prevTriggerNewRow = useRef<number>(0);
-  // Title typed while the row is still optimistic — flushed to the server once the real ID arrives
-  const pendingTitleAfterCreate = useRef<string | null>(null);
-
-  // ── Multi-select delete / archive ─────────────────────────────────────────
-
-  const handleDeleteSelected = useCallback(() => {
-    const ids = Array.from(selectedActivityIds);
-    for (const id of ids) {
-      deleteAct.mutate(id);
-    }
-    setSelectedActivityIds(new Set());
-    showToast(`${ids.length} ${ids.length === 1 ? 'activity' : 'activities'} deleted`);
-  }, [selectedActivityIds, deleteAct, showToast]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleArchiveSelected = useCallback(() => {
-    const ids = Array.from(selectedActivityIds);
-    for (const id of ids) {
-      archiveAct.mutate(id);
-    }
-    setSelectedActivityIds(new Set());
-    showToast(`${ids.length} ${ids.length === 1 ? 'activity' : 'activities'} archived`);
-  }, [selectedActivityIds, archiveAct, showToast]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── DnD column reorder ─────────────────────────────────────────────────────
-
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
-
-  function handleDragEnd(event: DragEndEvent) {
-    const { active, over } = event;
-    if (!over || active.id === over.id) return;
-    setColumnOrder(prev => {
-      const oldIdx = prev.indexOf(String(active.id));
-      const newIdx = prev.indexOf(String(over.id));
-      if (oldIdx === -1 || newIdx === -1) return prev;
-      // Pinned columns can't be reordered past each other
-      const pinnedIds = ['colorBar', 'identity', 'title'];
-      if (pinnedIds.includes(String(active.id)) || pinnedIds.includes(String(over.id))) return prev;
-      const next = arrayMove(prev, oldIdx, newIdx);
-      if (prefsApplied.current) debouncedSaveCols(columnVisibility, next, columnSizing);
-      return next;
-    });
-  }
-
-  // ── Render ─────────────────────────────────────────────────────────────────
-
-  const rowH = density === 'compact' ? 32 : 48;
-
-  const visibleHeaders = table.getHeaderGroups()[0]?.headers ?? [];
-
-  // Build a map from colId → left offset for sticky pinning
-  const pinnedLeft = useMemo(() => {
-    let left = 0;
-    const offsets: Record<string, number> = {};
-    for (const h of visibleHeaders) {
-      if (h.column.getIsPinned() === 'left') {
-        offsets[h.id] = left;
-        left += h.getSize();
-      }
-    }
-    return offsets;
-  }, [visibleHeaders]);
-
-  const tableWidth = visibleHeaders.reduce((acc, h) => acc + h.getSize(), 0);
-
-  // Status picker activity (for the portal)
-  const statusPickerActivity = statusPickerFor ? activityById.get(statusPickerFor) : null;
-
-  return (
-    <div
-      ref={containerRef}
-      tabIndex={0}
-      onKeyDown={handleKeyDown}
-      style={{
-        flex: 1,
-        overflow: 'auto',
-        outline: 'none',
-        background: 'var(--background)',
-        position: 'relative',
-      }}
-      onClick={e => {
-        if ((e.target as HTMLElement) === containerRef.current) {
-          setSelectedRowIdx(null);
-          setEditingCell(null);
-          onSelectActivity?.(null);
-        }
-      }}
-    >
-      {/* Selection action bar — appears above the table when rows are checked */}
-      {selectedActivityIds.size > 0 && (
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 10,
-            padding: '0 12px',
-            height: 36,
-            background: 'var(--card)',
-            borderBottom: '1px solid var(--border)',
-            flexShrink: 0,
-            position: 'sticky',
-            top: 0,
-            zIndex: 10,
-          }}
-        >
-          <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>
-            {selectedActivityIds.size} selected
-          </span>
-          <button
-            onClick={handleArchiveSelected}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 4,
-              padding: '3px 10px', fontSize: 12, cursor: 'pointer',
-              background: 'var(--card)', color: 'var(--foreground)',
-              border: '1px solid var(--border)', borderRadius: 4, fontFamily: 'var(--font-sans)',
-            }}
-          >
-            <Archive size={12} />
-            Archive
-          </button>
-          <button
-            onClick={handleDeleteSelected}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 4,
-              padding: '3px 10px', fontSize: 12, cursor: 'pointer',
-              background: 'var(--destructive)', color: 'var(--destructive-foreground)',
-              border: 'none', borderRadius: 4, fontFamily: 'var(--font-sans)',
-            }}
-          >
-            <Trash2 size={12} />
-            Delete
-          </button>
-          <button
-            onClick={() => setSelectedActivityIds(new Set())}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 4,
-              padding: '3px 10px', fontSize: 12, cursor: 'pointer',
-              background: 'none', color: 'var(--foreground)',
-              border: '1px solid var(--border)', borderRadius: 4, fontFamily: 'var(--font-sans)',
-            }}
-          >
-            Cancel
-          </button>
-        </div>
-      )}
-
-      {/* DndContext must be outside <table> — its accessibility <div> is invalid inside <thead>. */}
-      <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
-      <table
+        className={btn}
+        onClick={() => onShowHierarchyChange(!showHierarchy)}
+        title={showHierarchy
+          ? 'Hierarchy on: child activities nest under their parent. Click to show flat list.'
+          : 'Hierarchy off: all activities shown at top level. Click to nest children under parents.'}
         style={{
-          width: tableWidth,
-          minWidth: '100%',
-          borderCollapse: 'separate',
-          borderSpacing: 0,
-          tableLayout: 'fixed',
+          background: showHierarchy ? 'var(--primary)' : undefined,
+          color: showHierarchy ? 'var(--primary-foreground)' : undefined,
+          borderColor: showHierarchy ? 'var(--primary)' : undefined,
         }}
       >
-        {/* Column sizing */}
-        <colgroup>
-          {visibleHeaders.map(h => (
-            <col key={h.id} style={{ width: h.getSize() }} />
-          ))}
-        </colgroup>
+        <Network size={12} strokeWidth={1.8} />
+        Hierarchy
+      </button>
 
-        {/* Header */}
-        <thead>
-          <SortableContext
-            items={visibleHeaders.map(h => h.id)}
-            strategy={horizontalListSortingStrategy}
-          >
-            <tr style={{ height: 36 }}>
-              {visibleHeaders.map(header => {
-                  const colId = header.id;
-                  const isPinned = header.column.getIsPinned() === 'left';
-                  const sortState = sorting[0];
-                  const sortDir = sortState?.id === colId ? (sortState.desc ? 'desc' : 'asc') : false;
-                  const meta = COL_CATALOG.find(c => c.id === colId);
+      {/* Export + share — pushed to the right */}
+      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div className={divider} />
+        <button className={btn} onClick={onExport} title="Export activities">
+          <Download size={12} strokeWidth={1.8} />
+          Export
+        </button>
+        <button className={btn} onClick={onShare} title="Share this view">
+          <Share2 size={12} strokeWidth={1.8} />
+          Share
+        </button>
+      </div>
+    </div>
+  );
+}
+````
 
-                  if (colId === 'colorBar') {
-                    const allChecked = activityRows.length > 0 &&
-                      activityRows.every(r => selectedActivityIds.has(r.activity.id));
-                    const someChecked = !allChecked &&
-                      activityRows.some(r => selectedActivityIds.has(r.activity.id));
-                    return (
-                      <th
-                        key={colId}
-                        style={{
-                          width: 18,
-                          position: 'sticky',
-                          left: pinnedLeft[colId] ?? 0,
-                          top: 0,
-                          zIndex: 4, // below TopBar's stacking context (z-index:10) so dropdowns show above headers
-                          background: 'var(--card)',
-                          borderBottom: '2px solid var(--border)',
-                          padding: 0,
-                        }}
-                      >
-                        <div style={{ display: 'flex', alignItems: 'stretch', height: '100%' }}>
-                          <div style={{ width: 4, flexShrink: 0 }} />
-                          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                            <input
-                              type="checkbox"
-                              checked={allChecked}
-                              ref={el => { if (el) el.indeterminate = someChecked; }}
-                              onChange={() => {
-                                if (allChecked || someChecked) {
-                                  setSelectedActivityIds(new Set());
-                                } else {
-                                  setSelectedActivityIds(new Set(activityRows.map(r => r.activity.id)));
-                                }
-                              }}
-                              style={{ cursor: 'pointer', width: 13, height: 13 }}
-                              title="Select all"
-                            />
-                          </div>
-                        </div>
-                      </th>
-                    );
-                  }
+## File: packages/web/src/components/list/ListToolbar.tsx
+````typescript
+/**
+ * ListToolbar — sub-toolbar for the List view.
+ *
+ * Provides Columns (hide/show menu), Density toggle, Group by, Sort by, and
+ * Color by controls. The Columns menu includes drag-reorder handles (implemented
+ * via @dnd-kit) so column order can be changed from the menu as well as by
+ * dragging the table headers.
+ */
 
-                  return (
-                    <SortableColHeader
-                      key={colId}
-                      colId={colId}
-                      style={{
-                        width: header.getSize(),
-                        left: isPinned ? pinnedLeft[colId] : undefined,
-                        position: 'sticky',
-                        zIndex: isPinned ? 4 : 3, // below TopBar's z-index:10 stacking context
-                        boxShadow: isPinned ? '2px 0 4px rgba(0,0,0,0.06)' : undefined,
-                      }}
-                      sortDir={meta?.editType !== 'none' ? sortDir : false}
-                      onSort={meta?.editType !== 'none' ? () => {
-                        setSorting(prev => {
-                          if (prev[0]?.id !== colId) return [{ id: colId, desc: false }];
-                          if (!prev[0].desc) return [{ id: colId, desc: true }];
-                          return [];
-                        });
-                      } : undefined}
-                      resizeHandler={colId !== 'identity' ? (header.getResizeHandler() as unknown as (e: React.MouseEvent | React.TouchEvent) => void) : undefined}
-                      isResizing={header.column.getIsResizing()}
-                    >
-                      {header.column.columnDef.header as string}
-                    </SortableColHeader>
-                  );
-                })}
-              </tr>
-            </SortableContext>
-        </thead>
+import { useState, useRef, useEffect } from 'react';
+import { Columns2, ChevronDown, Download, Share2, AlignJustify } from 'lucide-react';
+import { cn } from '@/lib/utils';
 
-        {/* Body */}
-        <tbody>
-          {displayRows.length === 0 && (
-            <tr>
-              <td
-                colSpan={visibleHeaders.length}
-                style={{
-                  textAlign: 'center',
-                  padding: '48px 0',
-                  color: 'var(--muted-foreground)',
-                  fontSize: 13,
-                }}
-              >
-                No activities to show.
-              </td>
-            </tr>
-          )}
+export type ListGroupBy = 'none' | 'member' | 'parent' | 'status';
+export type ListSortBy = 'startDate' | 'endDate' | 'title' | 'status' | 'progress';
+export type ListColorBy = 'activity' | 'member' | 'status';
+export type ListDensity = 'comfortable' | 'compact';
 
-          {displayRows.map((row, displayIdx) => {
-            // ── Group header row ─────────────────────────────────────────────
-            if (row.kind === 'group') {
-              const collapsed = collapsedGroups.has(row.key);
-              return (
-                <tr key={`group-${row.key}`}>
-                  <td
-                    colSpan={visibleHeaders.length}
-                    style={{
-                      padding: '4px 8px',
-                      background: 'var(--muted)',
-                      borderBottom: '1px solid var(--border)',
-                      borderTop: displayIdx > 0 ? '1px solid var(--border)' : undefined,
-                      fontSize: 11,
-                      fontWeight: 600,
-                      color: 'var(--muted-foreground)',
-                      textTransform: 'uppercase',
-                      letterSpacing: '0.05em',
-                      cursor: 'pointer',
-                      userSelect: 'none',
-                    }}
-                    onClick={() => toggleGroup(row.key)}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
-                      {row.memberColors && row.memberColors.length > 0 && (
-                        <div style={{ display: 'flex', flexShrink: 0 }}>
-                          {row.memberColors.map((c, i) => (
-                            <div
-                              key={i}
-                              style={{
-                                width: 9,
-                                height: 9,
-                                borderRadius: '50%',
-                                background: c,
-                                marginLeft: i === 0 ? 0 : -3,
-                                outline: '1.5px solid var(--muted)',
-                              }}
-                            />
-                          ))}
-                        </div>
-                      )}
-                      {row.label}
-                      <span style={{ fontWeight: 400, opacity: 0.6 }}>({row.count})</span>
-                    </div>
-                  </td>
-                </tr>
-              );
-            }
+export interface ColumnConfig {
+  id: string;
+  label: string;
+  visible: boolean;
+}
 
-            // ── Activity row ─────────────────────────────────────────────────
-            const { activity, depth, hasChildren, groupKey } = row;
-            const actRowIdx = activityRows.indexOf(row);
-            const isSelected = actRowIdx === selectedRowIdx;
-            const isDetailOpen = activity.id === selectedActivityId;
-            const isMatch = debouncedQuery && matchedIds.includes(activity.id);
-            const isActiveMatch = activity.id === activeMatchId;
-            const isDimmed = debouncedQuery && matchedIds.length > 0 && !isMatch;
+interface Props {
+  columns: ColumnConfig[];
+  onColumnVisibilityChange: (columnId: string, visible: boolean) => void;
+  density: ListDensity;
+  onDensityChange: (d: ListDensity) => void;
+  groupBy: ListGroupBy;
+  onGroupByChange: (g: ListGroupBy) => void;
+  sortBy: ListSortBy;
+  onSortByChange: (s: ListSortBy) => void;
+  colorBy: ListColorBy;
+  onColorByChange: (c: ListColorBy) => void;
+  onExport?: () => void;
+  onShare?: () => void;
+}
 
-            const rowStyle: React.CSSProperties = {
-              height: rowH,
-              opacity: isDimmed ? 0.3 : 1,
-              background: isDetailOpen
-                ? 'var(--muted)'
-                : isSelected
-                ? 'color-mix(in srgb, var(--primary) 8%, var(--background))'
-                : 'transparent',
-              cursor: 'default',
-              outline: isActiveMatch
-                ? '2px solid #f59e0b'
-                : isMatch
-                ? '1px solid rgba(245,158,11,0.6)'
-                : undefined,
-              transition: 'background 0.1s ease, opacity 0.15s ease',
-            };
+const ctrlBtn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0';
+const divider  = 'w-px h-4 bg-border shrink-0';
+const label    = 'text-[11px] text-muted-foreground shrink-0';
+const select   = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
 
-            return (
-              <tr
-                key={activity.id}
-                ref={isActiveMatch ? el => { (activeRowRef as React.MutableRefObject<HTMLTableRowElement | null>).current = el } : undefined}
-                style={rowStyle}
-                onMouseEnter={() => setHoveredRowId(activity.id)}
-                onMouseLeave={() => setHoveredRowId(null)}
-                onClick={e => {
-                  e.stopPropagation();
-                  setSelectedRowIdx(actRowIdx);
-                  onSelectActivity?.(activity.id);
-                  // intentionally no onSelectApiActivity — edits happen inline
-                }}
-                onContextMenu={e => {
-                  e.preventDefault();
-                  setContextMenuFor(activity.id);
-                  setContextMenuPos({ top: e.clientY, left: e.clientX });
-                }}
-              >
-                {visibleHeaders.map((header, colIdx) => {
-                  const colId = header.id;
-                  const isPinned = header.column.getIsPinned() === 'left';
-                  const isCellSelected = isSelected && colIdx === selectedColIdx;
-                  const isEditing = editingCell?.rowIdx === actRowIdx && editingCell.colIdx === colIdx;
-                  const meta = COL_CATALOG.find(c => c.id === colId)!;
+export default function ListToolbar({
+  columns,
+  onColumnVisibilityChange,
+  density,
+  onDensityChange,
+  groupBy,
+  onGroupByChange,
+  sortBy: _sortBy,
+  onSortByChange: _onSortByChange,
+  colorBy,
+  onColorByChange,
+  onExport,
+  onShare,
+}: Props) {
+  const [colMenuOpen, setColMenuOpen] = useState(false);
+  const colMenuRef = useRef<HTMLDivElement>(null);
 
-                  const cellStyle: React.CSSProperties = {
-                    width: header.getSize(),
-                    maxWidth: header.getSize(),
-                    padding: '0 8px',
-                    borderBottom: '1px solid color-mix(in srgb, var(--border) 60%, transparent)',
-                    fontSize: 12,
-                    color: 'var(--foreground)',
-                    overflow: 'hidden',
-                    whiteSpace: 'nowrap',
-                    textOverflow: 'ellipsis',
-                    position: isPinned ? 'sticky' : undefined,
-                    left: isPinned ? pinnedLeft[colId] : undefined,
-                    zIndex: isPinned ? 2 : undefined,
-                    background: isPinned
-                      ? (isDetailOpen ? 'var(--muted)' : isSelected ? 'color-mix(in srgb, var(--primary) 8%, var(--background))' : 'var(--background)')
-                      : undefined,
-                    boxShadow: isPinned ? '2px 0 4px rgba(0,0,0,0.06)' : undefined,
-                    outline: isCellSelected && !isEditing ? '2px solid var(--primary)' : undefined,
-                    outlineOffset: '-2px',
-                    verticalAlign: 'middle',
-                    cursor: (meta.editType === 'text' || meta.editType === 'date' || meta.editType === 'number')
-                      ? 'text'
-                      : (meta.editType !== 'none' ? 'pointer' : 'default'),
-                  };
-
-                  // ── Cell content ──────────────────────────────────────────
-
-                  // Editing mode — inline input
-                  if (isEditing && meta.editType !== 'none' && meta.editType !== 'status') {
-                    return (
-                      <td key={colId} style={{ ...cellStyle, padding: 0, overflow: 'visible' }}>
-                        <input
-                          ref={editInputRef}
-                          type={meta.editType === 'date' ? 'date' : meta.editType === 'number' ? 'number' : 'text'}
-                          min={meta.editType === 'number' ? 0 : undefined}
-                          max={meta.editType === 'number' ? 100 : undefined}
-                          value={editingCell.value}
-                          onChange={e => setEditingCell(prev => prev ? { ...prev, value: e.target.value } : prev)}
-                          onKeyDown={e => {
-                            e.stopPropagation();
-                            if (e.key === 'Escape') { cancelEdit(); e.preventDefault(); }
-                            else if (e.key === 'Enter') { commitAndMove('down'); e.preventDefault(); }
-                            else if (e.key === 'Tab') { commitAndMove(e.shiftKey ? 'left' : 'right'); e.preventDefault(); }
-                          }}
-                          onBlur={() => {
-                            commitEdit(editingCell.rowIdx, visibleColIds[editingCell.colIdx], editingCell.value);
-                            setEditingCell(null);
-                          }}
-                          style={{
-                            width: '100%',
-                            height: rowH,
-                            padding: '0 8px',
-                            background: 'var(--background)',
-                            border: 'none',
-                            outline: '2px solid var(--primary)',
-                            outlineOffset: '-2px',
-                            fontSize: 12,
-                            color: 'var(--foreground)',
-                            fontFamily: 'var(--font-sans)',
-                          }}
-                          onClick={e => e.stopPropagation()}
-                        />
-                      </td>
-                    );
-                  }
-
-                  // Color bar + row checkbox — 32px pinned cell
-                  if (colId === 'colorBar') {
-                    const isRowChecked = selectedActivityIds.has(activity.id);
-                    const showCb = isRowChecked || selectedActivityIds.size > 0 || hoveredRowId === activity.id;
-                    return (
-                      <td
-                        key={colId}
-                        style={{
-                          width: 18,
-                          maxWidth: 18,
-                          padding: 0,
-                          borderBottom: '1px solid color-mix(in srgb, var(--border) 60%, transparent)',
-                          position: 'sticky',
-                          left: pinnedLeft[colId] ?? 0,
-                          zIndex: 2, // pinned body cell — below header z-index (4)
-                          background: isDetailOpen
-                              ? 'var(--muted)'
-                              : isSelected
-                              ? 'color-mix(in srgb, var(--primary) 8%, var(--background))'
-                              : 'var(--background)',
-                          cursor: 'default',
-                        }}
-                        onClick={e => {
-                          e.stopPropagation();
-                          setSelectedActivityIds(prev => {
-                            const next = new Set(prev);
-                            if (next.has(activity.id)) next.delete(activity.id);
-                            else next.add(activity.id);
-                            return next;
-                          });
-                        }}
-                      >
-                        <div style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          height: rowH,
-                          opacity: showCb ? 1 : 0,
-                          transition: 'opacity 0.1s',
-                        }}>
-                          <input
-                            type="checkbox"
-                            checked={isRowChecked}
-                            onChange={() => {}}
-                            onClick={e => e.stopPropagation()}
-                            style={{ cursor: 'pointer', width: 13, height: 13, pointerEvents: 'none' }}
-                          />
-                        </div>
-                      </td>
-                    );
-                  }
-
-                  // Identity cell — shows badge; click opens identity picker portal
-                  if (colId === 'identity') {
-                    return (
-                      <td
-                        key={colId}
-                        style={{ ...cellStyle, cursor: 'pointer' }}
-                        onClick={e => {
-                          e.stopPropagation();
-                          setSelectedRowIdx(actRowIdx);
-                          onSelectActivity?.(activity.id);
-                          if (identityPickerFor === activity.id) {
-                            closeIdentityPicker();
-                          } else {
-                            closeStatusPicker(); closeAssigneePicker(); closeTagPicker(); closeParentPicker();
-                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                            setIdentityPickerFor(activity.id);
-                            setIdentityPickerPos(popoverPos(rect, 240, 320));
-                          }
-                        }}
-                      >
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                          <Badge
-                            identity={{
-                              color: getRowAccentColor(activity) ?? resolveColorHex(activity.color ?? null) ?? '#288C9B',
-                              icon: activity.icon ?? '__name_2__',
-                            }}
-                            name={activity.title}
-                            shape="square"
-                            size={28}
-                          />
-                        </div>
-                      </td>
-                    );
-                  }
-
-                  // Status cell — click to open picker (portal, escapes scroll overflow)
-                  if (colId === 'status') {
-                    const status = activity.statusId ? statusById.get(activity.statusId) : null;
-                    return (
-                      <td
-                        key={colId}
-                        style={{ ...cellStyle, cursor: 'pointer' }}
-                        onClick={e => {
-                          e.stopPropagation();
-                          setSelectedRowIdx(actRowIdx);
-                          onSelectActivity?.(activity.id);
-                          if (statusPickerFor === activity.id) {
-                            closeStatusPicker();
-                          } else {
-                            closeAssigneePicker(); closeTagPicker(); closeParentPicker(); closeIdentityPicker();
-                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                            setStatusPickerFor(activity.id);
-                            setStatusPickerPos(popoverPos(rect, 160, 220));
-                          }
-                        }}
-                      >
-                        {status ? (
-                          <span
-                            style={{
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              gap: 5,
-                              padding: '2px 8px',
-                              borderRadius: 4,
-                              fontSize: 11,
-                              fontWeight: 500,
-                              background: `color-mix(in srgb, ${resolveColorHex(status.color ?? null) ?? '#888'} 15%, transparent)`,
-                              color: resolveColorHex(status.color ?? null) ?? 'var(--foreground)',
-                              border: `1px solid ${resolveColorHex(status.color ?? null) ?? '#888'}40`,
-                            }}
-                          >
-                            <span
-                              style={{
-                                width: 7,
-                                height: 7,
-                                borderRadius: '50%',
-                                background: resolveColorHex(status.color ?? null) ?? '#888',
-                                flexShrink: 0,
-                              }}
-                            />
-                            {status.name}
-                          </span>
-                        ) : (
-                          <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>—</span>
-                        )}
-                      </td>
-                    );
-                  }
-
-                  // Assignees cell — overlapping badges; click opens picker
-                  if (colId === 'assignees') {
-                    const ids = activity.assignedMemberIds ?? [];
-                    return (
-                      <td key={colId} style={cellStyle} onClick={e => {
-                        e.stopPropagation();
-                        setSelectedRowIdx(actRowIdx);
-                        onSelectActivity?.(activity.id);
-                        if (assigneePickerFor === activity.id) {
-                          closeAssigneePicker();
-                        } else {
-                          closeStatusPicker(); closeTagPicker(); closeParentPicker(); closeIdentityPicker();
-                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                          setAssigneePickerFor(activity.id);
-                          setAssigneePickerPos(popoverPos(rect, 180, 240));
-                        }
-                      }}>
-                        <div style={{ display: 'flex', alignItems: 'center', overflow: 'hidden' }}>
-                          {ids.slice(0, 4).map((mid, i) => {
-                            const m = memberById.get(mid);
-                            if (!m) return null;
-                            return (
-                              <div key={mid} style={{ marginLeft: i === 0 ? 0 : -6 }} title={m.displayName}>
-                                <Badge
-                                  identity={{ color: resolveColorHex(m.color ?? null) ?? '#288C9B', icon: m.icon ?? '__name_2__' }}
-                                  name={m.displayName}
-                                  shape="circle"
-                                  size={22}
-                                />
-                              </div>
-                            );
-                          })}
-                          {ids.length > 4 && (
-                            <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginLeft: 4 }}>+{ids.length - 4}</span>
-                          )}
-                          {ids.length === 0 && (
-                            <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>—</span>
-                          )}
-                        </div>
-                      </td>
-                    );
-                  }
-
-                  // Tags cell — click opens tag picker
-                  if (colId === 'tags') {
-                    const tagList = (activity.tagIds ?? [])
-                      .map(tid => tags.find(t => t.id === tid))
-                      .filter(Boolean) as Tag[];
-                    return (
-                      <td key={colId} style={cellStyle} onClick={e => {
-                        e.stopPropagation();
-                        setSelectedRowIdx(actRowIdx);
-                        onSelectActivity?.(activity.id);
-                        if (tagPickerFor === activity.id) {
-                          closeTagPicker();
-                        } else {
-                          closeStatusPicker(); closeAssigneePicker(); closeParentPicker(); closeIdentityPicker();
-                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                          setTagPickerFor(activity.id);
-                          setTagPickerPos(popoverPos(rect, 220, 300));
-                        }
-                      }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden', flexWrap: 'nowrap' }}>
-                          {tagList.slice(0, 3).map(t => (
-                            <span
-                              key={t.id}
-                              style={{
-                                padding: '1px 6px',
-                                borderRadius: 4,
-                                fontSize: 10,
-                                background: resolveColorHex(t.color ?? null)
-                                  ? `color-mix(in srgb, ${resolveColorHex(t.color ?? null)} 18%, transparent)`
-                                  : 'var(--muted)',
-                                color: resolveColorHex(t.color ?? null) ?? 'var(--foreground)',
-                                border: `1px solid ${resolveColorHex(t.color ?? null) ?? 'var(--border)'}40`,
-                                whiteSpace: 'nowrap',
-                              }}
-                            >
-                              {t.name}
-                            </span>
-                          ))}
-                          {tagList.length > 3 && (
-                            <span style={{ fontSize: 10, color: 'var(--muted-foreground)' }}>+{tagList.length - 3}</span>
-                          )}
-                          {tagList.length === 0 && (
-                            <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>—</span>
-                          )}
-                        </div>
-                      </td>
-                    );
-                  }
-
-                  // Progress cell
-                  if (colId === 'progress') {
-                    const pct = activity.percentComplete ?? 0;
-                    return (
-                      <td key={colId} style={cellStyle} onClick={e => {
-                          e.stopPropagation();
-                          setSelectedRowIdx(actRowIdx);
-                          onSelectActivity?.(activity.id);
-                          enterEdit(actRowIdx, colIdx);
-                        }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <div
-                            style={{
-                              flex: 1,
-                              height: 4,
-                              background: 'var(--border)',
-                              borderRadius: 2,
-                              overflow: 'hidden',
-                            }}
-                          >
-                            <div
-                              style={{
-                                height: '100%',
-                                width: `${pct}%`,
-                                background: 'var(--primary)',
-                                borderRadius: 2,
-                                transition: 'width 0.2s',
-                              }}
-                            />
-                          </div>
-                          <span style={{ fontSize: 11, color: 'var(--muted-foreground)', flexShrink: 0 }}>
-                            {pct}%
-                          </span>
-                        </div>
-                      </td>
-                    );
-                  }
-
-                  // Parent cell — click opens parent picker
-                  if (colId === 'parent') {
-                    const parent = activity.parentActivityId ? activityById.get(activity.parentActivityId) : null;
-                    return (
-                      <td key={colId} style={cellStyle} onClick={e => {
-                        e.stopPropagation();
-                        setSelectedRowIdx(actRowIdx);
-                        onSelectActivity?.(activity.id);
-                        if (parentPickerFor === activity.id) {
-                          closeParentPicker();
-                        } else {
-                          closeStatusPicker(); closeAssigneePicker(); closeTagPicker(); closeIdentityPicker();
-                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                          setParentPickerFor(activity.id);
-                          setParentPickerPos(popoverPos(rect, 220, 280));
-                        }
-                      }}>
-                        <span style={{ color: parent ? 'var(--foreground)' : 'var(--muted-foreground)' }}>
-                          {parent ? parent.title : '—'}
-                        </span>
-                      </td>
-                    );
-                  }
-
-                  // Duration cell
-                  if (colId === 'duration') {
-                    return (
-                      <td key={colId} style={cellStyle}>
-                        <span style={{ color: 'var(--muted-foreground)' }}>
-                          {formatDuration(activity.startAt, activity.endAt)}
-                        </span>
-                      </td>
-                    );
-                  }
-
-                  // Date cells — single click to edit
-                  if (colId === 'startAt' || colId === 'endAt') {
-                    const iso = colId === 'startAt' ? activity.startAt : activity.endAt;
-                    return (
-                      <td
-                        key={colId}
-                        style={cellStyle}
-                        onClick={e => {
-                          e.stopPropagation();
-                          setSelectedRowIdx(actRowIdx);
-                          onSelectActivity?.(activity.id);
-                          enterEdit(actRowIdx, colIdx);
-                        }}
-                      >
-                        <span style={{ color: iso ? 'var(--foreground)' : 'var(--muted-foreground)' }}>
-                          {formatActivityDate(iso)}
-                        </span>
-                      </td>
-                    );
-                  }
-
-                  // Created/Updated cells
-                  if (colId === 'createdAt' || colId === 'updatedAt') {
-                    const iso = colId === 'createdAt' ? activity.createdAt : activity.updatedAt;
-                    return (
-                      <td key={colId} style={cellStyle}>
-                        <span style={{ color: 'var(--muted-foreground)' }}>
-                          {formatTimestamp(iso)}
-                        </span>
-                      </td>
-                    );
-                  }
-
-                  // Text cells (title, description, location, url, notes)
-                  let textVal = '';
-                  if (colId === 'title') textVal = activity.title;
-                  else if (colId === 'description') textVal = activity.description ?? '';
-                  else if (colId === 'location') textVal = activity.location ?? '';
-                  else if (colId === 'url') textVal = activity.url ?? '';
-                  else if (colId === 'notes') textVal = (activity as ApiActivity & { notes?: string | null }).notes ?? '';
-
-                  return (
-                    <td
-                      key={colId}
-                      style={{ ...cellStyle, fontWeight: colId === 'title' ? 500 : 400 }}
-                      onClick={e => {
-                        e.stopPropagation();
-                        setSelectedRowIdx(actRowIdx);
-                        onSelectActivity?.(activity.id);
-                        if (meta.editable && meta.editType === 'text') enterEdit(actRowIdx, colIdx);
-                      }}
-                    >
-                      {colId === 'title' && groupBy === 'parent' ? (
-                        // Parent-group mode: show indent + collapse toggle
-                        <span style={{ display: 'flex', alignItems: 'center', gap: 4, paddingLeft: depth * 16 }}>
-                          {hasChildren ? (
-                            <span
-                              onClick={e => { e.stopPropagation(); toggleGroup(groupKey); }}
-                              style={{ cursor: 'pointer', flexShrink: 0, color: 'var(--muted-foreground)', display: 'flex', alignItems: 'center' }}
-                            >
-                              {collapsedGroups.has(groupKey) ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
-                            </span>
-                          ) : depth > 0 ? (
-                            <span style={{ width: 13, flexShrink: 0 }} />
-                          ) : null}
-                          <span title={textVal} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-                            {textVal || '—'}
-                          </span>
-                        </span>
-                      ) : (
-                        <span
-                          title={textVal}
-                          style={{
-                            display: 'block',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                            color: textVal ? 'var(--foreground)' : 'var(--muted-foreground)',
-                          }}
-                        >
-                          {textVal || '—'}
-                        </span>
-                      )}
-                    </td>
-                  );
-                })}
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-      </DndContext>
-
-      {/* Status picker portal */}
-      {statusPickerFor && statusPickerPos && statusPickerActivity &&
-        createPortal(
-          <StatusPicker
-            value={statusPickerActivity.statusId}
-            statuses={timelineStatuses}
-            onChange={statusId => {
-              update.mutate({ activityId: statusPickerFor, patch: { statusId } });
-              closeStatusPicker();
-            }}
-            onClose={closeStatusPicker}
-            positionStyle={{ position: 'fixed', top: statusPickerPos.top, left: statusPickerPos.left }}
-          />,
-          document.body,
-        )
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (colMenuRef.current && !colMenuRef.current.contains(e.target as Node)) {
+        setColMenuOpen(false);
       }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
-      {/* Assignee picker portal */}
-      {assigneePickerFor && assigneePickerPos &&
-        createPortal(
-          <AssigneePicker
-            members={members}
-            selectedIds={activityById.get(assigneePickerFor)?.assignedMemberIds ?? []}
-            onToggle={memberId => {
-              const activity = activityById.get(assigneePickerFor);
-              if (!activity) return;
-              const current = activity.assignedMemberIds ?? [];
-              const next = current.includes(memberId)
-                ? current.filter(id => id !== memberId)
-                : [...current, memberId];
-              update.mutate({ activityId: assigneePickerFor, patch: { assignedMemberIds: next } });
-            }}
-            onClose={closeAssigneePicker}
-            positionStyle={{ position: 'fixed', top: assigneePickerPos.top, left: assigneePickerPos.left }}
-          />,
-          document.body,
-        )
-      }
-
-      {/* Tag picker portal */}
-      {tagPickerFor && tagPickerPos &&
-        createPortal(
-          <TagPicker
-            teamId={teamId}
-            tags={tags}
-            selectedTagIds={(activityById.get(tagPickerFor)?.tagIds as string[] | undefined) ?? []}
-            onChange={ids => {
-              update.mutate({ activityId: tagPickerFor, patch: { tagIds: ids } as Partial<ApiActivity> });
-            }}
-            onClose={closeTagPicker}
-            positionStyle={{ position: 'fixed', top: tagPickerPos.top, left: tagPickerPos.left }}
-          />,
-          document.body,
-        )
-      }
-
-      {/* Parent picker portal */}
-      {parentPickerFor && parentPickerPos &&
-        createPortal(
-          <ParentPicker
-            activities={rawActivities.filter(a => a.id !== parentPickerFor)}
-            value={activityById.get(parentPickerFor)?.parentActivityId}
-            onChange={id => {
-              update.mutate({ activityId: parentPickerFor, patch: { parentActivityId: id } as Partial<ApiActivity> });
-              closeParentPicker();
-            }}
-            onClose={closeParentPicker}
-            positionStyle={{ position: 'fixed', top: parentPickerPos.top, left: parentPickerPos.left }}
-          />,
-          document.body,
-        )
-      }
-
-      {/* Identity picker portal */}
-      {identityPickerFor && identityPickerPos && (() => {
-        const identityActivity = activityById.get(identityPickerFor);
-        if (!identityActivity) return null;
-        return createPortal(
-          <div
-            ref={identityPickerRef}
-            style={{
-              position: 'fixed',
-              top: identityPickerPos.top,
-              left: identityPickerPos.left,
-              zIndex: 9999,
-              boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
-              borderRadius: 10,
-              border: '1px solid var(--border)',
-              overflow: 'hidden',
-            }}
-          >
-            <IdentityPicker
-              identity={{
-                color: resolveColorHex(identityActivity.color ?? null) ?? '#288C9B',
-                icon: identityActivity.icon ?? '__name_2__',
-              }}
-              name={identityActivity.title}
-              shape="square"
-              onChange={(next: Identity) => {
-                update.mutate({ activityId: identityPickerFor, patch: { color: next.color, icon: next.icon } });
-              }}
-            />
-          </div>,
-          document.body,
-        );
-      })()}
-
-      {/* Row context menu portal */}
-      {contextMenuFor && contextMenuPos && createPortal(
-        <ContextMenu
-          pos={contextMenuPos}
-          onArchive={() => {
-            archiveAct.mutate(contextMenuFor, {
-              onSuccess: () => showToast('Activity archived'),
-            });
-            closeContextMenu();
-          }}
-          onDelete={() => {
-            deleteAct.mutate(contextMenuFor, {
-              onSuccess: () => showToast('Activity deleted'),
-            });
-            closeContextMenu();
-            if (contextMenuFor === selectedActivityId) onSelectActivity?.(null);
-          }}
-          onClose={closeContextMenu}
-        />,
-        document.body,
-      )}
-
-      {/* Toast notification */}
-      {toast && (
-        <div
-          style={{
-            position: 'fixed',
-            bottom: 20,
-            right: 20,
-            zIndex: 9999,
-            background: 'var(--card)',
-            border: '1px solid var(--border)',
-            borderRadius: 8,
-            padding: '8px 14px',
-            fontSize: 12,
-            color: 'var(--foreground)',
-            boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            pointerEvents: 'none',
-          }}
+  return (
+    <div className="flex items-center gap-2 px-3 h-9 bg-card border-b border-border shrink-0" style={{ position: 'relative', zIndex: 30 }}>
+      {/* Columns menu */}
+      <div ref={colMenuRef} className="relative">
+        <button
+          onClick={() => setColMenuOpen(o => !o)}
+          className={cn(ctrlBtn, colMenuOpen && 'bg-muted')}
+          title="Show/hide columns"
         >
-          <Check size={13} strokeWidth={2.5} style={{ color: 'var(--primary)', flexShrink: 0 }} />
-          {toast}
-        </div>
-      )}
+          <Columns2 size={13} strokeWidth={1.8} />
+          Columns
+          <ChevronDown size={11} strokeWidth={2} className={cn('transition-transform', colMenuOpen && 'rotate-180')} />
+        </button>
+
+        {colMenuOpen && (
+          <div
+            style={{
+              position: 'absolute',
+              top: 'calc(100% + 4px)',
+              left: 0,
+              zIndex: 50,
+              background: 'var(--card)',
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
+              minWidth: 180,
+              padding: '6px 0',
+            }}
+          >
+            {columns.map(col => (
+              <label
+                key={col.id}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '5px 12px',
+                  cursor: 'pointer',
+                  fontSize: 12,
+                  color: 'var(--foreground)',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+              >
+                <input
+                  type="checkbox"
+                  checked={col.visible}
+                  onChange={e => onColumnVisibilityChange(col.id, e.target.checked)}
+                  style={{ cursor: 'pointer' }}
+                />
+                {col.label}
+              </label>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className={divider} />
+
+      {/* Group by */}
+      <span className={label}>Group by</span>
+      <select
+        className={select}
+        value={groupBy}
+        onChange={e => onGroupByChange(e.target.value as ListGroupBy)}
+      >
+        <option value="none">None</option>
+        <option value="member">Member</option>
+        <option value="parent">Parent activity</option>
+        <option value="status">Status</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Color by */}
+      <span className={label}>Color by</span>
+      <select
+        className={select}
+        value={colorBy}
+        onChange={e => onColorByChange(e.target.value as ListColorBy)}
+      >
+        <option value="activity">Activity</option>
+        <option value="member">Member</option>
+        <option value="status">Status</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Density toggle */}
+      <button
+        onClick={() => onDensityChange(density === 'comfortable' ? 'compact' : 'comfortable')}
+        className={ctrlBtn}
+        title={density === 'comfortable' ? 'Switch to compact rows' : 'Switch to comfortable rows'}
+      >
+        <AlignJustify size={13} strokeWidth={1.8} />
+        {density === 'comfortable' ? 'Comfortable' : 'Compact'}
+      </button>
+
+      <div className="flex-1" />
+
+      <button className={ctrlBtn} onClick={onExport} title="Export activities">
+        <Download size={13} strokeWidth={1.8} />
+        Export
+      </button>
+
+      <button className={ctrlBtn} onClick={onShare} title="Share this view">
+        <Share2 size={13} strokeWidth={1.8} />
+        Share
+      </button>
     </div>
   );
 }
@@ -50486,6 +52080,111 @@ export function useForceLightDocument(): void {
 }
 ````
 
+## File: packages/web/src/hooks/useImport.ts
+````typescript
+/**
+ * TanStack mutation hooks for the Phase 15 bulk import endpoint.
+ *
+ * Preview and commit are the same stateless endpoint with `dryRun` toggled —
+ * the commit re-uploads the identical file so the two passes cannot diverge.
+ * useCommitImport invalidates the target timeline's activity queries so the
+ * imported rows appear without waiting for the WebSocket event fan-out.
+ */
+
+import { useMutation, useQueryClient } from '@tanstack/react-query'
+import type { components } from '@draba/shared'
+import { createAuthFetch, createAuthFetchBlob } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
+
+export type ImportResult = components['schemas']['ImportResult']
+export type ImportRowResult = components['schemas']['ImportRowResult']
+export type ImportIssue = components['schemas']['ImportIssue']
+
+/** Client-side options for one import pass; `dryRun` is set by the hook. */
+export interface ImportRequestOptions {
+  /** File column header → field name; omitted = server auto-mapping. */
+  mapping?: Record<string, string> | null
+  /** Only consulted when the file's numeric dates stay ambiguous column-wide. */
+  dateOrder?: 'mdy' | 'dmy'
+  createMissingTags?: boolean
+}
+
+export interface ImportRequest {
+  timelineId: string
+  file: File
+  options: ImportRequestOptions
+}
+
+function buildFormData(file: File, options: ImportRequestOptions, dryRun: boolean): FormData {
+  const fd = new FormData()
+  fd.append('file', file)
+  fd.append('options', JSON.stringify({
+    dryRun,
+    ...(options.mapping ? { mapping: options.mapping } : {}),
+    ...(options.dateOrder ? { dateOrder: options.dateOrder } : {}),
+    ...(options.createMissingTags ? { createMissingTags: true } : {}),
+  }))
+  return fd
+}
+
+/** Dry-run pass: parse + validate, write nothing. Safe to re-run on every option change. */
+export function useImportPreview(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  return useMutation({
+    mutationFn: ({ timelineId, file, options }: ImportRequest) =>
+      authFetch<ImportResult>(`/teams/${teamId}/timelines/${timelineId}/import`, {
+        method: 'POST',
+        body: buildFormData(file, options, true),
+      }),
+  })
+}
+
+/** Commit pass: re-parses the identical upload and writes the accepted rows in one transaction. */
+export function useCommitImport(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ timelineId, file, options }: ImportRequest) =>
+      authFetch<ImportResult>(`/teams/${teamId}/timelines/${timelineId}/import`, {
+        method: 'POST',
+        body: buildFormData(file, options, false),
+      }),
+    onSuccess: (_result, { timelineId }) => {
+      void qc.invalidateQueries({ queryKey: ['timelines', timelineId, 'activities'] })
+      // Opted-in tag creation changes the team tag list too.
+      void qc.invalidateQueries({ queryKey: ['teams', teamId, 'tags'] })
+    },
+  })
+}
+
+/** Triggers the browser to save a Blob with the given filename. */
+function saveBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
+/**
+ * Downloads the import template (`csv` or `xlsx`). The template routes are
+ * authenticated, so a plain <a href> won't do — fetch with the token and save.
+ */
+export function useImportTemplate() {
+  const { getAccessToken } = useAuth()
+  const authFetchBlob = createAuthFetchBlob(getAccessToken)
+  return async (format: 'csv' | 'xlsx'): Promise<void> => {
+    const { blob, filename } = await authFetchBlob(`/import/template.${format}`)
+    saveBlob(blob, filename ?? `draba-import-template.${format}`)
+  }
+}
+````
+
 ## File: packages/web/src/hooks/usePublicSettings.ts
 ````typescript
 /**
@@ -50512,196 +52211,6 @@ export function usePublicSettings() {
     queryFn: () => apiFetch<PublicBranding>('/settings/branding'),
     staleTime: 5 * 60 * 1000,
   })
-}
-````
-
-## File: packages/web/src/lib/api.ts
-````typescript
-/**
- * Thin fetch wrapper over the draba REST API.
- *
- * Token lifecycle:
- *   - Access token: kept in memory via the AuthContext; passed as Authorization header.
- *   - Refresh token: persisted in localStorage under REFRESH_TOKEN_KEY.
- *     On a 401, the client attempts one silent refresh then retries the original request.
- *     Concurrent 401s share a single refresh call (mutex via in-flight promise).
- *     If refresh also fails, the registered logout handler is called and the user
- *     is redirected to /login.
- *
- * All callers receive typed JSON or throw an ApiError.
- */
-
-import type { components } from '@draba/shared'
-
-export type ApiErrorBody = components['schemas']['ApiError']
-
-// Empty string = same-origin relative URLs, which is correct when the SPA is
-// embedded in the Go binary. Set VITE_API_URL for local dev against a
-// separate API server (e.g. VITE_API_URL=http://localhost:8080).
-export const API_BASE =
-  (import.meta.env.VITE_API_URL as string | undefined) ?? ''
-
-export const REFRESH_TOKEN_KEY = 'draba_refresh_token'
-
-/** Thrown for any non-2xx response. */
-export class ApiError extends Error {
-  constructor(
-    public readonly status: number,
-    public readonly code: string,
-    message: string,
-    /** Extra fields from the error response body (e.g. assignmentCount on 409). */
-    public readonly data?: Record<string, unknown>,
-  ) {
-    super(message)
-    this.name = 'ApiError'
-  }
-}
-
-/** Reads the stored refresh token from localStorage. */
-export function getStoredRefreshToken(): string | null {
-  return localStorage.getItem(REFRESH_TOKEN_KEY)
-}
-
-/** Persists the refresh token to localStorage. */
-export function storeRefreshToken(token: string): void {
-  localStorage.setItem(REFRESH_TOKEN_KEY, token)
-}
-
-/** Removes the refresh token from localStorage (on logout). */
-export function clearStoredRefreshToken(): void {
-  localStorage.removeItem(REFRESH_TOKEN_KEY)
-}
-
-async function parseError(res: Response): Promise<ApiError> {
-  try {
-    const body = (await res.json()) as ApiErrorBody & Record<string, unknown>
-    const { error, ...rest } = body
-    const data = Object.keys(rest).length > 0 ? (rest as Record<string, unknown>) : undefined
-    return new ApiError(res.status, error.code, error.message, data)
-  } catch {
-    return new ApiError(res.status, 'UNKNOWN', res.statusText)
-  }
-}
-
-/** Low-level fetch that injects the access token and throws ApiError on non-2xx. */
-export async function apiFetch<T>(
-  path: string,
-  init: RequestInit & { accessToken?: string } = {},
-): Promise<T> {
-  const { accessToken, ...rest } = init
-  const headers = new Headers(rest.headers)
-  headers.set('Content-Type', 'application/json')
-  if (accessToken) {
-    headers.set('Authorization', `Bearer ${accessToken}`)
-  }
-
-  const res = await fetch(`${API_BASE}${path}`, { ...rest, headers })
-
-  if (!res.ok) {
-    throw await parseError(res)
-  }
-
-  // 204 No Content — return undefined cast as T
-  if (res.status === 204) {
-    return undefined as unknown as T
-  }
-
-  return res.json() as Promise<T>
-}
-
-/** Extracts the filename from a Content-Disposition header, if present. */
-function filenameFromContentDisposition(header: string | null): string | null {
-  if (!header) return null
-  const match = /filename="?([^";]+)"?/.exec(header)
-  return match ? match[1] : null
-}
-
-/** Low-level fetch for binary responses (file downloads). Throws ApiError on non-2xx. */
-export async function apiFetchBlob(
-  path: string,
-  init: RequestInit & { accessToken?: string } = {},
-): Promise<{ blob: Blob; filename: string | null }> {
-  const { accessToken, ...rest } = init
-  const headers = new Headers(rest.headers)
-  headers.set('Content-Type', 'application/json')
-  if (accessToken) {
-    headers.set('Authorization', `Bearer ${accessToken}`)
-  }
-
-  const res = await fetch(`${API_BASE}${path}`, { ...rest, headers })
-
-  if (!res.ok) {
-    throw await parseError(res)
-  }
-
-  return { blob: await res.blob(), filename: filenameFromContentDisposition(res.headers.get('Content-Disposition')) }
-}
-
-// ── Silent refresh ───────────────────────────────────────────────────────────
-
-/**
- * Registered by AuthProvider on mount. Returns the new access token, or null
- * if the refresh token is expired/invalid (AuthProvider also handles logout
- * and redirect in that case).
- */
-let _silentRefresh: (() => Promise<string | null>) | null = null
-
-/** Mutex: if a refresh is already in flight, share it instead of firing a new one. */
-let _refreshInFlight: Promise<string | null> | null = null
-
-/** Called by AuthProvider to register the silent-refresh callback. */
-export function configureSilentRefresh(fn: (() => Promise<string | null>) | null): void {
-  _silentRefresh = fn
-}
-
-async function doSilentRefresh(): Promise<string | null> {
-  if (!_silentRefresh) return null
-  // Reuse an in-flight refresh instead of firing multiple simultaneous calls.
-  if (!_refreshInFlight) {
-    _refreshInFlight = _silentRefresh().finally(() => {
-      _refreshInFlight = null
-    })
-  }
-  return _refreshInFlight
-}
-
-/**
- * Higher-level wrapper that supplies the access token from a getter function.
- * On a 401, attempts one silent refresh and retries. If the refresh also fails,
- * the registered silentRefresh callback handles logout and redirect.
- *
- * Used by TanStack Query hooks so they never capture a stale token closure.
- */
-export function createAuthFetch(getToken: () => string | null) {
-  return async function authFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
-    try {
-      return await apiFetch<T>(path, { ...init, accessToken: getToken() ?? undefined })
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401 && _silentRefresh) {
-        const newToken = await doSilentRefresh()
-        if (!newToken) throw err
-        // Retry with the freshly-issued token.
-        return apiFetch<T>(path, { ...init, accessToken: newToken })
-      }
-      throw err
-    }
-  }
-}
-
-/** Same silent-refresh behavior as createAuthFetch, for binary (blob) responses. */
-export function createAuthFetchBlob(getToken: () => string | null) {
-  return async function authFetchBlob(path: string, init: RequestInit = {}): Promise<{ blob: Blob; filename: string | null }> {
-    try {
-      return await apiFetchBlob(path, { ...init, accessToken: getToken() ?? undefined })
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401 && _silentRefresh) {
-        const newToken = await doSilentRefresh()
-        if (!newToken) throw err
-        return apiFetchBlob(path, { ...init, accessToken: newToken })
-      }
-      throw err
-    }
-  }
 }
 ````
 
@@ -54426,6 +55935,306 @@ func WriteXLSXColumns(w io.Writer, rows []Row, columns []string) error {
 }
 ````
 
+## File: packages/api/internal/importer/importer.go
+````go
+// Package importer parses CSV/xlsx uploads into validated, resolved activity
+// rows for the Phase 15 tabular import. The contract is "liberal parse, strict
+// write, everything visible": messy-but-unambiguous input is accepted, every
+// interpretation the parser makes surfaces as a per-cell warning, and rows
+// that cannot be made valid are excluded (row-scoped errors, never
+// file-scoped). The package is pure — it never touches the database; callers
+// supply name-to-ID Lookups and write the Resolved payloads themselves.
+package importer
+
+import (
+	"errors"
+	"sort"
+	"strings"
+	"time"
+)
+
+// Size caps for uploaded files. Generous for the target market (small/medium
+// teams); they exist to protect the synchronous request path.
+const (
+	MaxFileBytes = 2 << 20 // 2 MB
+	MaxRows      = 2000    // data rows, excluding the header
+)
+
+// Issue levels. A cell parses ok (no issue recorded), with interpretation
+// (warning — written as stated), or not at all (error — row excluded).
+const (
+	LevelWarning = "warning"
+	LevelError   = "error"
+)
+
+// Row statuses, the roll-up of a row's issue levels.
+const (
+	RowOK      = "ok"
+	RowWarning = "warning"
+	RowError   = "error"
+)
+
+// Field names for the import mapping, matching the camelCase JSON field names
+// used across the API.
+const (
+	FieldTitle       = "title"
+	FieldStart       = "start"
+	FieldEnd         = "end"
+	FieldDescription = "description"
+	FieldStatus      = "status"
+	FieldAssignees   = "assignees"
+	FieldTags        = "tags"
+	FieldParent      = "parent"
+	FieldProgress    = "progress"
+	FieldLocation    = "location"
+	FieldURL         = "url"
+)
+
+// validFields is the set of assignable mapping targets.
+var validFields = map[string]bool{
+	FieldTitle: true, FieldStart: true, FieldEnd: true, FieldDescription: true,
+	FieldStatus: true, FieldAssignees: true, FieldTags: true, FieldParent: true,
+	FieldProgress: true, FieldLocation: true, FieldURL: true,
+}
+
+// FileError is a structural, file-scoped failure (unsupported type, over the
+// caps, no mappable Title column, …). Handlers translate it to a 400; row
+// content problems never produce a FileError.
+type FileError struct {
+	Message string
+}
+
+func (e *FileError) Error() string { return e.Message }
+
+// IsFileError reports whether err is a file-scoped import error.
+func IsFileError(err error) bool {
+	var fe *FileError
+	return errors.As(err, &fe)
+}
+
+// Options are the caller's import settings, decoded from the request's
+// `options` multipart part.
+type Options struct {
+	// DryRun selects the preview pass; false commits.
+	DryRun bool `json:"dryRun"`
+	// Mapping maps file column headers to field names. When nil the server
+	// auto-maps; when set it is authoritative (columns absent from it are
+	// ignored with a warning).
+	Mapping map[string]string `json:"mapping,omitempty"`
+	// DateOrder ("mdy" | "dmy") disambiguates numeric dates only when the
+	// file itself stays ambiguous column-wide. Defaults to "mdy".
+	DateOrder string `json:"dateOrder,omitempty"`
+	// CreateMissingTags opts in to creating unknown tag names instead of
+	// warn-and-skip.
+	CreateMissingTags bool `json:"createMissingTags,omitempty"`
+}
+
+// Lookups carries the target timeline/team's name-to-ID resolution data.
+// All keys are normalized with NormalizeName.
+type Lookups struct {
+	// Statuses maps a normalized status name to its ID on the target timeline.
+	Statuses map[string]string
+	// MembersByName maps a normalized display name to member IDs; more than
+	// one ID means the name is ambiguous ("use email").
+	MembersByName map[string][]string
+	// MembersByEmail maps a normalized email to a member ID.
+	MembersByEmail map[string]string
+	// Tags maps a normalized tag name to its ID.
+	Tags map[string]string
+	// ActivitiesByTitle maps a normalized title to existing activity IDs on
+	// the target timeline, for Parent resolution.
+	ActivitiesByTitle map[string][]string
+	// ExistingKeys holds DuplicateKey values for every existing activity, for
+	// "possible duplicate" warnings.
+	ExistingKeys map[string]bool
+}
+
+// NormalizeName canonicalizes a name for matching: trim, collapse internal
+// whitespace, casefold.
+func NormalizeName(s string) string {
+	return strings.ToLower(strings.Join(strings.Fields(s), " "))
+}
+
+// DuplicateKey builds the identity key used for possible-duplicate detection:
+// normalized title + start + end (ISO dates).
+func DuplicateKey(title, startISO, endISO string) string {
+	return NormalizeName(title) + "\x00" + startISO + "\x00" + endISO
+}
+
+// Issue is one disclosed parser decision or failure, scoped to a field when
+// Field is non-empty.
+type Issue struct {
+	Level   string `json:"level"`
+	Field   string `json:"field,omitempty"`
+	Message string `json:"message"`
+}
+
+// PreviewActivity is the resolved, display-oriented projection of a row for
+// the preview table. Names are shown (not IDs) because the preview's job is
+// to let a human ratify the parser's interpretations.
+type PreviewActivity struct {
+	Title       string   `json:"title"`
+	Start       string   `json:"start,omitempty"`
+	End         string   `json:"end,omitempty"`
+	Description string   `json:"description,omitempty"`
+	Status      string   `json:"status,omitempty"`
+	Assignees   []string `json:"assignees,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	Parent      string   `json:"parent,omitempty"`
+	Progress    *int     `json:"progress,omitempty"`
+	Location    string   `json:"location,omitempty"`
+	URL         string   `json:"url,omitempty"`
+}
+
+// Resolved is the validated write payload for one accepted row. It is never
+// serialized; the commit pass in the handler turns it into repository writes.
+type Resolved struct {
+	Title            string
+	Start            time.Time
+	End              time.Time
+	Description      *string
+	StatusID         *string
+	AssigneeIDs      []string
+	TagIDs           []string
+	MissingTags      []string // tag names to create when CreateMissingTags
+	ParentRowIndex   int      // index into Result.Rows; -1 = none or existing
+	ParentActivityID *string  // existing activity, when ParentRowIndex is -1
+	ParentRaw        string   // the Parent cell text, for the resolution pass
+	Progress         *int
+	Location         *string
+	URL              *string
+}
+
+// RowResult is the outcome for one source row.
+type RowResult struct {
+	// Line is the 1-based source line / sheet row, for spreadsheet
+	// cross-reference.
+	Line     int              `json:"line"`
+	Status   string           `json:"status"`
+	Activity *PreviewActivity `json:"activity,omitempty"`
+	Issues   []Issue          `json:"issues"`
+	// CreatedID is filled on the commit pass for written rows.
+	CreatedID string    `json:"createdId,omitempty"`
+	Resolved  *Resolved `json:"-"`
+}
+
+// Summary is the roll-up shown in the preview strip. Created is zero on the
+// dry-run pass.
+type Summary struct {
+	Total    int `json:"total"`
+	OK       int `json:"ok"`
+	Warnings int `json:"warnings"`
+	Errors   int `json:"errors"`
+	Created  int `json:"created"`
+}
+
+// UnknownNames lists the distinct unresolvable names encountered, in first-seen
+// spelling. Tags drives the "Create N missing tags" checkbox label.
+type UnknownNames struct {
+	Statuses  []string `json:"statuses"`
+	Assignees []string `json:"assignees"`
+	Tags      []string `json:"tags"`
+}
+
+// Result is the full outcome of one parse+validate pass — the response body
+// for both the dry-run and (with CreatedID/Created filled) the commit pass.
+type Result struct {
+	// Mapping is the mapping actually used: every file column header mapped
+	// to a field name, or "" when the column was ignored.
+	Mapping      map[string]string `json:"mapping"`
+	Summary      Summary           `json:"summary"`
+	UnknownNames UnknownNames      `json:"unknownNames"`
+	// FileIssues are file-level warnings (encoding fallback, ignored sheets,
+	// ignored columns) that belong to no single row.
+	FileIssues []Issue     `json:"fileIssues"`
+	Rows       []RowResult `json:"rows"`
+}
+
+// Run parses, maps, and validates an uploaded file against the target
+// timeline's lookups. It returns a *FileError for structural failures and a
+// complete Result otherwise. Run never writes anything — the commit pass
+// re-runs it on byte-identical input and writes the Resolved payloads.
+func Run(data []byte, filename string, opts Options, lk Lookups) (*Result, error) {
+	if len(data) == 0 {
+		return nil, &FileError{Message: "file is empty"}
+	}
+	if len(data) > MaxFileBytes {
+		return nil, &FileError{Message: "file exceeds the 2 MB limit"}
+	}
+
+	pf, err := parseFile(data, filename)
+	if err != nil {
+		return nil, err
+	}
+	if len(pf.rows) > MaxRows {
+		return nil, &FileError{Message: "file exceeds the 2,000 row limit"}
+	}
+
+	mapping, fileIssues, err := buildMapping(pf.headers, opts.Mapping)
+	if err != nil {
+		return nil, err
+	}
+	fileIssues = append(pf.issues, fileIssues...)
+
+	res := resolveRows(pf, mapping, opts, lk)
+	res.Mapping = mappingByHeader(pf.headers, mapping)
+	res.FileIssues = fileIssues
+
+	// The OpenAPI contract declares fileIssues and per-row issues as required
+	// arrays; nil slices would marshal as JSON null and break clients that
+	// index into them.
+	if res.FileIssues == nil {
+		res.FileIssues = []Issue{}
+	}
+	for i := range res.Rows {
+		if res.Rows[i].Issues == nil {
+			res.Rows[i].Issues = []Issue{}
+		}
+	}
+	return res, nil
+}
+
+// AcceptedOrder returns the indices of importable rows (ok and warning —
+// error rows are excluded) ordered so every in-file parent precedes its
+// children, satisfying the parent_activity_id foreign key during the commit
+// transaction. Cycles were already broken by the resolver, so the walk
+// terminates.
+func AcceptedOrder(rows []RowResult) []int {
+	order := make([]int, 0, len(rows))
+	visited := make(map[int]bool, len(rows))
+	var visit func(i int)
+	visit = func(i int) {
+		if visited[i] || rows[i].Resolved == nil || rows[i].Status == RowError {
+			return
+		}
+		visited[i] = true
+		if p := rows[i].Resolved.ParentRowIndex; p >= 0 {
+			visit(p)
+		}
+		order = append(order, i)
+	}
+	for i := range rows {
+		visit(i)
+	}
+	return order
+}
+
+// sortedUnique returns the distinct values in sorted order, so preview
+// output is deterministic across runs.
+func sortedUnique(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+````
+
 ## File: packages/api/internal/importer/parse.go
 ````go
 package importer
@@ -55185,947 +56994,6 @@ export function CleanCalendarSnapshot({
       />
     </>
   )
-}
-````
-
-## File: packages/web/src/components/kanban/KanbanBoard.tsx
-````typescript
-/**
- * KanbanBoard — the DndContext host that owns all columns and the drag overlay.
- *
- * Renders columns in a horizontal scrolling row. On drag-end, derives the
- * correct PATCH payload for the active groupBy and calls onDrop.
- */
-
-import { DndContext, DragOverlay, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
-import type { DragEndEvent, DragStartEvent, DragOverEvent } from '@dnd-kit/core';
-import { useState } from 'react';
-import KanbanColumn from './KanbanColumn';
-import KanbanCard from './KanbanCard';
-import type { KanbanColumn as Column, KanbanCardField, KanbanGroupBy } from './kanbanColumns';
-import type { Member } from '@/types';
-import type { components } from '@draba/shared';
-
-type ApiActivity = components['schemas']['Activity'];
-type Status = components['schemas']['Status'];
-type Tag = components['schemas']['Tag'];
-
-export interface DropPayload {
-  activityId: string;
-  patch: {
-    statusId?: string | null;
-    assignedMemberIds?: string[];
-    parentActivityId?: string | null;
-  };
-}
-
-interface Props {
-  columns: Column[];
-  groupBy: KanbanGroupBy;
-  members: Member[];
-  statusById: Map<string, Status>;
-  tagById: Map<string, Tag>;
-  /** Per-activity resolved hex color for the card accent border. */
-  colorMap: Map<string, string>;
-  cardFields: KanbanCardField[];
-  suppressedFields: Set<KanbanCardField>;
-  selectedActivityId: string | null;
-  matchedIds: Set<string>;
-  activeMatchId: string | null;
-  hasQuery: boolean;
-  collapsedColumnIds: Set<string>;
-  onToggleCollapse: (columnId: string) => void;
-  onCardClick: (activity: ApiActivity) => void;
-  onAddInColumn: (column: Column) => void;
-  onDrop: (payload: DropPayload) => void;
-  /** Map of activity ID → ApiActivity for drag overlay lookup. */
-  activityById: Map<string, ApiActivity>;
-  /** Map of activity ID → title, for showing parent names on child cards. */
-  activityTitleById: Map<string, string>;
-  // ── Hierarchy ────────────────────────────────────────────────────────────────
-  showHierarchy: boolean;
-  childrenByParentId: Map<string, ApiActivity[]>;
-  collapsedParents: Set<string>;
-  onToggleParent: (activityId: string) => void;
-  /** When false (public share viewer), drag, drop, and clicks are inert. Defaults to true. */
-  interactive?: boolean;
-}
-
-export default function KanbanBoard({
-  columns,
-  groupBy,
-  members,
-  statusById,
-  tagById,
-  colorMap,
-  cardFields,
-  suppressedFields,
-  showHierarchy,
-  childrenByParentId,
-  collapsedParents,
-  onToggleParent,
-  selectedActivityId,
-  matchedIds,
-  activeMatchId,
-  hasQuery,
-  collapsedColumnIds,
-  onToggleCollapse,
-  onCardClick,
-  onAddInColumn,
-  onDrop,
-  activityById,
-  activityTitleById,
-  interactive = true,
-}: Props) {
-  const [draggingId, setDraggingId] = useState<string | null>(null);
-  const [overColumnId, setOverColumnId] = useState<string | null>(null);
-
-  // Require a 5px drag threshold to prevent accidental drags on card clicks.
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-  );
-
-  function handleDragStart({ active }: DragStartEvent) {
-    setDraggingId(active.id as string);
-  }
-
-  function handleDragEnd({ active, over }: DragEndEvent) {
-    setDraggingId(null);
-    setOverColumnId(null);
-    if (!over) return;
-
-    const activityId = typeof active.id === 'string' ? active.id : String(active.id);
-    const columnId = typeof over.id === 'string' ? over.id : String(over.id);
-
-    const column = columns.find(c => c.id === columnId);
-    if (!column || !column.droppable || !column.dropValue) return;
-
-    // Determine if anything actually changed before issuing a PATCH.
-    const activity = activityById.get(activityId);
-    if (!activity) return;
-
-    // Skip if the card is already in this column (no-op drop).
-    const isAlreadyHere = (() => {
-      switch (groupBy) {
-        case 'status': {
-          const currentStatus = (activity as ApiActivity & { statusId?: string | null }).statusId ?? null;
-          return currentStatus === (column.dropValue.statusId ?? null);
-        }
-        case 'member': {
-          const primary = activity.assignedMemberIds?.[0] ?? null;
-          const target = column.dropValue.assignedMemberIds?.[0] ?? null;
-          return primary === target;
-        }
-        default:
-          return false;
-      }
-    })();
-
-    if (isAlreadyHere) return;
-
-    onDrop({ activityId, patch: column.dropValue });
-  }
-
-  function handleDragOver({ over }: DragOverEvent) {
-    setOverColumnId(over ? String(over.id) : null);
-  }
-
-  const draggingActivity = draggingId ? activityById.get(draggingId) : undefined;
-
-  return (
-    <DndContext
-      sensors={sensors}
-      onDragStart={handleDragStart}
-      onDragEnd={handleDragEnd}
-      onDragOver={handleDragOver}
-    >
-      <div
-        data-export-role="kanban-columns-row"
-        style={{
-          display: 'flex',
-          flexDirection: 'row',
-          gap: 12,
-          padding: '12px 16px 16px',
-          overflowX: 'auto',
-          overflowY: 'hidden',
-          height: '100%',
-          alignItems: 'flex-start',
-          boxSizing: 'border-box',
-        }}
-      >
-        {columns.map(col => (
-          <KanbanColumn
-            key={col.id}
-            column={col}
-            members={members}
-            statusById={statusById}
-            tagById={tagById}
-            colorMap={colorMap}
-            activityTitleById={activityTitleById}
-            cardFields={cardFields}
-            suppressedFields={suppressedFields}
-            showHierarchy={showHierarchy}
-            childrenByParentId={childrenByParentId}
-            collapsedParents={collapsedParents}
-            onToggleParent={onToggleParent}
-            selectedActivityId={selectedActivityId}
-            matchedIds={matchedIds}
-            activeMatchId={activeMatchId}
-            hasQuery={hasQuery}
-            isOver={overColumnId === col.id && col.droppable}
-            isCollapsed={collapsedColumnIds.has(col.id)}
-            onToggleCollapse={() => onToggleCollapse(col.id)}
-            onCardClick={onCardClick}
-            onAddClick={() => onAddInColumn(col)}
-            interactive={interactive}
-          />
-        ))}
-      </div>
-
-      {/* Drag overlay — floats above everything while dragging */}
-      <DragOverlay dropAnimation={null}>
-        {interactive && draggingActivity ? (
-          <KanbanCard
-            activity={draggingActivity}
-            accentColor={colorMap.get(draggingActivity.id) ?? '#6b7280'}
-            members={members}
-            statusById={statusById}
-            tagById={tagById}
-            cardFields={cardFields}
-            suppressedFields={suppressedFields}
-            isSelected={false}
-            dimmed={false}
-            activeMatch={false}
-            isDragOverlay
-            onClick={() => {}}
-          />
-        ) : null}
-      </DragOverlay>
-    </DndContext>
-  );
-}
-````
-
-## File: packages/web/src/components/kanban/KanbanColumn.tsx
-````typescript
-/**
- * KanbanColumn — a single droppable column with a header, card list, and "+ Add" affordance.
- *
- * Uses @dnd-kit useDroppable. When the column is non-droppable (combination/none grouping),
- * the drop-target is simply not registered and DnD events are ignored.
- *
- * Hierarchy: when showHierarchy is on, CardTree renders each root activity plus
- * its descendants indented beneath it. CardTree is defined at module level (outside
- * KanbanColumn) to give it a stable identity across re-renders — defining a component
- * inside another component causes React to unmount/remount the subtree on every render.
- */
-
-import { useDroppable } from '@dnd-kit/core';
-import { ChevronDown, ChevronRight, Plus } from 'lucide-react';
-import { resolveColorHex } from '@/components/identity/identity-constants';
-import KanbanCard from './KanbanCard';
-import type { KanbanColumn as Column, KanbanCardField } from './kanbanColumns';
-import type { Member } from '@/types';
-import type { components } from '@draba/shared';
-
-type ApiActivity = components['schemas']['Activity'];
-type Status = components['schemas']['Status'];
-type Tag = components['schemas']['Tag'];
-
-// ── CardTree ──────────────────────────────────────────────────────────────────
-
-/**
- * Renders one activity card and, when hierarchy is on, its children indented
- * beneath it (recursively). Defined at module level so React gives it a stable
- * component identity and doesn't unmount/remount on every KanbanColumn render.
- */
-interface CardTreeProps {
-  activity: ApiActivity;
-  depth: number;
-  // Column rendering context
-  accentColor: string;
-  colorMap: Map<string, string>;
-  members: Member[];
-  statusById: Map<string, Status>;
-  tagById: Map<string, Tag>;
-  activityTitleById: Map<string, string>;
-  cardFields: KanbanCardField[];
-  suppressedFields: Set<KanbanCardField>;
-  selectedActivityId: string | null;
-  matchedIds: Set<string>;
-  activeMatchId: string | null;
-  hasQuery: boolean;
-  onCardClick: (activity: ApiActivity) => void;
-  // Hierarchy context
-  showHierarchy: boolean;
-  childrenByParentId: Map<string, ApiActivity[]>;
-  collapsedParents: Set<string>;
-  onToggleParent: (activityId: string) => void;
-  interactive: boolean;
-}
-
-function CardTree({
-  activity,
-  depth,
-  accentColor,
-  colorMap,
-  members,
-  statusById,
-  tagById,
-  activityTitleById,
-  cardFields,
-  suppressedFields,
-  selectedActivityId,
-  matchedIds,
-  activeMatchId,
-  hasQuery,
-  onCardClick,
-  showHierarchy,
-  childrenByParentId,
-  collapsedParents,
-  onToggleParent,
-  interactive,
-}: CardTreeProps) {
-  const children = showHierarchy ? (childrenByParentId.get(activity.id) ?? []) : [];
-  const hasChildren = children.length > 0;
-  const isCollapsed = collapsedParents.has(activity.id);
-  const indentPx = Math.min(depth, 2) * 16;
-
-  const cardTreeProps = {
-    accentColor,
-    colorMap,
-    members,
-    statusById,
-    tagById,
-    activityTitleById,
-    cardFields,
-    suppressedFields,
-    selectedActivityId,
-    matchedIds,
-    activeMatchId,
-    hasQuery,
-    onCardClick,
-    showHierarchy,
-    childrenByParentId,
-    collapsedParents,
-    onToggleParent,
-    interactive,
-  };
-
-  return (
-    <>
-      <div style={depth > 0 ? { paddingLeft: indentPx } : undefined}>
-        <KanbanCard
-          activity={activity}
-          accentColor={colorMap.get(activity.id) ?? accentColor}
-          members={members}
-          statusById={statusById}
-          tagById={tagById}
-          activityTitleById={activityTitleById}
-          cardFields={cardFields}
-          suppressedFields={suppressedFields}
-          isSelected={selectedActivityId === activity.id}
-          dimmed={hasQuery && !matchedIds.has(activity.id)}
-          activeMatch={activeMatchId === activity.id}
-          isChildCard={depth > 0}
-          hasHierarchyChildren={hasChildren}
-          isHierarchyCollapsed={isCollapsed}
-          onToggleHierarchy={() => onToggleParent(activity.id)}
-          onClick={() => onCardClick(activity)}
-          interactive={interactive}
-        />
-      </div>
-      {hasChildren && !isCollapsed && children.map(child => (
-        <CardTree
-          key={child.id}
-          activity={child}
-          depth={depth + 1}
-          {...cardTreeProps}
-        />
-      ))}
-    </>
-  );
-}
-
-interface Props {
-  column: Column;
-  members: Member[];
-  statusById: Map<string, Status>;
-  tagById: Map<string, Tag>;
-  /** Per-activity resolved hex color for card accent borders. */
-  colorMap: Map<string, string>;
-  /** Activity ID → title, for showing the parent name on child cards. */
-  activityTitleById: Map<string, string>;
-  cardFields: KanbanCardField[];
-  suppressedFields: Set<KanbanCardField>;
-  selectedActivityId: string | null;
-  matchedIds: Set<string>;
-  activeMatchId: string | null;
-  hasQuery: boolean;
-  isOver: boolean;
-  isCollapsed: boolean;
-  onToggleCollapse: () => void;
-  onCardClick: (activity: ApiActivity) => void;
-  onAddClick: () => void;
-  // ── Hierarchy ────────────────────────────────────────────────────────────────
-  showHierarchy: boolean;
-  /** Maps parentActivityId → direct child activities. */
-  childrenByParentId: Map<string, ApiActivity[]>;
-  /** Set of parent activity IDs whose children are hidden. */
-  collapsedParents: Set<string>;
-  onToggleParent: (activityId: string) => void;
-  /** When false (public share viewer), drag, drop, and clicks are inert. Defaults to true. */
-  interactive?: boolean;
-}
-
-const COLUMN_WIDTH = 260;
-const COLLAPSED_WIDTH = 40;
-
-export default function KanbanColumn({
-  column,
-  members,
-  statusById,
-  tagById,
-  colorMap,
-  activityTitleById,
-  cardFields,
-  suppressedFields,
-  selectedActivityId,
-  matchedIds,
-  activeMatchId,
-  hasQuery,
-  isOver,
-  isCollapsed,
-  onToggleCollapse,
-  onCardClick,
-  onAddClick,
-  showHierarchy,
-  childrenByParentId,
-  collapsedParents,
-  onToggleParent,
-  interactive = true,
-}: Props) {
-  const { setNodeRef, isOver: dndIsOver } = useDroppable({
-    id: column.id,
-    disabled: !column.droppable || !interactive,
-    data: { columnId: column.id },
-  });
-
-  const accentColor = column.color
-    ? (resolveColorHex(column.color) ?? column.color)
-    : '#6b7280';
-
-  const highlighted = isOver || dndIsOver;
-
-  // Shared props forwarded to each CardTree node.
-  const treeProps = {
-    accentColor,
-    colorMap,
-    members,
-    statusById,
-    tagById,
-    activityTitleById,
-    cardFields,
-    suppressedFields,
-    selectedActivityId,
-    matchedIds,
-    activeMatchId,
-    hasQuery,
-    onCardClick,
-    showHierarchy,
-    childrenByParentId,
-    collapsedParents,
-    onToggleParent,
-    interactive,
-  };
-
-  if (isCollapsed) {
-    return (
-      <div
-        style={{
-          width: COLLAPSED_WIDTH,
-          flexShrink: 0,
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          background: 'var(--muted)',
-          borderRadius: 8,
-          padding: '8px 0',
-          cursor: interactive ? 'pointer' : 'default',
-          border: '1px solid var(--border)',
-          minHeight: 120,
-          gap: 8,
-        }}
-        onClick={interactive ? onToggleCollapse : undefined}
-        title={`${column.label} (${column.items.length})`}
-      >
-        <ChevronRight size={14} strokeWidth={2} style={{ color: 'var(--muted-foreground)' }} />
-        <span
-          style={{
-            fontSize: 11,
-            fontWeight: 600,
-            color: 'var(--muted-foreground)',
-            writingMode: 'vertical-rl',
-            transform: 'rotate(180deg)',
-            letterSpacing: '0.04em',
-          }}
-        >
-          {column.label}
-        </span>
-        <span
-          style={{
-            fontSize: 10,
-            color: 'var(--muted-foreground)',
-            background: 'var(--border)',
-            borderRadius: 9,
-            padding: '1px 5px',
-          }}
-        >
-          {column.items.length}
-        </span>
-      </div>
-    );
-  }
-
-  return (
-    <div
-      ref={setNodeRef}
-      data-export-role="kanban-column"
-      style={{
-        width: COLUMN_WIDTH,
-        flexShrink: 0,
-        display: 'flex',
-        flexDirection: 'column',
-        background: highlighted ? `${accentColor}0d` : 'var(--muted)',
-        border: `1px solid ${highlighted ? accentColor + '80' : 'var(--border)'}`,
-        borderRadius: 8,
-        transition: 'background 120ms, border-color 120ms',
-        maxHeight: '100%',
-      }}
-    >
-      {/* Column header */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          padding: '8px 10px',
-          borderBottom: '1px solid var(--border)',
-          flexShrink: 0,
-        }}
-      >
-        {/* Accent dot */}
-        <span
-          style={{
-            width: 9,
-            height: 9,
-            borderRadius: '50%',
-            background: accentColor,
-            flexShrink: 0,
-          }}
-        />
-
-        {/* Column label */}
-        <span
-          style={{
-            flex: 1,
-            fontSize: 12,
-            fontWeight: 600,
-            color: 'var(--foreground)',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          }}
-        >
-          {column.label}
-        </span>
-
-        {/* Count badge */}
-        <span
-          style={{
-            fontSize: 11,
-            color: 'var(--muted-foreground)',
-            background: 'var(--border)',
-            borderRadius: 9,
-            padding: '1px 6px',
-            fontWeight: 600,
-          }}
-        >
-          {column.items.length}
-        </span>
-
-        {/* Collapse toggle — hidden in read-only public views */}
-        {interactive && (
-        <button
-          onClick={onToggleCollapse}
-          title="Collapse column"
-          style={{
-            background: 'none',
-            border: 'none',
-            cursor: 'pointer',
-            padding: 2,
-            color: 'var(--muted-foreground)',
-            display: 'flex',
-            alignItems: 'center',
-          }}
-        >
-          <ChevronDown size={13} strokeWidth={2} />
-        </button>
-        )}
-      </div>
-
-      {/* Card list — scrolls independently */}
-      <div
-        style={{
-          flex: 1,
-          overflowY: 'auto',
-          padding: '8px 8px 4px',
-          minHeight: 80,
-        }}
-      >
-        {column.items.length === 0 ? (
-          <div
-            style={{
-              padding: '12px 8px',
-              fontSize: 12,
-              color: 'var(--muted-foreground)',
-              textAlign: 'center',
-              fontStyle: 'italic',
-            }}
-          >
-            No activities
-          </div>
-        ) : (
-          column.items.map(act => (
-            <CardTree
-              key={act.id}
-              activity={act}
-              depth={0}
-              {...treeProps}
-            />
-          ))
-        )}
-      </div>
-
-      {/* + Add affordance — hidden in read-only public views */}
-      {interactive && (
-      <div style={{ padding: '4px 8px 8px', flexShrink: 0 }}>
-        <button
-          onClick={onAddClick}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 4,
-            width: '100%',
-            padding: '5px 8px',
-            background: 'none',
-            border: '1px dashed var(--border)',
-            borderRadius: 6,
-            cursor: 'pointer',
-            fontSize: 12,
-            color: 'var(--muted-foreground)',
-            transition: 'border-color 120ms, color 120ms',
-          }}
-          onMouseEnter={e => {
-            e.currentTarget.style.borderColor = accentColor;
-            e.currentTarget.style.color = accentColor;
-          }}
-          onMouseLeave={e => {
-            e.currentTarget.style.borderColor = 'var(--border)';
-            e.currentTarget.style.color = 'var(--muted-foreground)';
-          }}
-        >
-          <Plus size={12} strokeWidth={2} />
-          Add
-        </button>
-      </div>
-      )}
-    </div>
-  );
-}
-````
-
-## File: packages/web/src/components/kanban/KanbanToolbar.tsx
-````typescript
-/**
- * KanbanToolbar — sub-toolbar for the Kanban view.
- *
- * Controls: Group by · Sort by · Color by · Card fields multi-select · Export/Share stubs.
- * Follows the same visual idiom as GanttToolbar and CalendarToolbar.
- */
-
-import { useState, useRef, useEffect } from 'react';
-import { Download, Share2, ChevronDown, Check, Network } from 'lucide-react';
-import type { ColorBy } from '@/components/gantt/GanttToolbar';
-import type { KanbanGroupBy, KanbanSortBy, KanbanCardField } from './kanbanColumns';
-import { DEFAULT_CARD_FIELDS } from './kanbanColumns';
-
-export type { KanbanGroupBy, KanbanSortBy, KanbanCardField };
-
-interface Props {
-  groupBy: KanbanGroupBy;
-  onGroupByChange: (g: KanbanGroupBy) => void;
-  sortBy: KanbanSortBy;
-  onSortByChange: (s: KanbanSortBy) => void;
-  colorBy: ColorBy;
-  onColorByChange: (c: ColorBy) => void;
-  cardFields: KanbanCardField[];
-  onCardFieldsChange: (fields: KanbanCardField[]) => void;
-  showHierarchy: boolean;
-  onShowHierarchyChange: (on: boolean) => void;
-  onExport?: () => void;
-  onShare?: () => void;
-}
-
-const btn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0 hover:bg-muted transition-colors';
-const divider = 'w-px h-4 bg-border shrink-0';
-const label = 'text-[11px] text-muted-foreground shrink-0';
-const select = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
-
-const ALL_CARD_FIELDS: { id: KanbanCardField; label: string }[] = [
-  { id: 'dateRange',       label: 'Date range' },
-  { id: 'status',          label: 'Status' },
-  { id: 'tags',            label: 'Tags' },
-  { id: 'members',         label: 'Assigned to' },
-  { id: 'percentComplete', label: '% Complete' },
-  { id: 'parent',          label: 'Parent' },
-  { id: 'description',     label: 'Description' },
-];
-
-export default function KanbanToolbar({
-  groupBy,
-  onGroupByChange,
-  sortBy,
-  onSortByChange,
-  colorBy,
-  onColorByChange,
-  cardFields,
-  onCardFieldsChange,
-  showHierarchy,
-  onShowHierarchyChange,
-  onExport,
-  onShare,
-}: Props) {
-  const [cardFieldsOpen, setCardFieldsOpen] = useState(false);
-  const dropdownRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!cardFieldsOpen) return;
-    function handleClick(e: MouseEvent) {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
-        setCardFieldsOpen(false);
-      }
-    }
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [cardFieldsOpen]);
-
-  function toggleField(id: KanbanCardField) {
-    if (cardFields.includes(id)) {
-      onCardFieldsChange(cardFields.filter(f => f !== id));
-    } else {
-      onCardFieldsChange([...cardFields, id]);
-    }
-  }
-
-  const activeFieldCount = cardFields.length;
-
-  return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 8,
-        padding: '0 12px',
-        height: 36,
-        background: 'var(--card)',
-        borderBottom: '1px solid var(--border)',
-        flexShrink: 0,
-      }}
-    >
-      {/* Group by */}
-      <span className={label}>Group by</span>
-      <select
-        className={select}
-        value={groupBy}
-        onChange={e => onGroupByChange(e.target.value as KanbanGroupBy)}
-      >
-        <option value="status">Status</option>
-        <option value="member">Assigned to</option>
-        <option value="member-combination">Assigned to (combo)</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Sort by */}
-      <span className={label}>Sort by</span>
-      <select
-        className={select}
-        value={sortBy}
-        onChange={e => onSortByChange(e.target.value as KanbanSortBy)}
-      >
-        <option value="startDate">Start date</option>
-        <option value="endDate">End date</option>
-        <option value="title">Title</option>
-        <option value="percentComplete">% Complete</option>
-        <option value="updatedAt">Recently updated</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Color by */}
-      <span className={label}>Color by</span>
-      <select
-        className={select}
-        value={colorBy}
-        onChange={e => onColorByChange(e.target.value as ColorBy)}
-      >
-        <option value="activity">Activity</option>
-        <option value="member">Member</option>
-        <option value="status">Status</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Card fields multi-select */}
-      <div ref={dropdownRef} style={{ position: 'relative' }}>
-        <button
-          className={btn}
-          onClick={() => setCardFieldsOpen(o => !o)}
-          title="Configure card fields"
-        >
-          Card fields
-          {activeFieldCount > 0 && (
-            <span
-              style={{
-                background: 'var(--primary)',
-                color: 'var(--primary-foreground)',
-                borderRadius: 9,
-                fontSize: 10,
-                fontWeight: 700,
-                padding: '0 5px',
-                lineHeight: '16px',
-              }}
-            >
-              {activeFieldCount}
-            </span>
-          )}
-          <ChevronDown size={11} strokeWidth={2} />
-        </button>
-
-        {cardFieldsOpen && (
-          <div
-            style={{
-              position: 'absolute',
-              top: 'calc(100% + 4px)',
-              left: 0,
-              background: 'var(--card)',
-              border: '1px solid var(--border)',
-              borderRadius: 8,
-              boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
-              zIndex: 50,
-              minWidth: 160,
-              padding: '4px 0',
-            }}
-          >
-            {ALL_CARD_FIELDS.map(f => {
-              const checked = cardFields.includes(f.id);
-              return (
-                <button
-                  key={f.id}
-                  onClick={() => toggleField(f.id)}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    width: '100%',
-                    padding: '6px 12px',
-                    background: 'none',
-                    border: 'none',
-                    cursor: 'pointer',
-                    fontSize: 12,
-                    color: 'var(--foreground)',
-                    textAlign: 'left',
-                  }}
-                  onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                  onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                >
-                  <span
-                    style={{
-                      width: 14,
-                      height: 14,
-                      border: '1.5px solid var(--border)',
-                      borderRadius: 3,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      background: checked ? 'var(--primary)' : 'transparent',
-                      borderColor: checked ? 'var(--primary)' : 'var(--border)',
-                      flexShrink: 0,
-                    }}
-                  >
-                    {checked && <Check size={9} strokeWidth={3} color="var(--primary-foreground)" />}
-                  </span>
-                  {f.label}
-                </button>
-              );
-            })}
-            <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
-            <button
-              onClick={() => onCardFieldsChange(DEFAULT_CARD_FIELDS)}
-              style={{
-                display: 'flex',
-                width: '100%',
-                padding: '6px 12px',
-                background: 'none',
-                border: 'none',
-                cursor: 'pointer',
-                fontSize: 11,
-                color: 'var(--muted-foreground)',
-                textAlign: 'left',
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-              onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-            >
-              Reset to defaults
-            </button>
-          </div>
-        )}
-      </div>
-
-      <div className={divider} />
-
-      {/* Hierarchy toggle */}
-      <button
-        className={btn}
-        onClick={() => onShowHierarchyChange(!showHierarchy)}
-        title={showHierarchy
-          ? 'Hierarchy on: child activities nest under their parent. Click to show flat list.'
-          : 'Hierarchy off: all activities shown at top level. Click to nest children under parents.'}
-        style={{
-          background: showHierarchy ? 'var(--primary)' : undefined,
-          color: showHierarchy ? 'var(--primary-foreground)' : undefined,
-          borderColor: showHierarchy ? 'var(--primary)' : undefined,
-        }}
-      >
-        <Network size={12} strokeWidth={1.8} />
-        Hierarchy
-      </button>
-
-      {/* Export + share — pushed to the right */}
-      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
-        <div className={divider} />
-        <button className={btn} onClick={onExport} title="Export activities">
-          <Download size={12} strokeWidth={1.8} />
-          Export
-        </button>
-        <button className={btn} onClick={onShare} title="Share this view">
-          <Share2 size={12} strokeWidth={1.8} />
-          Share
-        </button>
-      </div>
-    </div>
-  );
 }
 ````
 
@@ -57334,193 +58202,6 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImpo
 }
 ````
 
-## File: packages/web/src/components/list/ListToolbar.tsx
-````typescript
-/**
- * ListToolbar — sub-toolbar for the List view.
- *
- * Provides Columns (hide/show menu), Density toggle, Group by, Sort by, and
- * Color by controls. The Columns menu includes drag-reorder handles (implemented
- * via @dnd-kit) so column order can be changed from the menu as well as by
- * dragging the table headers.
- */
-
-import { useState, useRef, useEffect } from 'react';
-import { Columns2, ChevronDown, Download, Share2, AlignJustify } from 'lucide-react';
-import { cn } from '@/lib/utils';
-
-export type ListGroupBy = 'none' | 'member' | 'parent' | 'status';
-export type ListSortBy = 'startDate' | 'endDate' | 'title' | 'status' | 'progress';
-export type ListColorBy = 'activity' | 'member' | 'status';
-export type ListDensity = 'comfortable' | 'compact';
-
-export interface ColumnConfig {
-  id: string;
-  label: string;
-  visible: boolean;
-}
-
-interface Props {
-  columns: ColumnConfig[];
-  onColumnVisibilityChange: (columnId: string, visible: boolean) => void;
-  density: ListDensity;
-  onDensityChange: (d: ListDensity) => void;
-  groupBy: ListGroupBy;
-  onGroupByChange: (g: ListGroupBy) => void;
-  sortBy: ListSortBy;
-  onSortByChange: (s: ListSortBy) => void;
-  colorBy: ListColorBy;
-  onColorByChange: (c: ListColorBy) => void;
-  onExport?: () => void;
-  onShare?: () => void;
-}
-
-const ctrlBtn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0';
-const divider  = 'w-px h-4 bg-border shrink-0';
-const label    = 'text-[11px] text-muted-foreground shrink-0';
-const select   = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
-
-export default function ListToolbar({
-  columns,
-  onColumnVisibilityChange,
-  density,
-  onDensityChange,
-  groupBy,
-  onGroupByChange,
-  sortBy: _sortBy,
-  onSortByChange: _onSortByChange,
-  colorBy,
-  onColorByChange,
-  onExport,
-  onShare,
-}: Props) {
-  const [colMenuOpen, setColMenuOpen] = useState(false);
-  const colMenuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      if (colMenuRef.current && !colMenuRef.current.contains(e.target as Node)) {
-        setColMenuOpen(false);
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
-
-  return (
-    <div className="flex items-center gap-2 px-3 h-9 bg-card border-b border-border shrink-0" style={{ position: 'relative', zIndex: 30 }}>
-      {/* Columns menu */}
-      <div ref={colMenuRef} className="relative">
-        <button
-          onClick={() => setColMenuOpen(o => !o)}
-          className={cn(ctrlBtn, colMenuOpen && 'bg-muted')}
-          title="Show/hide columns"
-        >
-          <Columns2 size={13} strokeWidth={1.8} />
-          Columns
-          <ChevronDown size={11} strokeWidth={2} className={cn('transition-transform', colMenuOpen && 'rotate-180')} />
-        </button>
-
-        {colMenuOpen && (
-          <div
-            style={{
-              position: 'absolute',
-              top: 'calc(100% + 4px)',
-              left: 0,
-              zIndex: 50,
-              background: 'var(--card)',
-              border: '1px solid var(--border)',
-              borderRadius: 8,
-              boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
-              minWidth: 180,
-              padding: '6px 0',
-            }}
-          >
-            {columns.map(col => (
-              <label
-                key={col.id}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '5px 12px',
-                  cursor: 'pointer',
-                  fontSize: 12,
-                  color: 'var(--foreground)',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-              >
-                <input
-                  type="checkbox"
-                  checked={col.visible}
-                  onChange={e => onColumnVisibilityChange(col.id, e.target.checked)}
-                  style={{ cursor: 'pointer' }}
-                />
-                {col.label}
-              </label>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <div className={divider} />
-
-      {/* Group by */}
-      <span className={label}>Group by</span>
-      <select
-        className={select}
-        value={groupBy}
-        onChange={e => onGroupByChange(e.target.value as ListGroupBy)}
-      >
-        <option value="none">None</option>
-        <option value="member">Member</option>
-        <option value="parent">Parent activity</option>
-        <option value="status">Status</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Color by */}
-      <span className={label}>Color by</span>
-      <select
-        className={select}
-        value={colorBy}
-        onChange={e => onColorByChange(e.target.value as ListColorBy)}
-      >
-        <option value="activity">Activity</option>
-        <option value="member">Member</option>
-        <option value="status">Status</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Density toggle */}
-      <button
-        onClick={() => onDensityChange(density === 'comfortable' ? 'compact' : 'comfortable')}
-        className={ctrlBtn}
-        title={density === 'comfortable' ? 'Switch to compact rows' : 'Switch to comfortable rows'}
-      >
-        <AlignJustify size={13} strokeWidth={1.8} />
-        {density === 'comfortable' ? 'Comfortable' : 'Compact'}
-      </button>
-
-      <div className="flex-1" />
-
-      <button className={ctrlBtn} onClick={onExport} title="Export activities">
-        <Download size={13} strokeWidth={1.8} />
-        Export
-      </button>
-
-      <button className={ctrlBtn} onClick={onShare} title="Share this view">
-        <Share2 size={13} strokeWidth={1.8} />
-        Share
-      </button>
-    </div>
-  );
-}
-````
-
 ## File: packages/web/src/hooks/useExport.ts
 ````typescript
 /**
@@ -58110,6 +58791,199 @@ export function useUnlockShare(token: string | undefined) {
       return (body as { token: string }).token
     },
   })
+}
+````
+
+## File: packages/web/src/lib/api.ts
+````typescript
+/**
+ * Thin fetch wrapper over the draba REST API.
+ *
+ * Token lifecycle:
+ *   - Access token: kept in memory via the AuthContext; passed as Authorization header.
+ *   - Refresh token: persisted in localStorage under REFRESH_TOKEN_KEY.
+ *     On a 401, the client attempts one silent refresh then retries the original request.
+ *     Concurrent 401s share a single refresh call (mutex via in-flight promise).
+ *     If refresh also fails, the registered logout handler is called and the user
+ *     is redirected to /login.
+ *
+ * All callers receive typed JSON or throw an ApiError.
+ */
+
+import type { components } from '@draba/shared'
+
+export type ApiErrorBody = components['schemas']['ApiError']
+
+// Empty string = same-origin relative URLs, which is correct when the SPA is
+// embedded in the Go binary. Set VITE_API_URL for local dev against a
+// separate API server (e.g. VITE_API_URL=http://localhost:8080).
+export const API_BASE =
+  (import.meta.env.VITE_API_URL as string | undefined) ?? ''
+
+export const REFRESH_TOKEN_KEY = 'draba_refresh_token'
+
+/** Thrown for any non-2xx response. */
+export class ApiError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly code: string,
+    message: string,
+    /** Extra fields from the error response body (e.g. assignmentCount on 409). */
+    public readonly data?: Record<string, unknown>,
+  ) {
+    super(message)
+    this.name = 'ApiError'
+  }
+}
+
+/** Reads the stored refresh token from localStorage. */
+export function getStoredRefreshToken(): string | null {
+  return localStorage.getItem(REFRESH_TOKEN_KEY)
+}
+
+/** Persists the refresh token to localStorage. */
+export function storeRefreshToken(token: string): void {
+  localStorage.setItem(REFRESH_TOKEN_KEY, token)
+}
+
+/** Removes the refresh token from localStorage (on logout). */
+export function clearStoredRefreshToken(): void {
+  localStorage.removeItem(REFRESH_TOKEN_KEY)
+}
+
+async function parseError(res: Response): Promise<ApiError> {
+  try {
+    const body = (await res.json()) as ApiErrorBody & Record<string, unknown>
+    const { error, ...rest } = body
+    const data = Object.keys(rest).length > 0 ? (rest as Record<string, unknown>) : undefined
+    return new ApiError(res.status, error.code, error.message, data)
+  } catch {
+    return new ApiError(res.status, 'UNKNOWN', res.statusText)
+  }
+}
+
+/** Low-level fetch that injects the access token and throws ApiError on non-2xx. */
+export async function apiFetch<T>(
+  path: string,
+  init: RequestInit & { accessToken?: string } = {},
+): Promise<T> {
+  const { accessToken, ...rest } = init
+  const headers = new Headers(rest.headers)
+  // FormData bodies must let the browser set the multipart boundary itself.
+  if (!(rest.body instanceof FormData)) {
+    headers.set('Content-Type', 'application/json')
+  }
+  if (accessToken) {
+    headers.set('Authorization', `Bearer ${accessToken}`)
+  }
+
+  const res = await fetch(`${API_BASE}${path}`, { ...rest, headers })
+
+  if (!res.ok) {
+    throw await parseError(res)
+  }
+
+  // 204 No Content — return undefined cast as T
+  if (res.status === 204) {
+    return undefined as unknown as T
+  }
+
+  return res.json() as Promise<T>
+}
+
+/** Extracts the filename from a Content-Disposition header, if present. */
+function filenameFromContentDisposition(header: string | null): string | null {
+  if (!header) return null
+  const match = /filename="?([^";]+)"?/.exec(header)
+  return match ? match[1] : null
+}
+
+/** Low-level fetch for binary responses (file downloads). Throws ApiError on non-2xx. */
+export async function apiFetchBlob(
+  path: string,
+  init: RequestInit & { accessToken?: string } = {},
+): Promise<{ blob: Blob; filename: string | null }> {
+  const { accessToken, ...rest } = init
+  const headers = new Headers(rest.headers)
+  headers.set('Content-Type', 'application/json')
+  if (accessToken) {
+    headers.set('Authorization', `Bearer ${accessToken}`)
+  }
+
+  const res = await fetch(`${API_BASE}${path}`, { ...rest, headers })
+
+  if (!res.ok) {
+    throw await parseError(res)
+  }
+
+  return { blob: await res.blob(), filename: filenameFromContentDisposition(res.headers.get('Content-Disposition')) }
+}
+
+// ── Silent refresh ───────────────────────────────────────────────────────────
+
+/**
+ * Registered by AuthProvider on mount. Returns the new access token, or null
+ * if the refresh token is expired/invalid (AuthProvider also handles logout
+ * and redirect in that case).
+ */
+let _silentRefresh: (() => Promise<string | null>) | null = null
+
+/** Mutex: if a refresh is already in flight, share it instead of firing a new one. */
+let _refreshInFlight: Promise<string | null> | null = null
+
+/** Called by AuthProvider to register the silent-refresh callback. */
+export function configureSilentRefresh(fn: (() => Promise<string | null>) | null): void {
+  _silentRefresh = fn
+}
+
+async function doSilentRefresh(): Promise<string | null> {
+  if (!_silentRefresh) return null
+  // Reuse an in-flight refresh instead of firing multiple simultaneous calls.
+  if (!_refreshInFlight) {
+    _refreshInFlight = _silentRefresh().finally(() => {
+      _refreshInFlight = null
+    })
+  }
+  return _refreshInFlight
+}
+
+/**
+ * Higher-level wrapper that supplies the access token from a getter function.
+ * On a 401, attempts one silent refresh and retries. If the refresh also fails,
+ * the registered silentRefresh callback handles logout and redirect.
+ *
+ * Used by TanStack Query hooks so they never capture a stale token closure.
+ */
+export function createAuthFetch(getToken: () => string | null) {
+  return async function authFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+    try {
+      return await apiFetch<T>(path, { ...init, accessToken: getToken() ?? undefined })
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401 && _silentRefresh) {
+        const newToken = await doSilentRefresh()
+        if (!newToken) throw err
+        // Retry with the freshly-issued token.
+        return apiFetch<T>(path, { ...init, accessToken: newToken })
+      }
+      throw err
+    }
+  }
+}
+
+/** Same silent-refresh behavior as createAuthFetch, for binary (blob) responses. */
+export function createAuthFetchBlob(getToken: () => string | null) {
+  return async function authFetchBlob(path: string, init: RequestInit = {}): Promise<{ blob: Blob; filename: string | null }> {
+    try {
+      return await apiFetchBlob(path, { ...init, accessToken: getToken() ?? undefined })
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401 && _silentRefresh) {
+        const newToken = await doSilentRefresh()
+        if (!newToken) throw err
+        return apiFetchBlob(path, { ...init, accessToken: newToken })
+      }
+      throw err
+    }
+  }
 }
 ````
 
@@ -61115,999 +61989,6 @@ export default function PresentationFrame({ onReady, children }: PresentationFra
 }
 ````
 
-## File: packages/web/src/lib/exportCapabilities.test.ts
-````typescript
-/**
- * exportCapabilities — unit tests for getExportFormats and buildExportFilename.
- */
-
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { getExportFormats, buildExportFilename } from './exportCapabilities'
-
-describe('getExportFormats', () => {
-  it('returns data formats + PNG + printable/HTML (6) for gantt', () => {
-    const formats = getExportFormats('gantt')
-    expect(formats).toHaveLength(6)
-    const ids = formats.map(f => f.id)
-    expect(ids).toContain('csv')
-    expect(ids).toContain('xlsx')
-    expect(ids).toContain('ics')
-    expect(ids).toContain('png')
-    expect(ids).toContain('printable')
-    expect(ids).toContain('html')
-    expect(ids).not.toContain('markdown')
-    expect(ids).not.toContain('clipboard')
-  })
-
-  it('returns data + PNG + printable/HTML + text formats (9) for list, kanban, calendar', () => {
-    const views = ['list', 'kanban', 'calendar'] as const
-    for (const view of views) {
-      const formats = getExportFormats(view)
-      expect(formats).toHaveLength(9)
-      const ids = formats.map(f => f.id)
-      expect(ids).toContain('csv')
-      expect(ids).toContain('xlsx')
-      expect(ids).toContain('ics')
-      expect(ids).toContain('png')
-      expect(ids).toContain('printable')
-      expect(ids).toContain('html')
-      expect(ids).toContain('markdown')
-      expect(ids).toContain('plaintext')
-      expect(ids).toContain('clipboard')
-    }
-  })
-
-  it('each descriptor has required fields', () => {
-    const allFormats = getExportFormats('list') // superset — includes text formats
-    for (const f of allFormats) {
-      expect(f.id).toBeTruthy()
-      expect(f.name).toBeTruthy()
-      expect(f.desc).toBeTruthy()
-      expect(typeof f.scope).toBe('boolean')
-      expect(['download', 'copy', 'print']).toContain(f.verb)
-      expect(typeof f.clientSide).toBe('boolean')
-      // ext may be empty string for clipboard/printable
-      if (f.id !== 'clipboard' && f.id !== 'printable') {
-        expect(f.ext).toMatch(/^\.[a-z]+$/)
-      }
-    }
-  })
-
-  it('server-side formats have scope=true', () => {
-    const formats = getExportFormats('list')
-    const serverFormats = formats.filter(f => !f.clientSide)
-    for (const f of serverFormats) {
-      expect(f.scope).toBe(true)
-    }
-  })
-
-  it('client-side formats have scope=false and clientSide=true', () => {
-    const formats = getExportFormats('list')
-    const clientFormats = formats.filter(f => f.clientSide)
-    expect(clientFormats).toHaveLength(6) // png + printable + html + markdown + plaintext + clipboard
-    for (const f of clientFormats) {
-      expect(f.scope).toBe(false)
-      expect(f.clientSide).toBe(true)
-    }
-  })
-
-  it('clipboard has copy verb, printable has print verb, others have download', () => {
-    const formats = getExportFormats('list')
-    const clipboard = formats.find(f => f.id === 'clipboard')
-    expect(clipboard?.verb).toBe('copy')
-    const printable = formats.find(f => f.id === 'printable')
-    expect(printable?.verb).toBe('print')
-    const rest = formats.filter(f => f.id !== 'clipboard' && f.id !== 'printable')
-    for (const f of rest) {
-      expect(f.verb).toBe('download')
-    }
-  })
-})
-
-describe('buildExportFilename', () => {
-  beforeEach(() => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date('2026-06-16T00:00:00Z'))
-  })
-
-  afterEach(() => {
-    vi.useRealTimers()
-  })
-
-  it('slugifies the name and appends the date and extension', () => {
-    expect(buildExportFilename('Sales Kick-Off 2026', '.csv')).toBe('sales-kick-off-2026-2026-06-16.csv')
-  })
-
-  it('strips uppercase and special characters', () => {
-    expect(buildExportFilename('My "Timeline"!', '.xlsx')).toBe('my-timeline-2026-06-16.xlsx')
-  })
-
-  it('falls back to "timeline" when the name is empty or all punctuation', () => {
-    expect(buildExportFilename('', '.csv')).toBe('timeline-2026-06-16.csv')
-    expect(buildExportFilename('---', '.ics')).toBe('timeline-2026-06-16.ics')
-  })
-
-  it('preserves numbers and hyphens in the slug', () => {
-    expect(buildExportFilename('Q1 2026', '.csv')).toBe('q1-2026-2026-06-16.csv')
-  })
-
-  it('inserts the view segment when a view is given', () => {
-    expect(buildExportFilename('Sales Kick-Off', '.png', 'kanban')).toBe('sales-kick-off-kanban-2026-06-16.png')
-  })
-
-  it('omits the view segment when no view is given', () => {
-    expect(buildExportFilename('Sales Kick-Off', '.png')).toBe('sales-kick-off-2026-06-16.png')
-  })
-})
-````
-
-## File: packages/web/src/lib/exportCapabilities.ts
-````typescript
-/**
- * Export format descriptors for the Export dialog (Phase 14).
- *
- * One dialog serves all views (Gantt/List/Kanban/Calendar); format
- * availability and per-format copy is driven by this descriptor array so a
- * future view or format is an addition here, not a dialog redesign
- * (docs/design/handoffs/export-modal).
- *
- * 14.1: CSV, Excel, ICS (server-side, all views).
- * 14.2: Markdown, Plain text, Copy to clipboard (client-side, List/Kanban/Calendar only).
- * 14.3: PNG snapshot (client-side DOM rasterization, all views).
- * 14.4: Printable view (browser print → vector PDF), HTML save (client-side, all views).
- */
-
-import {
-  Table, FileSpreadsheet, CalendarPlus, FileText, AlignLeft, Copy, Image, Printer, FileCode,
-  type LucideIcon,
-} from 'lucide-react'
-
-export type ExportFormatId = 'csv' | 'xlsx' | 'ics' | 'png' | 'markdown' | 'plaintext' | 'clipboard' | 'printable' | 'html'
-export type ExportViewType = 'gantt' | 'list' | 'calendar' | 'kanban'
-
-export interface ExportFormatDescriptor {
-  id: ExportFormatId
-  name: string
-  icon: LucideIcon
-  /** One-line description shown in the options pane. */
-  desc: string
-  /** File extension, including the leading dot. Used as the download filename suffix. */
-  ext: string
-  /** Data formats (CSV/Excel/ICS) show the "current view vs entire timeline" scope picker. */
-  scope: boolean
-  /**
-   * Primary action verb.
-   * 'download' → "Download <ext>" button.
-   * 'copy'     → "Copy to clipboard" button with "Copied!" flash.
-   * 'print'    → "Print…" button that opens the browser's print dialog.
-   */
-  verb: 'download' | 'copy' | 'print'
-  /** True for formats generated client-side (no API call). */
-  clientSide: boolean
-}
-
-/** Data/calendar formats — server-side, available in every view. */
-const DATA_FORMATS: ExportFormatDescriptor[] = [
-  {
-    id: 'csv',
-    name: 'CSV',
-    icon: Table,
-    ext: '.csv',
-    scope: true,
-    verb: 'download',
-    clientSide: false,
-    desc: 'A plain spreadsheet file — opens in Excel, Google Sheets, or Numbers.',
-  },
-  {
-    id: 'xlsx',
-    name: 'Excel',
-    icon: FileSpreadsheet,
-    ext: '.xlsx',
-    scope: true,
-    verb: 'download',
-    clientSide: false,
-    desc: 'A formatted workbook for Excel, Google Sheets, or Numbers.',
-  },
-  {
-    id: 'ics',
-    name: 'Calendar (.ics)',
-    icon: CalendarPlus,
-    ext: '.ics',
-    scope: true,
-    verb: 'download',
-    clientSide: false,
-    desc: 'An iCalendar file — import into Google Calendar, Outlook, or Apple Calendar.',
-  },
-]
-
-/** Image format — client-side DOM rasterization, available in every view. */
-const IMAGE_FORMATS: ExportFormatDescriptor[] = [
-  {
-    id: 'png',
-    name: 'PNG image',
-    icon: Image,
-    ext: '.png',
-    scope: false,
-    verb: 'download',
-    clientSide: true,
-    desc: 'A snapshot of this view, full scrollable extent, for a slide deck or doc.',
-  },
-]
-
-/**
- * Presentation formats — client-side, reuse the PresentationFrame surface
- * (Phase 14.4), available in every view.
- */
-const PRESENTATION_FORMATS: ExportFormatDescriptor[] = [
-  {
-    id: 'printable',
-    name: 'Printable view',
-    icon: Printer,
-    ext: '',
-    scope: false,
-    verb: 'print',
-    clientSide: true,
-    desc: 'Opens your browser’s print dialog on a clean, paginated version of this view — choose "Save as PDF" there for a vector file with selectable text.',
-  },
-  {
-    id: 'html',
-    name: 'HTML file',
-    icon: FileCode,
-    ext: '.html',
-    scope: false,
-    verb: 'download',
-    clientSide: true,
-    desc: 'A standalone HTML file with styles inlined — opens in any browser without draba.',
-  },
-]
-
-/** Textual formats — client-side, not available on Gantt (no sensible flat text shape). */
-const TEXT_FORMATS: ExportFormatDescriptor[] = [
-  {
-    id: 'markdown',
-    name: 'Markdown',
-    icon: FileText,
-    ext: '.md',
-    scope: false,
-    verb: 'download',
-    clientSide: true,
-    desc: 'GitHub-flavored Markdown — paste into a README, Notion, or any Markdown editor.',
-  },
-  {
-    id: 'plaintext',
-    name: 'Plain text',
-    icon: AlignLeft,
-    ext: '.txt',
-    scope: false,
-    verb: 'download',
-    clientSide: true,
-    desc: 'Space-aligned plain text — works in any text editor or monospace environment.',
-  },
-  {
-    id: 'clipboard',
-    name: 'Copy to clipboard',
-    icon: Copy,
-    ext: '',
-    scope: false,
-    verb: 'copy',
-    clientSide: true,
-    desc: 'Copies both rich (HTML) and plain text so paste lands formatted in Slack, Word, or Google Docs.',
-  },
-]
-
-/**
- * Returns the export formats available for a given view.
- * PNG and the presentation formats (printable view, HTML) are available
- * everywhere (14.3/14.4). Gantt has no sensible flat text representation,
- * so it skips the textual formats (14.2).
- */
-export function getExportFormats(view: ExportViewType): ExportFormatDescriptor[] {
-  if (view === 'gantt') return [...DATA_FORMATS, ...IMAGE_FORMATS, ...PRESENTATION_FORMATS]
-  return [...DATA_FORMATS, ...IMAGE_FORMATS, ...PRESENTATION_FORMATS, ...TEXT_FORMATS]
-}
-
-/**
- * Builds the download filename for a format:
- * `<timeline-slug>[-<view>]-<yyyy-mm-dd><ext>`.
- * Matches the filename chip shown in the export dialog's options pane. The view
- * segment is included when given so a file names the view it came from (e.g.
- * `sales-kick-off-kanban-2026-06-30.png`).
- */
-export function buildExportFilename(timelineName: string, ext: string, view?: ExportViewType): string {
-  const slug = timelineName
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-  const date = new Date().toISOString().slice(0, 10)
-  const viewSegment = view ? `-${view}` : ''
-  return `${slug || 'timeline'}${viewSegment}-${date}${ext}`
-}
-````
-
-## File: packages/api/internal/api/server.go
-````go
-// Package api hosts the HTTP handlers, routing, and middleware for the
-// draba REST API. Handlers are intentionally thin: they decode requests,
-// delegate to repositories and services, and write responses. Business
-// logic belongs in the domain packages, not here.
-package api
-
-import (
-	"fmt"
-	"io/fs"
-	"net/http"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-)
-
-// TimelineStore is the persistence interface required by timeline handlers.
-// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
-type TimelineStore interface {
-	Create(t *models.Timeline) error
-	GetByID(id string) (*models.Timeline, error)
-	GetByShareToken(token string) (*models.Timeline, error)
-	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
-	HasAccess(timelineID, teamMemberID string) (bool, error)
-	GrantAccess(timelineID, teamMemberID, role string) error
-	RevokeAccess(timelineID, teamMemberID string) error
-	GetAccessRole(timelineID, teamMemberID string) (string, error)
-	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
-	SetArchived(id string, at *time.Time) error
-	Update(t *models.Timeline) error
-	Delete(id string) error
-}
-
-// Server holds shared dependencies for all HTTP handlers.
-type Server struct {
-	users          *db.UserRepo
-	invites        *db.InviteRepo
-	teams          *db.TeamRepo
-	activities     *db.ActivityRepo
-	timelines      TimelineStore
-	savedFilters   *db.SavedFilterRepo
-	preferences    *db.UserPreferenceRepo
-	apiTokens      *db.APITokenRepo
-	instanceSets   *db.InstanceSettingsRepo
-	passwordTokens *db.PasswordResetTokenRepo
-	statuses       *db.StatusRepo
-	tags           *db.TagRepo
-	shares         *db.ShareRepo
-	shareCache     *shareCache
-	icsCache       *icsFeedCache
-	unlockLimiter  *rateLimiter
-	mailer         *mailer.Mailer
-	tokens         *auth.TokenService
-	tier           tier.Tier
-	bus            *events.Bus
-	hub            *ws.Hub
-	uiFS           fs.FS
-	// oidc is non-nil only when SSO is configured (DRABA_OIDC_ISSUER set).
-	// When nil, the /auth/oidc/* routes report SSO as disabled and no external
-	// identity provider is ever contacted. Set via WithOIDC.
-	oidc *auth.OIDCService
-	// oidcAutoCreateUsers controls whether an unknown external identity is
-	// auto-provisioned a local account on first SSO login.
-	oidcAutoCreateUsers bool
-}
-
-// NewServer constructs a Server with its required dependencies. It does not
-// touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(
-	users *db.UserRepo,
-	invites *db.InviteRepo,
-	teams *db.TeamRepo,
-	activitiesRepo *db.ActivityRepo,
-	timelinesRepo TimelineStore,
-	savedFiltersRepo *db.SavedFilterRepo,
-	preferencesRepo *db.UserPreferenceRepo,
-	apiTokensRepo *db.APITokenRepo,
-	instanceSetsRepo *db.InstanceSettingsRepo,
-	passwordTokensRepo *db.PasswordResetTokenRepo,
-	statusesRepo *db.StatusRepo,
-	tagsRepo *db.TagRepo,
-	sharesRepo *db.ShareRepo,
-	m *mailer.Mailer,
-	tokens *auth.TokenService,
-	t tier.Tier,
-	bus *events.Bus,
-	hub *ws.Hub,
-) *Server {
-	// Both public-share caches share the DRABA_SHARE_CACHE_TTL setting.
-	sc := newShareCache()
-	return &Server{
-		users:          users,
-		invites:        invites,
-		teams:          teams,
-		activities:     activitiesRepo,
-		timelines:      timelinesRepo,
-		savedFilters:   savedFiltersRepo,
-		preferences:    preferencesRepo,
-		apiTokens:      apiTokensRepo,
-		instanceSets:   instanceSetsRepo,
-		passwordTokens: passwordTokensRepo,
-		statuses:       statusesRepo,
-		tags:           tagsRepo,
-		shares:         sharesRepo,
-		shareCache:     sc,
-		icsCache:       newICSFeedCache(sc.ttl),
-		unlockLimiter:  newRateLimiter(unlockMaxAttempts, time.Hour),
-		mailer:         m,
-		tokens:         tokens,
-		tier:           t,
-		bus:            bus,
-		hub:            hub,
-	}
-}
-
-// WithUI registers an embedded React SPA to be served at GET /. The FS must
-// be rooted at the build output directory (i.e. contain index.html directly).
-// When called, all unmatched GET paths fall back to index.html so React Router
-// handles client-side navigation. Safe to skip in dev (no-op when not called).
-func (s *Server) WithUI(uiFS fs.FS) *Server {
-	s.uiFS = uiFS
-	return s
-}
-
-// WithOIDC enables SSO. Passing a nil service leaves SSO disabled (the zero
-// value), so callers can wire it unconditionally from a possibly-nil
-// constructor result. autoCreate controls first-login auto-provisioning.
-func (s *Server) WithOIDC(svc *auth.OIDCService, autoCreate bool) *Server {
-	s.oidc = svc
-	s.oidcAutoCreateUsers = autoCreate
-	return s
-}
-
-// oidcAutoCreate reports whether unknown external identities are provisioned a
-// local account on first SSO login.
-func (s *Server) oidcAutoCreate() bool { return s.oidcAutoCreateUsers }
-
-// Routes returns the fully-wired HTTP handler for the API, including all
-// core routes plus any routes added by registered tier modules.
-func (s *Server) Routes() http.Handler {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
-	mux.HandleFunc("GET /version", s.handleVersion)
-
-	mux.HandleFunc("POST /auth/register", s.handleRegister)
-	mux.HandleFunc("POST /auth/login", s.handleLogin)
-	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
-	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
-	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
-	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
-	// OIDC / SSO. Public (no auth): they start and complete the external login
-	// flow. Both report SSO disabled with 404 when DRABA_OIDC_ISSUER is unset.
-	mux.HandleFunc("GET /auth/oidc/login", s.handleOIDCLogin)
-	mux.HandleFunc("GET /auth/oidc/callback", s.handleOIDCCallback)
-
-	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
-	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
-	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
-
-	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
-	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
-	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
-	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
-	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
-	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
-	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
-
-	// Public — no auth required; used by the login page and shared views.
-	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
-
-	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
-	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
-	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
-	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
-	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
-	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
-	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
-	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
-	// 3-segment GET paths and neither is more specific when the third segment differs.
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
-	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
-	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
-	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
-	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
-	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
-	// the more-specific literal "share" segment takes precedence.
-	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
-	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
-	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
-	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
-	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
-	// paths like /timelines/share/statuses).
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
-
-	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
-	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
-	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
-	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
-	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
-	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
-	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
-	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
-
-	// Share routes.
-	// GET /shares/{token} is public — no auth. The token is the credential.
-	// POST /timelines/{id}/shares uses the same /timelines/{id}/... prefix
-	// as archive/unarchive so it avoids the Go 1.22 mux pattern conflict with
-	// GET /timelines/share/{token} (only GET-method paths conflict).
-	// GET /teams/{id}/timelines/{timelineId}/shares uses the team-scoped prefix
-	// to avoid the GET conflict described above.
-	mux.HandleFunc("GET /shares/{token}", s.handleGetShareProjection)
-	mux.HandleFunc("POST /shares/{token}/unlock", s.handleUnlockShare)
-	mux.HandleFunc("POST /timelines/{id}/shares", chain(s.handleCreateShare, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/shares", chain(s.handleListShares, s.authMiddleware))
-	mux.HandleFunc("PATCH /shares/{id}", chain(s.handleUpdateShare, s.authMiddleware))
-	mux.HandleFunc("DELETE /shares/{id}", chain(s.handleDeleteShare, s.authMiddleware))
-	// Token rotation — the revocation story for ICS feeds (no password gate).
-	// GET /shares/{token}.ics is served inside handleGetShareProjection: the
-	// {token} wildcard spans the whole segment, so the .ics suffix arrives in
-	// the path value and is dispatched there.
-	mux.HandleFunc("POST /shares/{id}/regenerate", chain(s.handleRegenerateShare, s.authMiddleware))
-	// Named feed variant: the {file} slug is cosmetic (calendar clients
-	// default the calendar name from the URL filename); the token is the key.
-	mux.HandleFunc("GET /shares/{token}/{file}", s.handleGetShareICSNamed)
-
-	// Export routes (Phase 14.1).
-	// POST /timelines/{id}/export shares the /timelines/{id}/... prefix with
-	// archive/unarchive/shares — fine, since only GET-method paths conflict
-	// with GET /timelines/share/{token}.
-	// The GET convenience endpoints use the team-scoped prefix (like
-	// activities/statuses/access above) to avoid that same GET conflict:
-	// /teams/{id}/timelines/{timelineId}/export.csv is 4 segments, so it
-	// can't collide with the 3-segment GET /timelines/share/{token}.
-	mux.HandleFunc("POST /timelines/{id}/export", chain(s.handlePostTimelineExport, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/export.csv", chain(s.handleGetTimelineExportCSV, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/export.xlsx", chain(s.handleGetTimelineExportXLSX, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/export.ics", chain(s.handleGetTimelineExportICS, s.authMiddleware))
-
-	// Import routes (Phase 15.1). The POST uses the same team-scoped route
-	// family as the activity/status routes. The templates are static content
-	// (example data only) but stay behind auth like every other non-share
-	// endpoint.
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/import", chain(s.handlePostTimelineImport, s.authMiddleware))
-	mux.HandleFunc("GET /import/template.csv", chain(s.handleGetImportTemplateCSV, s.authMiddleware))
-	mux.HandleFunc("GET /import/template.xlsx", chain(s.handleGetImportTemplateXLSX, s.authMiddleware))
-
-	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
-	// JWT itself before upgrading, because WebSocket clients can't set headers.
-	mux.HandleFunc("GET /ws", s.hub.ServeWS)
-
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-
-	if s.uiFS != nil {
-		mux.Handle("GET /", spaHandler(s.uiFS))
-	}
-
-	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
-	for _, m := range tier.Registered() {
-		if err := m.Register(ctx); err != nil {
-			// Module registration is a startup invariant — a failure here is a programming error.
-			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
-		}
-	}
-
-	return requestLogger(mux)
-}
-
-// chain applies a single middleware to a handler function.
-func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
-	return m(h).ServeHTTP
-}
-
-// spaHandler serves the embedded React SPA. Known static assets are served
-// directly; any unrecognised path falls back to index.html so React Router
-// handles client-side navigation.
-func spaHandler(uiFS fs.FS) http.Handler {
-	fserver := http.FileServer(http.FS(uiFS))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			path = "index.html"
-		}
-		if _, err := uiFS.Open(path); err != nil {
-			// Unknown path — serve index.html and let React Router handle it.
-			r = r.Clone(r.Context())
-			r.URL.Path = "/"
-			fserver.ServeHTTP(w, r)
-			return
-		}
-		fserver.ServeHTTP(w, r)
-	})
-}
-````
-
-## File: packages/api/internal/api/share_ics_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"errors"
-	"fmt"
-	"net/http"
-	"strings"
-	"sync"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/ics"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// ── In-memory ICS feed cache ──────────────────────────────────────────────────
-//
-// Mirrors shareCache, but stores the rendered text/calendar payload. Calendar
-// clients poll on their own cadence (minutes to hours), so the same short TTL
-// keeps feeds near-live while absorbing aggressive pollers.
-
-type icsCacheEntry struct {
-	builtAt time.Time
-	payload string
-}
-
-type icsFeedCache struct {
-	mu      sync.RWMutex
-	entries map[string]*icsCacheEntry
-	ttl     time.Duration
-}
-
-func newICSFeedCache(ttl time.Duration) *icsFeedCache {
-	return &icsFeedCache{entries: make(map[string]*icsCacheEntry), ttl: ttl}
-}
-
-func (c *icsFeedCache) get(token string) (string, bool) {
-	c.mu.RLock()
-	e, ok := c.entries[token]
-	c.mu.RUnlock()
-	if !ok || time.Since(e.builtAt) > c.ttl {
-		return "", false
-	}
-	return e.payload, true
-}
-
-func (c *icsFeedCache) set(token, payload string) {
-	c.mu.Lock()
-	c.entries[token] = &icsCacheEntry{builtAt: time.Now(), payload: payload}
-	c.mu.Unlock()
-}
-
-func (c *icsFeedCache) invalidate(token string) {
-	c.mu.Lock()
-	delete(c.entries, token)
-	c.mu.Unlock()
-}
-
-// ── Handlers ──────────────────────────────────────────────────────────────────
-
-// serveICSFeed handles GET /shares/{token}.ics — the public, unauthenticated
-// calendar feed. It is dispatched from handleGetShareProjection when the token
-// path value carries the .ics suffix (Go 1.22 mux wildcards span the whole
-// segment, so the suffix arrives inside {token}).
-//
-// The feed serves live data scoped server-side to the share's timeline — or,
-// for member feeds, to one member's assigned activities. There is no password
-// gate: calendar clients cannot unlock interactively, so the unguessable token
-// is the secret and revocation is rotate-or-delete.
-func (s *Server) serveICSFeed(w http.ResponseWriter, r *http.Request, token string) {
-	share, err := s.shares.GetByToken(token)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
-		return
-	}
-	// A view share is not a feed — 404 rather than leaking that the token
-	// exists in another mode.
-	if share.Kind != models.ShareKindICS {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-		return
-	}
-	if share.RevokedAt != nil {
-		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
-		return
-	}
-	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
-		writeError(w, http.StatusGone, "GONE", "this share has expired")
-		return
-	}
-
-	// Archived timeline → the feed stops serving (Phase 13.5). 404, not 410:
-	// unarchiving must resurrect the feed, and 410 makes calendar clients
-	// drop the subscription for good. Checked before the cache read so
-	// archiving takes effect immediately.
-	if !s.shareTimelineLive(w, share) {
-		return
-	}
-
-	body, ok := s.icsCache.get(token)
-	if !ok {
-		body, err = s.buildICSFeed(share)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build calendar feed")
-			return
-		}
-		s.icsCache.set(token, body)
-	}
-
-	go func() { _ = s.shares.RecordView(share.ID) }()
-	w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
-	// no-store: the token is the secret and rotate/delete is the only kill
-	// switch for a feed, so a revoked URL must not keep serving from browser
-	// or proxy caches. Server-side load is already absorbed by icsCache.
-	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write([]byte(body))
-}
-
-// buildICSFeed renders the iCalendar document for an ICS share. Scope is
-// hard-locked server-side: the timeline comes from the share row, and member
-// feeds drop every activity the member is not assigned to before
-// serialization.
-//
-// Each VEVENT projects the activity's display fields: status (+ percent
-// complete), assignee display names, and tag names go into DESCRIPTION (and
-// tags into CATEGORIES); whole-timeline feeds also append assignee names to
-// SUMMARY so the month grid shows who owns what. Member display names are the
-// only person-identifying field a feed may carry — never emails, user IDs, or
-// roles.
-func (s *Server) buildICSFeed(share *models.Share) (string, error) {
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if err != nil {
-		return "", err
-	}
-
-	acts, err := s.activities.ListByTimeline(share.TimelineID, nil, nil, false)
-	if err != nil {
-		return "", err
-	}
-
-	// Display-name / tag / status lookups for the event field projection.
-	statuses, err := s.statuses.ListStatuses(share.TimelineID)
-	if err != nil {
-		return "", err
-	}
-	statusName := make(map[string]string, len(statuses))
-	for _, st := range statuses {
-		statusName[st.ID] = st.Name
-	}
-	members, err := s.teams.ListMembers(timeline.TeamID)
-	if err != nil {
-		return "", err
-	}
-	memberName := make(map[string]string, len(members))
-	for _, m := range members {
-		if m.DisplayName != "" {
-			memberName[m.ID] = m.DisplayName
-		}
-	}
-	tags, err := s.tags.ListByTeam(timeline.TeamID)
-	if err != nil {
-		return "", err
-	}
-	tagName := make(map[string]string, len(tags))
-	for _, tg := range tags {
-		tagName[tg.ID] = tg.Name
-	}
-
-	memberScoped := share.Scope != nil && *share.Scope == models.ShareScopeMember && share.MemberID != nil
-
-	name := timeline.Name
-	if memberScoped {
-		filtered := acts[:0]
-		for _, a := range acts {
-			for _, id := range a.AssignedMemberIDs {
-				if id == *share.MemberID {
-					filtered = append(filtered, a)
-					break
-				}
-			}
-		}
-		acts = filtered
-
-		if n, ok := memberName[*share.MemberID]; ok {
-			name = timeline.Name + " — " + n
-		}
-	}
-
-	// A member feed is one person's calendar — repeating their name on every
-	// event is noise. The whole-timeline feed is the team overview, where
-	// who-owns-what belongs in the month grid.
-	events := activitiesToICSEvents(acts, memberName, tagName, statusName, !memberScoped)
-	return ics.Calendar(name, events), nil
-}
-
-// activitiesToICSEvents projects activities into iCalendar VEVENTs. Each
-// event's DESCRIPTION carries structured field lines (status + percent
-// complete, assignee display names, tag names) followed by the free-text
-// activity description; CATEGORIES carries tag names. If
-// includeAssigneesInSummary is set, assignee names are appended to SUMMARY.
-func activitiesToICSEvents(acts []*models.Activity, memberName, tagName, statusName map[string]string, includeAssigneesInSummary bool) []ics.Event {
-	events := make([]ics.Event, 0, len(acts))
-	for _, a := range acts {
-		assignees := make([]string, 0, len(a.AssignedMemberIDs))
-		for _, id := range a.AssignedMemberIDs {
-			if n, ok := memberName[id]; ok {
-				assignees = append(assignees, n)
-			}
-		}
-		tagNames := make([]string, 0, len(a.TagIDs))
-		for _, id := range a.TagIDs {
-			if n, ok := tagName[id]; ok {
-				tagNames = append(tagNames, n)
-			}
-		}
-
-		summary := a.Title
-		if includeAssigneesInSummary && len(assignees) > 0 {
-			summary += " — " + strings.Join(assignees, ", ")
-		}
-
-		// Structured field lines first, then a blank line, then the
-		// free-text activity description.
-		meta := make([]string, 0, 3)
-		if a.StatusID != nil {
-			if n, ok := statusName[*a.StatusID]; ok {
-				line := "Status: " + n
-				if a.PercentComplete != nil {
-					line += fmt.Sprintf(" (%d%%)", *a.PercentComplete)
-				}
-				meta = append(meta, line)
-			}
-		} else if a.PercentComplete != nil {
-			meta = append(meta, fmt.Sprintf("Progress: %d%%", *a.PercentComplete))
-		}
-		if len(assignees) > 0 {
-			meta = append(meta, "Assigned: "+strings.Join(assignees, ", "))
-		}
-		if len(tagNames) > 0 {
-			meta = append(meta, "Tags: "+strings.Join(tagNames, ", "))
-		}
-		desc := strings.Join(meta, "\n")
-		if a.Description != nil && *a.Description != "" {
-			if desc != "" {
-				desc += "\n\n"
-			}
-			desc += *a.Description
-		}
-
-		events = append(events, ics.Event{
-			UID:         a.ID + "@draba",
-			Summary:     summary,
-			Description: desc,
-			Categories:  tagNames,
-			Start:       a.StartAt,
-			End:         a.EndAt,
-			Stamp:       a.UpdatedAt,
-		})
-	}
-	return events
-}
-
-// handleGetShareICSNamed handles GET /shares/{token}/{file}. The file segment
-// must end in .ics but is otherwise cosmetic: most calendar clients
-// (Thunderbird included) default the new calendar's name from the URL's
-// filename, so the modal links carry a readable slug (e.g. .../sales-kick-off.ics).
-// The token alone is authoritative.
-func (s *Server) handleGetShareICSNamed(w http.ResponseWriter, r *http.Request) {
-	if !strings.HasSuffix(r.PathValue("file"), ".ics") {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-		return
-	}
-	s.serveICSFeed(w, r, r.PathValue("token"))
-}
-
-// handleRegenerateShare handles POST /shares/{id}/regenerate. It rotates the
-// share's token, immediately invalidating the old URL — the revocation story
-// for ICS feeds, which cannot carry a password. It works for view shares too
-// (rotating is strictly safer than nothing), and any member of the timeline's
-// team may do it, consistent with PATCH/DELETE.
-func (s *Server) handleRegenerateShare(w http.ResponseWriter, r *http.Request) {
-	shareID := r.PathValue("id")
-
-	share, err := s.shares.GetByID(shareID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	oldToken := share.Token
-	share.Token = newToken()
-	if err := s.shares.RotateToken(share.ID, share.Token); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to regenerate share link")
-		return
-	}
-
-	// Kill both caches for the dead token so it stops serving immediately.
-	s.shareCache.invalidate(oldToken)
-	s.icsCache.invalidate(oldToken)
-
-	writeJSON(w, http.StatusOK, share)
-}
-````
-
 ## File: packages/web/src/components/ShareModal.tsx
 ````typescript
 /**
@@ -62628,6 +62509,315 @@ export default function ShareModal({ teamId, timelineId, viewType, viewConfig, t
     </div>,
     document.body,
   )
+}
+````
+
+## File: packages/web/src/lib/exportCapabilities.test.ts
+````typescript
+/**
+ * exportCapabilities — unit tests for getExportFormats and buildExportFilename.
+ */
+
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { getExportFormats, buildExportFilename } from './exportCapabilities'
+
+describe('getExportFormats', () => {
+  it('returns data formats + PNG + printable/HTML (6) for gantt', () => {
+    const formats = getExportFormats('gantt')
+    expect(formats).toHaveLength(6)
+    const ids = formats.map(f => f.id)
+    expect(ids).toContain('csv')
+    expect(ids).toContain('xlsx')
+    expect(ids).toContain('ics')
+    expect(ids).toContain('png')
+    expect(ids).toContain('printable')
+    expect(ids).toContain('html')
+    expect(ids).not.toContain('markdown')
+    expect(ids).not.toContain('clipboard')
+  })
+
+  it('returns data + PNG + printable/HTML + text formats (9) for list, kanban, calendar', () => {
+    const views = ['list', 'kanban', 'calendar'] as const
+    for (const view of views) {
+      const formats = getExportFormats(view)
+      expect(formats).toHaveLength(9)
+      const ids = formats.map(f => f.id)
+      expect(ids).toContain('csv')
+      expect(ids).toContain('xlsx')
+      expect(ids).toContain('ics')
+      expect(ids).toContain('png')
+      expect(ids).toContain('printable')
+      expect(ids).toContain('html')
+      expect(ids).toContain('markdown')
+      expect(ids).toContain('plaintext')
+      expect(ids).toContain('clipboard')
+    }
+  })
+
+  it('each descriptor has required fields', () => {
+    const allFormats = getExportFormats('list') // superset — includes text formats
+    for (const f of allFormats) {
+      expect(f.id).toBeTruthy()
+      expect(f.name).toBeTruthy()
+      expect(f.desc).toBeTruthy()
+      expect(typeof f.scope).toBe('boolean')
+      expect(['download', 'copy', 'print']).toContain(f.verb)
+      expect(typeof f.clientSide).toBe('boolean')
+      // ext may be empty string for clipboard/printable
+      if (f.id !== 'clipboard' && f.id !== 'printable') {
+        expect(f.ext).toMatch(/^\.[a-z]+$/)
+      }
+    }
+  })
+
+  it('server-side formats have scope=true', () => {
+    const formats = getExportFormats('list')
+    const serverFormats = formats.filter(f => !f.clientSide)
+    for (const f of serverFormats) {
+      expect(f.scope).toBe(true)
+    }
+  })
+
+  it('client-side formats have scope=false and clientSide=true', () => {
+    const formats = getExportFormats('list')
+    const clientFormats = formats.filter(f => f.clientSide)
+    expect(clientFormats).toHaveLength(6) // png + printable + html + markdown + plaintext + clipboard
+    for (const f of clientFormats) {
+      expect(f.scope).toBe(false)
+      expect(f.clientSide).toBe(true)
+    }
+  })
+
+  it('clipboard has copy verb, printable has print verb, others have download', () => {
+    const formats = getExportFormats('list')
+    const clipboard = formats.find(f => f.id === 'clipboard')
+    expect(clipboard?.verb).toBe('copy')
+    const printable = formats.find(f => f.id === 'printable')
+    expect(printable?.verb).toBe('print')
+    const rest = formats.filter(f => f.id !== 'clipboard' && f.id !== 'printable')
+    for (const f of rest) {
+      expect(f.verb).toBe('download')
+    }
+  })
+})
+
+describe('buildExportFilename', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-06-16T00:00:00Z'))
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('slugifies the name and appends the date and extension', () => {
+    expect(buildExportFilename('Sales Kick-Off 2026', '.csv')).toBe('sales-kick-off-2026-2026-06-16.csv')
+  })
+
+  it('strips uppercase and special characters', () => {
+    expect(buildExportFilename('My "Timeline"!', '.xlsx')).toBe('my-timeline-2026-06-16.xlsx')
+  })
+
+  it('falls back to "timeline" when the name is empty or all punctuation', () => {
+    expect(buildExportFilename('', '.csv')).toBe('timeline-2026-06-16.csv')
+    expect(buildExportFilename('---', '.ics')).toBe('timeline-2026-06-16.ics')
+  })
+
+  it('preserves numbers and hyphens in the slug', () => {
+    expect(buildExportFilename('Q1 2026', '.csv')).toBe('q1-2026-2026-06-16.csv')
+  })
+
+  it('inserts the view segment when a view is given', () => {
+    expect(buildExportFilename('Sales Kick-Off', '.png', 'kanban')).toBe('sales-kick-off-kanban-2026-06-16.png')
+  })
+
+  it('omits the view segment when no view is given', () => {
+    expect(buildExportFilename('Sales Kick-Off', '.png')).toBe('sales-kick-off-2026-06-16.png')
+  })
+})
+````
+
+## File: packages/web/src/lib/exportCapabilities.ts
+````typescript
+/**
+ * Export format descriptors for the Export dialog (Phase 14).
+ *
+ * One dialog serves all views (Gantt/List/Kanban/Calendar); format
+ * availability and per-format copy is driven by this descriptor array so a
+ * future view or format is an addition here, not a dialog redesign
+ * (docs/design/handoffs/export-modal).
+ *
+ * 14.1: CSV, Excel, ICS (server-side, all views).
+ * 14.2: Markdown, Plain text, Copy to clipboard (client-side, List/Kanban/Calendar only).
+ * 14.3: PNG snapshot (client-side DOM rasterization, all views).
+ * 14.4: Printable view (browser print → vector PDF), HTML save (client-side, all views).
+ */
+
+import {
+  Table, FileSpreadsheet, CalendarPlus, FileText, AlignLeft, Copy, Image, Printer, FileCode,
+  type LucideIcon,
+} from 'lucide-react'
+
+export type ExportFormatId = 'csv' | 'xlsx' | 'ics' | 'png' | 'markdown' | 'plaintext' | 'clipboard' | 'printable' | 'html'
+export type ExportViewType = 'gantt' | 'list' | 'calendar' | 'kanban'
+
+export interface ExportFormatDescriptor {
+  id: ExportFormatId
+  name: string
+  icon: LucideIcon
+  /** One-line description shown in the options pane. */
+  desc: string
+  /** File extension, including the leading dot. Used as the download filename suffix. */
+  ext: string
+  /** Data formats (CSV/Excel/ICS) show the "current view vs entire timeline" scope picker. */
+  scope: boolean
+  /**
+   * Primary action verb.
+   * 'download' → "Download <ext>" button.
+   * 'copy'     → "Copy to clipboard" button with "Copied!" flash.
+   * 'print'    → "Print…" button that opens the browser's print dialog.
+   */
+  verb: 'download' | 'copy' | 'print'
+  /** True for formats generated client-side (no API call). */
+  clientSide: boolean
+}
+
+/** Data/calendar formats — server-side, available in every view. */
+const DATA_FORMATS: ExportFormatDescriptor[] = [
+  {
+    id: 'csv',
+    name: 'CSV',
+    icon: Table,
+    ext: '.csv',
+    scope: true,
+    verb: 'download',
+    clientSide: false,
+    desc: 'A plain spreadsheet file — opens in Excel, Google Sheets, or Numbers.',
+  },
+  {
+    id: 'xlsx',
+    name: 'Excel',
+    icon: FileSpreadsheet,
+    ext: '.xlsx',
+    scope: true,
+    verb: 'download',
+    clientSide: false,
+    desc: 'A formatted workbook for Excel, Google Sheets, or Numbers.',
+  },
+  {
+    id: 'ics',
+    name: 'Calendar (.ics)',
+    icon: CalendarPlus,
+    ext: '.ics',
+    scope: true,
+    verb: 'download',
+    clientSide: false,
+    desc: 'An iCalendar file — import into Google Calendar, Outlook, or Apple Calendar.',
+  },
+]
+
+/** Image format — client-side DOM rasterization, available in every view. */
+const IMAGE_FORMATS: ExportFormatDescriptor[] = [
+  {
+    id: 'png',
+    name: 'PNG image',
+    icon: Image,
+    ext: '.png',
+    scope: false,
+    verb: 'download',
+    clientSide: true,
+    desc: 'A snapshot of this view, full scrollable extent, for a slide deck or doc.',
+  },
+]
+
+/**
+ * Presentation formats — client-side, reuse the PresentationFrame surface
+ * (Phase 14.4), available in every view.
+ */
+const PRESENTATION_FORMATS: ExportFormatDescriptor[] = [
+  {
+    id: 'printable',
+    name: 'Printable view',
+    icon: Printer,
+    ext: '',
+    scope: false,
+    verb: 'print',
+    clientSide: true,
+    desc: 'Opens your browser’s print dialog on a clean, paginated version of this view — choose "Save as PDF" there for a vector file with selectable text.',
+  },
+  {
+    id: 'html',
+    name: 'HTML file',
+    icon: FileCode,
+    ext: '.html',
+    scope: false,
+    verb: 'download',
+    clientSide: true,
+    desc: 'A standalone HTML file with styles inlined — opens in any browser without draba.',
+  },
+]
+
+/** Textual formats — client-side, not available on Gantt (no sensible flat text shape). */
+const TEXT_FORMATS: ExportFormatDescriptor[] = [
+  {
+    id: 'markdown',
+    name: 'Markdown',
+    icon: FileText,
+    ext: '.md',
+    scope: false,
+    verb: 'download',
+    clientSide: true,
+    desc: 'GitHub-flavored Markdown — paste into a README, Notion, or any Markdown editor.',
+  },
+  {
+    id: 'plaintext',
+    name: 'Plain text',
+    icon: AlignLeft,
+    ext: '.txt',
+    scope: false,
+    verb: 'download',
+    clientSide: true,
+    desc: 'Space-aligned plain text — works in any text editor or monospace environment.',
+  },
+  {
+    id: 'clipboard',
+    name: 'Copy to clipboard',
+    icon: Copy,
+    ext: '',
+    scope: false,
+    verb: 'copy',
+    clientSide: true,
+    desc: 'Copies both rich (HTML) and plain text so paste lands formatted in Slack, Word, or Google Docs.',
+  },
+]
+
+/**
+ * Returns the export formats available for a given view.
+ * PNG and the presentation formats (printable view, HTML) are available
+ * everywhere (14.3/14.4). Gantt has no sensible flat text representation,
+ * so it skips the textual formats (14.2).
+ */
+export function getExportFormats(view: ExportViewType): ExportFormatDescriptor[] {
+  if (view === 'gantt') return [...DATA_FORMATS, ...IMAGE_FORMATS, ...PRESENTATION_FORMATS]
+  return [...DATA_FORMATS, ...IMAGE_FORMATS, ...PRESENTATION_FORMATS, ...TEXT_FORMATS]
+}
+
+/**
+ * Builds the download filename for a format:
+ * `<timeline-slug>[-<view>]-<yyyy-mm-dd><ext>`.
+ * Matches the filename chip shown in the export dialog's options pane. The view
+ * segment is included when given so a file names the view it came from (e.g.
+ * `sales-kick-off-kanban-2026-06-30.png`).
+ */
+export function buildExportFilename(timelineName: string, ext: string, view?: ExportViewType): string {
+  const slug = timelineName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  const date = new Date().toISOString().slice(0, 10)
+  const viewSegment = view ? `-${view}` : ''
+  return `${slug || 'timeline'}${viewSegment}-${date}${ext}`
 }
 ````
 
@@ -63558,49 +63748,366 @@ export default function ShareViewPage() {
 }
 ````
 
-## File: .golangci.yml
-````yaml
-version: "2"
+## File: packages/api/internal/api/server.go
+````go
+// Package api hosts the HTTP handlers, routing, and middleware for the
+// draba REST API. Handlers are intentionally thin: they decode requests,
+// delegate to repositories and services, and write responses. Business
+// logic belongs in the domain packages, not here.
+package api
 
-run:
-  timeout: 5m
+import (
+	"fmt"
+	"io/fs"
+	"net/http"
+	"strings"
+	"time"
 
-linters:
-  default: none
-  enable:
-    - errcheck
-    - govet
-    - staticcheck
-    - ineffassign
-    - gocritic
-    - revive
-    - misspell
-    - nolintlint
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+)
 
-  settings:
-    gocritic:
-      enabled-tags:
-        - diagnostic
-        - style
-        - performance
-    revive:
-      rules:
-        - name: exported
-          severity: warning
-    nolintlint:
-      require-explanation: true
-      require-specific: true
+// TimelineStore is the persistence interface required by timeline handlers.
+// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
+type TimelineStore interface {
+	Create(t *models.Timeline) error
+	GetByID(id string) (*models.Timeline, error)
+	GetByShareToken(token string) (*models.Timeline, error)
+	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
+	HasAccess(timelineID, teamMemberID string) (bool, error)
+	GrantAccess(timelineID, teamMemberID, role string) error
+	RevokeAccess(timelineID, teamMemberID string) error
+	GetAccessRole(timelineID, teamMemberID string) (string, error)
+	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
+	SetArchived(id string, at *time.Time) error
+	Update(t *models.Timeline) error
+	Delete(id string) error
+}
 
-  exclusions:
-    rules:
-      - path: _test\.go
-        linters:
-          - errcheck
+// Server holds shared dependencies for all HTTP handlers.
+type Server struct {
+	users          *db.UserRepo
+	invites        *db.InviteRepo
+	teams          *db.TeamRepo
+	activities     *db.ActivityRepo
+	timelines      TimelineStore
+	savedFilters   *db.SavedFilterRepo
+	preferences    *db.UserPreferenceRepo
+	apiTokens      *db.APITokenRepo
+	instanceSets   *db.InstanceSettingsRepo
+	passwordTokens *db.PasswordResetTokenRepo
+	statuses       *db.StatusRepo
+	tags           *db.TagRepo
+	shares         *db.ShareRepo
+	shareCache     *shareCache
+	icsCache       *icsFeedCache
+	unlockLimiter  *rateLimiter
+	mailer         *mailer.Mailer
+	tokens         *auth.TokenService
+	tier           tier.Tier
+	bus            *events.Bus
+	hub            *ws.Hub
+	uiFS           fs.FS
+	// oidc is non-nil only when SSO is configured (DRABA_OIDC_ISSUER set).
+	// When nil, the /auth/oidc/* routes report SSO as disabled and no external
+	// identity provider is ever contacted. Set via WithOIDC.
+	oidc *auth.OIDCService
+	// oidcAutoCreateUsers controls whether an unknown external identity is
+	// auto-provisioned a local account on first SSO login.
+	oidcAutoCreateUsers bool
+}
 
-formatters:
-  enable:
-    - gofmt
-    - goimports
+// NewServer constructs a Server with its required dependencies. It does not
+// touch the network; call Routes to obtain the http.Handler to serve.
+func NewServer(
+	users *db.UserRepo,
+	invites *db.InviteRepo,
+	teams *db.TeamRepo,
+	activitiesRepo *db.ActivityRepo,
+	timelinesRepo TimelineStore,
+	savedFiltersRepo *db.SavedFilterRepo,
+	preferencesRepo *db.UserPreferenceRepo,
+	apiTokensRepo *db.APITokenRepo,
+	instanceSetsRepo *db.InstanceSettingsRepo,
+	passwordTokensRepo *db.PasswordResetTokenRepo,
+	statusesRepo *db.StatusRepo,
+	tagsRepo *db.TagRepo,
+	sharesRepo *db.ShareRepo,
+	m *mailer.Mailer,
+	tokens *auth.TokenService,
+	t tier.Tier,
+	bus *events.Bus,
+	hub *ws.Hub,
+) *Server {
+	// Both public-share caches share the DRABA_SHARE_CACHE_TTL setting.
+	sc := newShareCache()
+	return &Server{
+		users:          users,
+		invites:        invites,
+		teams:          teams,
+		activities:     activitiesRepo,
+		timelines:      timelinesRepo,
+		savedFilters:   savedFiltersRepo,
+		preferences:    preferencesRepo,
+		apiTokens:      apiTokensRepo,
+		instanceSets:   instanceSetsRepo,
+		passwordTokens: passwordTokensRepo,
+		statuses:       statusesRepo,
+		tags:           tagsRepo,
+		shares:         sharesRepo,
+		shareCache:     sc,
+		icsCache:       newICSFeedCache(sc.ttl),
+		unlockLimiter:  newRateLimiter(unlockMaxAttempts, time.Hour),
+		mailer:         m,
+		tokens:         tokens,
+		tier:           t,
+		bus:            bus,
+		hub:            hub,
+	}
+}
+
+// WithUI registers an embedded React SPA to be served at GET /. The FS must
+// be rooted at the build output directory (i.e. contain index.html directly).
+// When called, all unmatched GET paths fall back to index.html so React Router
+// handles client-side navigation. Safe to skip in dev (no-op when not called).
+func (s *Server) WithUI(uiFS fs.FS) *Server {
+	s.uiFS = uiFS
+	return s
+}
+
+// WithOIDC enables SSO. Passing a nil service leaves SSO disabled (the zero
+// value), so callers can wire it unconditionally from a possibly-nil
+// constructor result. autoCreate controls first-login auto-provisioning.
+func (s *Server) WithOIDC(svc *auth.OIDCService, autoCreate bool) *Server {
+	s.oidc = svc
+	s.oidcAutoCreateUsers = autoCreate
+	return s
+}
+
+// oidcAutoCreate reports whether unknown external identities are provisioned a
+// local account on first SSO login.
+func (s *Server) oidcAutoCreate() bool { return s.oidcAutoCreateUsers }
+
+// Routes returns the fully-wired HTTP handler for the API, including all
+// core routes plus any routes added by registered tier modules.
+func (s *Server) Routes() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
+	mux.HandleFunc("GET /version", s.handleVersion)
+
+	mux.HandleFunc("POST /auth/register", s.handleRegister)
+	mux.HandleFunc("POST /auth/login", s.handleLogin)
+	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
+	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
+	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
+	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
+	// OIDC / SSO. Public (no auth): they start and complete the external login
+	// flow. Both report SSO disabled with 404 when DRABA_OIDC_ISSUER is unset.
+	mux.HandleFunc("GET /auth/oidc/login", s.handleOIDCLogin)
+	mux.HandleFunc("GET /auth/oidc/callback", s.handleOIDCCallback)
+
+	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
+	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
+	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
+
+	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
+	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
+	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
+	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
+	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
+	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
+	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
+
+	// Public — no auth required; used by the login page and shared views.
+	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
+
+	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
+	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
+	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
+	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
+	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
+	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
+	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
+	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
+	// 3-segment GET paths and neither is more specific when the third segment differs.
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
+	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
+	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
+	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
+	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
+	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
+	// the more-specific literal "share" segment takes precedence.
+	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
+	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
+	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
+	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
+	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
+	// paths like /timelines/share/statuses).
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
+
+	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
+	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
+	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
+	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
+	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
+	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
+	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
+	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
+
+	// Share routes.
+	// GET /shares/{token} is public — no auth. The token is the credential.
+	// POST /timelines/{id}/shares uses the same /timelines/{id}/... prefix
+	// as archive/unarchive so it avoids the Go 1.22 mux pattern conflict with
+	// GET /timelines/share/{token} (only GET-method paths conflict).
+	// GET /teams/{id}/timelines/{timelineId}/shares uses the team-scoped prefix
+	// to avoid the GET conflict described above.
+	mux.HandleFunc("GET /shares/{token}", s.handleGetShareProjection)
+	mux.HandleFunc("POST /shares/{token}/unlock", s.handleUnlockShare)
+	mux.HandleFunc("POST /timelines/{id}/shares", chain(s.handleCreateShare, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/shares", chain(s.handleListShares, s.authMiddleware))
+	mux.HandleFunc("PATCH /shares/{id}", chain(s.handleUpdateShare, s.authMiddleware))
+	mux.HandleFunc("DELETE /shares/{id}", chain(s.handleDeleteShare, s.authMiddleware))
+	// Token rotation — the revocation story for ICS feeds (no password gate).
+	// GET /shares/{token}.ics is served inside handleGetShareProjection: the
+	// {token} wildcard spans the whole segment, so the .ics suffix arrives in
+	// the path value and is dispatched there.
+	mux.HandleFunc("POST /shares/{id}/regenerate", chain(s.handleRegenerateShare, s.authMiddleware))
+	// Named feed variant: the {file} slug is cosmetic (calendar clients
+	// default the calendar name from the URL filename); the token is the key.
+	mux.HandleFunc("GET /shares/{token}/{file}", s.handleGetShareICSNamed)
+
+	// Export routes (Phase 14.1).
+	// POST /timelines/{id}/export shares the /timelines/{id}/... prefix with
+	// archive/unarchive/shares — fine, since only GET-method paths conflict
+	// with GET /timelines/share/{token}.
+	// The GET convenience endpoints use the team-scoped prefix (like
+	// activities/statuses/access above) to avoid that same GET conflict:
+	// /teams/{id}/timelines/{timelineId}/export.csv is 4 segments, so it
+	// can't collide with the 3-segment GET /timelines/share/{token}.
+	mux.HandleFunc("POST /timelines/{id}/export", chain(s.handlePostTimelineExport, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/export.csv", chain(s.handleGetTimelineExportCSV, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/export.xlsx", chain(s.handleGetTimelineExportXLSX, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/export.ics", chain(s.handleGetTimelineExportICS, s.authMiddleware))
+
+	// Import routes (Phase 15.1). The POST uses the same team-scoped route
+	// family as the activity/status routes. The templates are static content
+	// (example data only) but stay behind auth like every other non-share
+	// endpoint.
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/import", chain(s.handlePostTimelineImport, s.authMiddleware))
+	mux.HandleFunc("GET /import/template.csv", chain(s.handleGetImportTemplateCSV, s.authMiddleware))
+	mux.HandleFunc("GET /import/template.xlsx", chain(s.handleGetImportTemplateXLSX, s.authMiddleware))
+
+	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
+	// JWT itself before upgrading, because WebSocket clients can't set headers.
+	mux.HandleFunc("GET /ws", s.hub.ServeWS)
+
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
+	if s.uiFS != nil {
+		mux.Handle("GET /", spaHandler(s.uiFS))
+	}
+
+	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
+	for _, m := range tier.Registered() {
+		if err := m.Register(ctx); err != nil {
+			// Module registration is a startup invariant — a failure here is a programming error.
+			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
+		}
+	}
+
+	return requestLogger(mux)
+}
+
+// chain applies a single middleware to a handler function.
+func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
+	return m(h).ServeHTTP
+}
+
+// spaHandler serves the embedded React SPA. Known static assets are served
+// directly; any unrecognised path falls back to index.html so React Router
+// handles client-side navigation.
+func spaHandler(uiFS fs.FS) http.Handler {
+	fserver := http.FileServer(http.FS(uiFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			path = "index.html"
+		}
+		if _, err := uiFS.Open(path); err != nil {
+			// Unknown path — serve index.html and let React Router handle it.
+			r = r.Clone(r.Context())
+			r.URL.Path = "/"
+			fserver.ServeHTTP(w, r)
+			return
+		}
+		fserver.ServeHTTP(w, r)
+	})
+}
 ````
 
 ## File: packages/api/internal/api/share_handler.go
@@ -64373,529 +64880,371 @@ type unlockShareBody struct {
 }
 ````
 
-## File: packages/web/src/components/ExportDialog.tsx
-````typescript
-/**
- * ExportDialog — "Export this view" modal (Phase 14).
- *
- * Built to the export-modal design handoff (docs/design/handoffs/export-modal):
- * a format rail + options pane two-pane body, a filter context strip that
- * makes "export what I'm seeing" visible, and a scope picker (current view vs
- * entire timeline) for the data formats. Modeled on ShareModal's portal shell,
- * but — per the handoff — the overlay click does not close the dialog, only
- * Esc / the close button / Cancel do.
- *
- * 14.1 implements the server-side data/calendar formats (CSV, Excel, ICS).
- * 14.2 adds client-side textual formats (Markdown, Plain text, Copy to clipboard)
- *      via the `textExportData` prop; these formats only appear for non-Gantt views.
- * 14.3 adds the PNG snapshot format, rasterizing `captureElement` (the live
- *      view container) via `lib/pngExport.ts`; available in every view.
- * 14.4 adds the printable-view and HTML-save formats, both driven off the
- *      `presentationFrame` prop (the mounted PresentationFrame iframe) via
- *      `lib/printExport.ts` / `lib/htmlExport.ts`; available in every view.
- */
+## File: packages/api/internal/api/share_ics_handler.go
+````go
+package api
 
-import { useEffect, useRef, useState, useCallback } from 'react'
-import { createPortal } from 'react-dom'
-import {
-  FileOutput, Filter, AlertTriangle, Download, FileDown, Check, X, Copy, Printer,
-} from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { cn } from '@/lib/utils'
-import { useExport } from '@/hooks/useExport'
-import {
-  getExportFormats, buildExportFilename,
-  type ExportFormatId, type ExportViewType,
-} from '@/lib/exportCapabilities'
-import {
-  buildListMarkdown, buildListMarkdownOutline,
-  buildKanbanMarkdown, buildCalendarMarkdown,
-  buildListPlainText, buildListPlainTextOutline,
-  buildKanbanPlainText, buildCalendarPlainText,
-  buildListHtml, buildListHtmlOutline, buildKanbanHtml, buildCalendarHtml,
-  type TextExportData,
-} from '@/lib/textExport'
-import { capturePngSnapshot } from '@/lib/pngExport'
-import { printPresentationFrame } from '@/lib/printExport'
-import { saveFramePresentationHtml } from '@/lib/htmlExport'
-import type { FilterDefinition } from '@/lib/filterTypes'
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
 
-export type { TextExportData }
+	"github.com/I0-1O/draba/packages/api/internal/ics"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
 
-export interface ExportDialogProps {
-  view: ExportViewType
-  teamId: string
-  timelineId: string
-  timelineName: string
-  /** Team display name, shown in the PNG header strip alongside the timeline name. */
-  teamName?: string | null
-  /** Display label for the active filter (e.g. a saved filter's name), or null if no filter is active. */
-  filterLabel: string | null
-  /** The active filter's definition, sent to the server when scope is "view" and activityIds is absent. */
-  filterDefinition: FilterDefinition | null
-  /** Number of activities matching the active filter (or totalCount when no filter is active). */
-  filteredCount: number
-  /** Total number of activities in the timeline, regardless of filter. */
-  totalCount: number
-  /**
-   * Ordered activity IDs for the "current view" scope — covers preset/member
-   * filters (which can't be sent as a FilterDefinition) and list-view sort order.
-   * When non-null, takes precedence over filterDefinition in the request body.
-   */
-  viewActivityIds: string[] | null
-  /**
-   * Export column names to include in CSV/Excel (list view column visibility).
-   * Null means all columns. Only meaningful for csv/xlsx formats.
-   */
-  listExportColumns: string[] | null
-  /**
-   * Pre-resolved in-memory data for client-side textual formats (14.2).
-   * Required for Markdown / plain text / clipboard options to be functional;
-   * if absent those formats still appear but will produce empty output.
-   */
-  textExportData?: TextExportData | null
-  /**
-   * The live view container to rasterize for the PNG format (14.3).
-   * Required for PNG to be functional; if absent the format still appears
-   * but the action is a no-op.
-   */
-  captureElement?: HTMLElement | null
-  /**
-   * The mounted PresentationFrame's iframe — the shared render surface for
-   * the printable-view and HTML-save formats (14.4). Required for those
-   * formats to be functional; if absent the actions are a no-op.
-   */
-  presentationFrame?: HTMLIFrameElement | null
-  /**
-   * Period label for the PNG header (Calendar only) — e.g. "June 2026" or
-   * "Jun 1 – 7, 2026". The on-screen toolbar carries this, but it's excluded
-   * from the capture, so it's surfaced into the header strip instead.
-   */
-  periodLabel?: string | null
-  onClose: () => void
+// ── In-memory ICS feed cache ──────────────────────────────────────────────────
+//
+// Mirrors shareCache, but stores the rendered text/calendar payload. Calendar
+// clients poll on their own cadence (minutes to hours), so the same short TTL
+// keeps feeds near-live while absorbing aggressive pollers.
+
+type icsCacheEntry struct {
+	builtAt time.Time
+	payload string
 }
 
-const VIEW_LABELS: Record<ExportViewType, string> = {
-  gantt: 'Gantt',
-  list: 'List',
-  kanban: 'Kanban',
-  calendar: 'Calendar',
+type icsFeedCache struct {
+	mu      sync.RWMutex
+	entries map[string]*icsCacheEntry
+	ttl     time.Duration
 }
 
-type Scope = 'view' | 'all'
-
-// ── Client-side text generation ────────────────────────────────────────────────
-
-type ListStyle = 'table' | 'outline'
-
-function generateMarkdown(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null, listStyle: ListStyle): string {
-  if (view === 'list') return listStyle === 'outline'
-    ? buildListMarkdownOutline(data, timelineName, filterLabel)
-    : buildListMarkdown(data, timelineName, filterLabel)
-  if (view === 'kanban') return buildKanbanMarkdown(data, timelineName, filterLabel)
-  if (view === 'calendar') return buildCalendarMarkdown(data, timelineName, filterLabel)
-  return buildListMarkdown(data, timelineName, filterLabel)
+func newICSFeedCache(ttl time.Duration) *icsFeedCache {
+	return &icsFeedCache{entries: make(map[string]*icsCacheEntry), ttl: ttl}
 }
 
-function generatePlainText(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null, listStyle: ListStyle): string {
-  if (view === 'list') return listStyle === 'outline'
-    ? buildListPlainTextOutline(data, timelineName, filterLabel)
-    : buildListPlainText(data, timelineName, filterLabel)
-  if (view === 'kanban') return buildKanbanPlainText(data, timelineName, filterLabel)
-  if (view === 'calendar') return buildCalendarPlainText(data, timelineName, filterLabel)
-  return buildListPlainText(data, timelineName, filterLabel)
+func (c *icsFeedCache) get(token string) (string, bool) {
+	c.mu.RLock()
+	e, ok := c.entries[token]
+	c.mu.RUnlock()
+	if !ok || time.Since(e.builtAt) > c.ttl {
+		return "", false
+	}
+	return e.payload, true
 }
 
-function generateHtml(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null, listStyle: ListStyle): string {
-  if (view === 'list') return listStyle === 'outline'
-    ? buildListHtmlOutline(data, timelineName, filterLabel)
-    : buildListHtml(data, timelineName, filterLabel)
-  if (view === 'kanban') return buildKanbanHtml(data, timelineName, filterLabel)
-  if (view === 'calendar') return buildCalendarHtml(data, timelineName, filterLabel)
-  return buildListHtml(data, timelineName, filterLabel)
+func (c *icsFeedCache) set(token, payload string) {
+	c.mu.Lock()
+	c.entries[token] = &icsCacheEntry{builtAt: time.Now(), payload: payload}
+	c.mu.Unlock()
 }
 
-/** Triggers the browser to save a Blob with the given filename. */
-function saveBlob(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  URL.revokeObjectURL(url)
+func (c *icsFeedCache) invalidate(token string) {
+	c.mu.Lock()
+	delete(c.entries, token)
+	c.mu.Unlock()
 }
 
-/**
- * Writes `text/plain` + `text/html` flavors to the clipboard so the paste
- * lands rich in Slack / Word / Google Docs and clean in code editors.
- * Falls back to `writeText` if `ClipboardItem` is unavailable (HTTP contexts).
- */
-async function copyToClipboard(plainText: string, htmlText: string): Promise<void> {
-  if (typeof ClipboardItem !== 'undefined' && navigator.clipboard.write) {
-    const item = new ClipboardItem({
-      'text/plain': new Blob([plainText], { type: 'text/plain' }),
-      'text/html': new Blob([htmlText], { type: 'text/html' }),
-    })
-    await navigator.clipboard.write([item])
-  } else {
-    // Fallback for HTTP (non-localhost) contexts where ClipboardItem is blocked.
-    await navigator.clipboard.writeText(plainText)
-  }
+// ── Handlers ──────────────────────────────────────────────────────────────────
+
+// serveICSFeed handles GET /shares/{token}.ics — the public, unauthenticated
+// calendar feed. It is dispatched from handleGetShareProjection when the token
+// path value carries the .ics suffix (Go 1.22 mux wildcards span the whole
+// segment, so the suffix arrives inside {token}).
+//
+// The feed serves live data scoped server-side to the share's timeline — or,
+// for member feeds, to one member's assigned activities. There is no password
+// gate: calendar clients cannot unlock interactively, so the unguessable token
+// is the secret and revocation is rotate-or-delete.
+func (s *Server) serveICSFeed(w http.ResponseWriter, r *http.Request, token string) {
+	share, err := s.shares.GetByToken(token)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
+		return
+	}
+	// A view share is not a feed — 404 rather than leaking that the token
+	// exists in another mode.
+	if share.Kind != models.ShareKindICS {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return
+	}
+	if share.RevokedAt != nil {
+		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
+		return
+	}
+	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
+		writeError(w, http.StatusGone, "GONE", "this share has expired")
+		return
+	}
+
+	// Archived timeline → the feed stops serving (Phase 13.5). 404, not 410:
+	// unarchiving must resurrect the feed, and 410 makes calendar clients
+	// drop the subscription for good. Checked before the cache read so
+	// archiving takes effect immediately.
+	if !s.shareTimelineLive(w, share) {
+		return
+	}
+
+	body, ok := s.icsCache.get(token)
+	if !ok {
+		body, err = s.buildICSFeed(share)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build calendar feed")
+			return
+		}
+		s.icsCache.set(token, body)
+	}
+
+	go func() { _ = s.shares.RecordView(share.ID) }()
+	w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
+	// no-store: the token is the secret and rotate/delete is the only kill
+	// switch for a feed, so a revoked URL must not keep serving from browser
+	// or proxy caches. Server-side load is already absorbed by icsCache.
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write([]byte(body))
 }
 
-// ── Component ──────────────────────────────────────────────────────────────────
+// buildICSFeed renders the iCalendar document for an ICS share. Scope is
+// hard-locked server-side: the timeline comes from the share row, and member
+// feeds drop every activity the member is not assigned to before
+// serialization.
+//
+// Each VEVENT projects the activity's display fields: status (+ percent
+// complete), assignee display names, and tag names go into DESCRIPTION (and
+// tags into CATEGORIES); whole-timeline feeds also append assignee names to
+// SUMMARY so the month grid shows who owns what. Member display names are the
+// only person-identifying field a feed may carry — never emails, user IDs, or
+// roles.
+func (s *Server) buildICSFeed(share *models.Share) (string, error) {
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		return "", err
+	}
 
-export default function ExportDialog({
-  view,
-  timelineId,
-  timelineName,
-  teamName,
-  filterLabel,
-  filterDefinition,
-  filteredCount,
-  totalCount,
-  viewActivityIds,
-  listExportColumns,
-  textExportData,
-  captureElement,
-  presentationFrame,
-  periodLabel,
-  onClose,
-}: ExportDialogProps) {
-  const formats = getExportFormats(view)
-  const [formatId, setFormatId] = useState<ExportFormatId>('csv')
-  const [scope, setScope] = useState<Scope>('view')
-  const [listStyle, setListStyle] = useState<ListStyle>('table')
-  const [done, setDone] = useState(false)
-  const [clientPending, setClientPending] = useState(false)
-  const { download, isPending: serverPending } = useExport(timelineId, timelineName)
-  const doneTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+	acts, err := s.activities.ListByTimeline(share.TimelineID, nil, nil, false)
+	if err != nil {
+		return "", err
+	}
 
-  const format = formats.find(f => f.id === formatId) ?? formats[0]
-  const Icon = format.icon
-  const isPending = serverPending || clientPending
+	// Display-name / tag / status lookups for the event field projection.
+	statuses, err := s.statuses.ListStatuses(share.TimelineID)
+	if err != nil {
+		return "", err
+	}
+	statusName := make(map[string]string, len(statuses))
+	for _, st := range statuses {
+		statusName[st.ID] = st.Name
+	}
+	members, err := s.teams.ListMembers(timeline.TeamID)
+	if err != nil {
+		return "", err
+	}
+	memberName := make(map[string]string, len(members))
+	for _, m := range members {
+		if m.DisplayName != "" {
+			memberName[m.ID] = m.DisplayName
+		}
+	}
+	tags, err := s.tags.ListByTeam(timeline.TeamID)
+	if err != nil {
+		return "", err
+	}
+	tagName := make(map[string]string, len(tags))
+	for _, tg := range tags {
+		tagName[tg.ID] = tg.Name
+	}
 
-  // Client-side formats (PNG / Markdown / plain text) are inherently shaped by
-  // the active view, so their filename names it. Server data formats (CSV /
-  // xlsx / ICS) can be scoped to the whole timeline, where a view name would
-  // mislead — they keep the plain `<timeline>-<date>` name.
-  const filenameView = format.clientSide ? view : undefined
+	memberScoped := share.Scope != nil && *share.Scope == models.ShareScopeMember && share.MemberID != nil
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+	name := timeline.Name
+	if memberScoped {
+		filtered := acts[:0]
+		for _, a := range acts {
+			for _, id := range a.AssignedMemberIDs {
+				if id == *share.MemberID {
+					filtered = append(filtered, a)
+					break
+				}
+			}
+		}
+		acts = filtered
 
-  useEffect(() => () => { if (doneTimer.current) clearTimeout(doneTimer.current) }, [])
+		if n, ok := memberName[*share.MemberID]; ok {
+			name = timeline.Name + " — " + n
+		}
+	}
 
-  const selectFormat = (id: ExportFormatId) => {
-    setFormatId(id)
-    setDone(false)
-  }
-
-  const flashDone = useCallback(() => {
-    setDone(true)
-    doneTimer.current = setTimeout(() => setDone(false), 1600)
-  }, [])
-
-  const handleAction = useCallback(() => {
-    if (format.id === 'png') {
-      if (!captureElement) return
-      setClientPending(true)
-      capturePngSnapshot(captureElement, { timelineName, teamName: teamName ?? null, filterLabel, periodLabel })
-        .then(blob => { saveBlob(blob, buildExportFilename(timelineName, format.ext, view)); flashDone() })
-        .catch(() => { /* capture may fail on unsupported browsers */ })
-        .finally(() => setClientPending(false))
-      return
-    }
-
-    if (format.id === 'printable') {
-      if (!presentationFrame) return
-      printPresentationFrame(presentationFrame, { timelineName, teamName: teamName ?? null, filterLabel, periodLabel })
-      flashDone()
-      return
-    }
-
-    if (format.id === 'html') {
-      if (!presentationFrame) return
-      setClientPending(true)
-      saveFramePresentationHtml(
-        presentationFrame,
-        { timelineName, teamName: teamName ?? null, filterLabel, periodLabel },
-        buildExportFilename(timelineName, format.ext, view),
-      )
-        .then(() => flashDone())
-        .catch(() => { /* stylesheet fetch may fail offline; nothing was saved */ })
-        .finally(() => setClientPending(false))
-      return
-    }
-
-    if (format.clientSide) {
-      const data = textExportData ?? {
-        activities: [],
-        memberById: new Map(),
-        statusById: new Map(),
-        tagById: new Map(),
-        activityTitleById: new Map(),
-        kanbanColumns: null,
-        listDisplayRows: null,
-        listVisibleColumns: null,
-        kanbanShowHierarchy: false,
-        kanbanChildrenByParentId: new Map(),
-      }
-
-      if (format.id === 'clipboard') {
-        const plainText = generatePlainText(view, data, timelineName, filterLabel, listStyle)
-        const htmlText = generateHtml(view, data, timelineName, filterLabel, listStyle)
-        setClientPending(true)
-        copyToClipboard(plainText, htmlText)
-          .then(flashDone)
-          .catch(() => { /* clipboard may be denied */ })
-          .finally(() => setClientPending(false))
-        return
-      }
-
-      // markdown or plaintext — generate and download
-      const isMarkdown = format.id === 'markdown'
-      const content = isMarkdown
-        ? generateMarkdown(view, data, timelineName, filterLabel, listStyle)
-        : generatePlainText(view, data, timelineName, filterLabel, listStyle)
-      const mimeType = isMarkdown ? 'text/markdown;charset=utf-8' : 'text/plain;charset=utf-8'
-      const blob = new Blob([content], { type: mimeType })
-      saveBlob(blob, buildExportFilename(timelineName, format.ext, view))
-      flashDone()
-      return
-    }
-
-    // Server-side: CSV / xlsx / ICS
-    const isDataFormat = format.id === 'csv' || format.id === 'xlsx'
-    void download(format.id, format.ext, {
-      activityIds: scope === 'view' ? viewActivityIds : null,
-      filter: scope === 'view' && !viewActivityIds ? filterDefinition : null,
-      columns: isDataFormat ? listExportColumns : null,
-    }).then(flashDone)
-  }, [format, view, timelineName, teamName, filterLabel, periodLabel, textExportData, captureElement, presentationFrame, scope, listStyle, viewActivityIds, filterDefinition, listExportColumns, download, flashDone])
-
-  const emptyView = filteredCount === 0
-  const subWithFilter = filterLabel !== null
-    ? `${filteredCount} of ${totalCount} activities · matches your filter`
-    : `All ${totalCount} activities · nothing filtered out`
-
-  // Button label / icon for the primary action
-  const actionLabel = format.verb === 'copy'
-    ? done ? 'Copied!' : (isPending ? 'Copying…' : 'Copy to clipboard')
-    : format.verb === 'print'
-    ? done ? 'Print dialog opened' : 'Print…'
-    : done ? 'Downloaded' : (isPending ? 'Downloading…' : `Download ${format.ext}`)
-  const ActionIcon = format.verb === 'copy' ? Copy : format.verb === 'print' ? Printer : Download
-
-  return createPortal(
-    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]">
-      <div className="flex max-h-[88vh] w-[min(620px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]">
-        {/* Header */}
-        <div className="flex shrink-0 items-start gap-3 px-5 py-[18px]">
-          <div className="flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[hsl(188_59%_38%/0.12)] text-primary">
-            <FileOutput size={19} strokeWidth={2.2} />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Export this view</h2>
-            <div className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
-              <span className="inline-block h-2 w-2 shrink-0 rounded-sm bg-secondary" />
-              {timelineName ? `${timelineName} · ` : ''}{VIEW_LABELS[view]} view
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
-          >
-            <X size={16} strokeWidth={2.2} />
-          </button>
-        </div>
-
-        {/* Filter context strip */}
-        <div className="shrink-0 border-b border-border px-5 pb-[14px]">
-          <div className={cn(
-            'rounded-[var(--radius-lg)] px-3 py-[9px]',
-            emptyView ? 'bg-[color-mix(in_srgb,var(--warning)_13%,transparent)]' : 'bg-muted',
-          )}>
-            <div className="flex items-center gap-2 text-[12.5px]">
-              {emptyView
-                ? <AlertTriangle size={14} className="shrink-0 text-warning" strokeWidth={2} />
-                : <Filter size={14} className="shrink-0 text-muted-foreground" strokeWidth={2} />}
-              <span className="flex-1 text-foreground">
-                {filterLabel !== null
-                  ? <>Filtered: <span className="font-semibold">{filterLabel}</span></>
-                  : `Exporting the ${VIEW_LABELS[view]} view as you see it`}
-              </span>
-              <span className={cn('shrink-0 text-[11.5px] font-semibold', emptyView ? 'text-warning' : 'text-muted-foreground')}>
-                {filterLabel !== null ? `${filteredCount} of ${totalCount} activities` : `All ${totalCount} activities`}
-              </span>
-            </div>
-            {emptyView && (
-              <div className="ml-[22px] mt-1 text-[12px] text-muted-foreground">
-                This view has no activities — the export will be empty or headers-only.
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Body — format rail + options pane */}
-        <div className="flex flex-1 overflow-hidden">
-          <div role="listbox" aria-label="Export format" className="flex w-[196px] shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-border p-2.5">
-            {formats.map(f => {
-              const FIcon = f.icon
-              const selected = f.id === formatId
-              // Badge icon: copy for clipboard, printer for printable view, download for everything else
-              const BadgeIcon = f.verb === 'copy' ? Copy : f.verb === 'print' ? Printer : Download
-              return (
-                <button
-                  key={f.id}
-                  role="option"
-                  aria-selected={selected}
-                  onClick={() => selectFormat(f.id)}
-                  className={cn(
-                    'flex items-center gap-[9px] rounded-[var(--radius-md)] border-none px-[9px] py-2 text-left text-[13px] transition-colors',
-                    selected ? 'bg-[hsl(188_59%_38%/0.1)] text-foreground font-semibold' : 'bg-transparent text-foreground hover:bg-muted',
-                  )}
-                >
-                  <FIcon size={15} strokeWidth={selected ? 2.2 : 1.8} className={selected ? 'shrink-0 text-primary' : 'shrink-0 text-muted-foreground'} />
-                  <span className="flex-1 truncate">{f.name}</span>
-                  <span title={f.verb === 'copy' ? 'Copy' : f.verb === 'print' ? 'Print' : 'Download'} className={cn('shrink-0 text-muted-foreground', selected ? 'opacity-90' : 'opacity-65')}>
-                    <BadgeIcon size={11} strokeWidth={2} />
-                  </span>
-                </button>
-              )
-            })}
-          </div>
-
-          <div className="flex flex-1 flex-col gap-3.5 overflow-y-auto p-4">
-            {/* Format heading */}
-            <div className="flex items-start gap-2.5">
-              <Icon size={16} strokeWidth={2} className="mt-0.5 shrink-0 text-muted-foreground" />
-              <div>
-                <div className="text-[14px] font-bold text-foreground">{format.name}</div>
-                <div className="mt-0.5 text-[12.5px] leading-[1.5] text-muted-foreground">{format.desc}</div>
-              </div>
-            </div>
-
-            {/* Style picker — table vs outline, only for list view text formats */}
-            {(format.id === 'markdown' || format.id === 'plaintext' || format.id === 'clipboard') && view === 'list' && (
-              <div>
-                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Style</div>
-                <div className="flex overflow-hidden rounded-[var(--radius-lg)] border border-border">
-                  <StyleOption
-                    label="Table"
-                    desc="Aligned columns"
-                    selected={listStyle === 'table'}
-                    onSelect={() => setListStyle('table')}
-                  />
-                  <div className="w-px shrink-0 bg-border" />
-                  <StyleOption
-                    label="Outline"
-                    desc="Bullet list with fields"
-                    selected={listStyle === 'outline'}
-                    onSelect={() => setListStyle('outline')}
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* Scope picker — only for server-side data formats */}
-            {format.scope && (
-              <div>
-                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Activities to export</div>
-                <div className="overflow-hidden rounded-[var(--radius-lg)] border border-border">
-                  <ScopeRow
-                    label="Current view"
-                    sub={subWithFilter}
-                    selected={scope === 'view'}
-                    onSelect={() => setScope('view')}
-                  />
-                  <div className="border-t border-border" />
-                  <ScopeRow
-                    label="Entire timeline"
-                    sub={`All ${totalCount} activities · ignores filters`}
-                    selected={scope === 'all'}
-                    onSelect={() => setScope('all')}
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* Filename chip — only for download formats */}
-            {format.verb === 'download' && format.ext && (
-              <div>
-                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">File</div>
-                <div className="flex items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12px] text-foreground">
-                  <FileDown size={13} strokeWidth={2} className="shrink-0 text-muted-foreground" />
-                  <span className="truncate">{buildExportFilename(timelineName, format.ext, filenameView)}</span>
-                </div>
-              </div>
-            )}
-
-            {/* Clipboard note */}
-            {format.id === 'clipboard' && (
-              <div className="rounded-[var(--radius-md)] bg-muted px-3 py-2.5 text-[12px] leading-[1.5] text-muted-foreground">
-                Copies <strong className="text-foreground">rich text</strong> (HTML) + plain text — paste into Slack, Google Docs, or Word to get a formatted {view === 'list' && listStyle === 'outline' ? 'outline' : 'table'}.
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Footer */}
-        <div className="flex shrink-0 items-center justify-end gap-2.5 border-t border-border px-5 py-[13px]">
-          <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button onClick={handleAction} disabled={isPending} className="min-w-[168px] justify-center">
-            {done
-              ? <><Check size={14} strokeWidth={2.2} /> {actionLabel}</>
-              : <><ActionIcon size={14} strokeWidth={2.2} /> {actionLabel}</>}
-          </Button>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  )
+	// A member feed is one person's calendar — repeating their name on every
+	// event is noise. The whole-timeline feed is the team overview, where
+	// who-owns-what belongs in the month grid.
+	events := activitiesToICSEvents(acts, memberName, tagName, statusName, !memberScoped)
+	return ics.Calendar(name, events), nil
 }
 
-function StyleOption({ label, desc, selected, onSelect }: { label: string; desc: string; selected: boolean; onSelect: () => void }) {
-  return (
-    <button
-      onClick={onSelect}
-      className={cn(
-        'flex flex-1 flex-col items-start px-3 py-2.5 text-left transition-colors',
-        selected ? 'bg-[hsl(188_59%_38%/0.09)]' : 'bg-transparent hover:bg-muted',
-      )}
-    >
-      <span className="text-[13px] font-semibold text-foreground">{label}</span>
-      <span className="text-[11.5px] text-muted-foreground">{desc}</span>
-    </button>
-  )
+// activitiesToICSEvents projects activities into iCalendar VEVENTs. Each
+// event's DESCRIPTION carries structured field lines (status + percent
+// complete, assignee display names, tag names) followed by the free-text
+// activity description; CATEGORIES carries tag names. If
+// includeAssigneesInSummary is set, assignee names are appended to SUMMARY.
+func activitiesToICSEvents(acts []*models.Activity, memberName, tagName, statusName map[string]string, includeAssigneesInSummary bool) []ics.Event {
+	events := make([]ics.Event, 0, len(acts))
+	for _, a := range acts {
+		assignees := make([]string, 0, len(a.AssignedMemberIDs))
+		for _, id := range a.AssignedMemberIDs {
+			if n, ok := memberName[id]; ok {
+				assignees = append(assignees, n)
+			}
+		}
+		tagNames := make([]string, 0, len(a.TagIDs))
+		for _, id := range a.TagIDs {
+			if n, ok := tagName[id]; ok {
+				tagNames = append(tagNames, n)
+			}
+		}
+
+		summary := a.Title
+		if includeAssigneesInSummary && len(assignees) > 0 {
+			summary += " — " + strings.Join(assignees, ", ")
+		}
+
+		// Structured field lines first, then a blank line, then the
+		// free-text activity description.
+		meta := make([]string, 0, 3)
+		if a.StatusID != nil {
+			if n, ok := statusName[*a.StatusID]; ok {
+				line := "Status: " + n
+				if a.PercentComplete != nil {
+					line += fmt.Sprintf(" (%d%%)", *a.PercentComplete)
+				}
+				meta = append(meta, line)
+			}
+		} else if a.PercentComplete != nil {
+			meta = append(meta, fmt.Sprintf("Progress: %d%%", *a.PercentComplete))
+		}
+		if len(assignees) > 0 {
+			meta = append(meta, "Assigned: "+strings.Join(assignees, ", "))
+		}
+		if len(tagNames) > 0 {
+			meta = append(meta, "Tags: "+strings.Join(tagNames, ", "))
+		}
+		desc := strings.Join(meta, "\n")
+		if a.Description != nil && *a.Description != "" {
+			if desc != "" {
+				desc += "\n\n"
+			}
+			desc += *a.Description
+		}
+
+		events = append(events, ics.Event{
+			UID:         a.ID + "@draba",
+			Summary:     summary,
+			Description: desc,
+			Categories:  tagNames,
+			Start:       a.StartAt,
+			End:         a.EndAt,
+			Stamp:       a.UpdatedAt,
+		})
+	}
+	return events
 }
 
-function ScopeRow({ label, sub, selected, onSelect }: { label: string; sub: string; selected: boolean; onSelect: () => void }) {
-  return (
-    <button
-      onClick={onSelect}
-      className={cn(
-        'flex w-full items-start gap-2.5 px-3 py-2.5 text-left transition-colors',
-        selected ? 'bg-[hsl(188_59%_38%/0.09)]' : 'bg-transparent hover:bg-muted',
-      )}
-    >
-      <span className={cn(
-        'mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-[1.5px]',
-        selected ? 'border-[5px] border-primary' : 'border-input',
-      )} />
-      <span>
-        <div className="text-[13px] font-semibold text-foreground">{label}</div>
-        <div className="text-[11.5px] text-muted-foreground">{sub}</div>
-      </span>
-    </button>
-  )
+// handleGetShareICSNamed handles GET /shares/{token}/{file}. The file segment
+// must end in .ics but is otherwise cosmetic: most calendar clients
+// (Thunderbird included) default the new calendar's name from the URL's
+// filename, so the modal links carry a readable slug (e.g. .../sales-kick-off.ics).
+// The token alone is authoritative.
+func (s *Server) handleGetShareICSNamed(w http.ResponseWriter, r *http.Request) {
+	if !strings.HasSuffix(r.PathValue("file"), ".ics") {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return
+	}
+	s.serveICSFeed(w, r, r.PathValue("token"))
 }
+
+// handleRegenerateShare handles POST /shares/{id}/regenerate. It rotates the
+// share's token, immediately invalidating the old URL — the revocation story
+// for ICS feeds, which cannot carry a password. It works for view shares too
+// (rotating is strictly safer than nothing), and any member of the timeline's
+// team may do it, consistent with PATCH/DELETE.
+func (s *Server) handleRegenerateShare(w http.ResponseWriter, r *http.Request) {
+	shareID := r.PathValue("id")
+
+	share, err := s.shares.GetByID(shareID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	oldToken := share.Token
+	share.Token = newToken()
+	if err := s.shares.RotateToken(share.ID, share.Token); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to regenerate share link")
+		return
+	}
+
+	// Kill both caches for the dead token so it stops serving immediately.
+	s.shareCache.invalidate(oldToken)
+	s.icsCache.invalidate(oldToken)
+
+	writeJSON(w, http.StatusOK, share)
+}
+````
+
+## File: .golangci.yml
+````yaml
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+    - gocritic
+    - revive
+    - misspell
+    - nolintlint
+
+  settings:
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+    revive:
+      rules:
+        - name: exported
+          severity: warning
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
 ````
 
 ## File: packages/shared/src/index.ts
@@ -74449,6 +74798,531 @@ paths:
           $ref: "#/components/responses/InternalError"
 ````
 
+## File: packages/web/src/components/ExportDialog.tsx
+````typescript
+/**
+ * ExportDialog — "Export this view" modal (Phase 14).
+ *
+ * Built to the export-modal design handoff (docs/design/handoffs/export-modal):
+ * a format rail + options pane two-pane body, a filter context strip that
+ * makes "export what I'm seeing" visible, and a scope picker (current view vs
+ * entire timeline) for the data formats. Modeled on ShareModal's portal shell,
+ * but — per the handoff — the overlay click does not close the dialog, only
+ * Esc / the close button / Cancel do.
+ *
+ * 14.1 implements the server-side data/calendar formats (CSV, Excel, ICS).
+ * 14.2 adds client-side textual formats (Markdown, Plain text, Copy to clipboard)
+ *      via the `textExportData` prop; these formats only appear for non-Gantt views.
+ * 14.3 adds the PNG snapshot format, rasterizing `captureElement` (the live
+ *      view container) via `lib/pngExport.ts`; available in every view.
+ * 14.4 adds the printable-view and HTML-save formats, both driven off the
+ *      `presentationFrame` prop (the mounted PresentationFrame iframe) via
+ *      `lib/printExport.ts` / `lib/htmlExport.ts`; available in every view.
+ */
+
+import { useEffect, useRef, useState, useCallback } from 'react'
+import { createPortal } from 'react-dom'
+import {
+  FileOutput, Filter, AlertTriangle, Download, FileDown, Check, X, Copy, Printer,
+} from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
+import { useExport } from '@/hooks/useExport'
+import {
+  getExportFormats, buildExportFilename,
+  type ExportFormatId, type ExportViewType,
+} from '@/lib/exportCapabilities'
+import {
+  buildListMarkdown, buildListMarkdownOutline,
+  buildKanbanMarkdown, buildCalendarMarkdown,
+  buildListPlainText, buildListPlainTextOutline,
+  buildKanbanPlainText, buildCalendarPlainText,
+  buildListHtml, buildListHtmlOutline, buildKanbanHtml, buildCalendarHtml,
+  type TextExportData,
+} from '@/lib/textExport'
+import { capturePngSnapshot } from '@/lib/pngExport'
+import { printPresentationFrame } from '@/lib/printExport'
+import { saveFramePresentationHtml } from '@/lib/htmlExport'
+import type { FilterDefinition } from '@/lib/filterTypes'
+
+export type { TextExportData }
+
+export interface ExportDialogProps {
+  view: ExportViewType
+  teamId: string
+  timelineId: string
+  timelineName: string
+  /** Team display name, shown in the PNG header strip alongside the timeline name. */
+  teamName?: string | null
+  /** Display label for the active filter (e.g. a saved filter's name), or null if no filter is active. */
+  filterLabel: string | null
+  /** The active filter's definition, sent to the server when scope is "view" and activityIds is absent. */
+  filterDefinition: FilterDefinition | null
+  /** Number of activities matching the active filter (or totalCount when no filter is active). */
+  filteredCount: number
+  /** Total number of activities in the timeline, regardless of filter. */
+  totalCount: number
+  /**
+   * Ordered activity IDs for the "current view" scope — covers preset/member
+   * filters (which can't be sent as a FilterDefinition) and list-view sort order.
+   * When non-null, takes precedence over filterDefinition in the request body.
+   */
+  viewActivityIds: string[] | null
+  /**
+   * Export column names to include in CSV/Excel (list view column visibility).
+   * Null means all columns. Only meaningful for csv/xlsx formats.
+   */
+  listExportColumns: string[] | null
+  /**
+   * Pre-resolved in-memory data for client-side textual formats (14.2).
+   * Required for Markdown / plain text / clipboard options to be functional;
+   * if absent those formats still appear but will produce empty output.
+   */
+  textExportData?: TextExportData | null
+  /**
+   * The live view container to rasterize for the PNG format (14.3).
+   * Required for PNG to be functional; if absent the format still appears
+   * but the action is a no-op.
+   */
+  captureElement?: HTMLElement | null
+  /**
+   * The mounted PresentationFrame's iframe — the shared render surface for
+   * the printable-view and HTML-save formats (14.4). Required for those
+   * formats to be functional; if absent the actions are a no-op.
+   */
+  presentationFrame?: HTMLIFrameElement | null
+  /**
+   * Period label for the PNG header (Calendar only) — e.g. "June 2026" or
+   * "Jun 1 – 7, 2026". The on-screen toolbar carries this, but it's excluded
+   * from the capture, so it's surfaced into the header strip instead.
+   */
+  periodLabel?: string | null
+  onClose: () => void
+}
+
+const VIEW_LABELS: Record<ExportViewType, string> = {
+  gantt: 'Gantt',
+  list: 'List',
+  kanban: 'Kanban',
+  calendar: 'Calendar',
+}
+
+type Scope = 'view' | 'all'
+
+// ── Client-side text generation ────────────────────────────────────────────────
+
+type ListStyle = 'table' | 'outline'
+
+function generateMarkdown(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null, listStyle: ListStyle): string {
+  if (view === 'list') return listStyle === 'outline'
+    ? buildListMarkdownOutline(data, timelineName, filterLabel)
+    : buildListMarkdown(data, timelineName, filterLabel)
+  if (view === 'kanban') return buildKanbanMarkdown(data, timelineName, filterLabel)
+  if (view === 'calendar') return buildCalendarMarkdown(data, timelineName, filterLabel)
+  return buildListMarkdown(data, timelineName, filterLabel)
+}
+
+function generatePlainText(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null, listStyle: ListStyle): string {
+  if (view === 'list') return listStyle === 'outline'
+    ? buildListPlainTextOutline(data, timelineName, filterLabel)
+    : buildListPlainText(data, timelineName, filterLabel)
+  if (view === 'kanban') return buildKanbanPlainText(data, timelineName, filterLabel)
+  if (view === 'calendar') return buildCalendarPlainText(data, timelineName, filterLabel)
+  return buildListPlainText(data, timelineName, filterLabel)
+}
+
+function generateHtml(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null, listStyle: ListStyle): string {
+  if (view === 'list') return listStyle === 'outline'
+    ? buildListHtmlOutline(data, timelineName, filterLabel)
+    : buildListHtml(data, timelineName, filterLabel)
+  if (view === 'kanban') return buildKanbanHtml(data, timelineName, filterLabel)
+  if (view === 'calendar') return buildCalendarHtml(data, timelineName, filterLabel)
+  return buildListHtml(data, timelineName, filterLabel)
+}
+
+/** Triggers the browser to save a Blob with the given filename. */
+function saveBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
+/**
+ * Writes `text/plain` + `text/html` flavors to the clipboard so the paste
+ * lands rich in Slack / Word / Google Docs and clean in code editors.
+ * Falls back to `writeText` if `ClipboardItem` is unavailable (HTTP contexts).
+ */
+async function copyToClipboard(plainText: string, htmlText: string): Promise<void> {
+  if (typeof ClipboardItem !== 'undefined' && navigator.clipboard.write) {
+    const item = new ClipboardItem({
+      'text/plain': new Blob([plainText], { type: 'text/plain' }),
+      'text/html': new Blob([htmlText], { type: 'text/html' }),
+    })
+    await navigator.clipboard.write([item])
+  } else {
+    // Fallback for HTTP (non-localhost) contexts where ClipboardItem is blocked.
+    await navigator.clipboard.writeText(plainText)
+  }
+}
+
+// ── Component ──────────────────────────────────────────────────────────────────
+
+export default function ExportDialog({
+  view,
+  timelineId,
+  timelineName,
+  teamName,
+  filterLabel,
+  filterDefinition,
+  filteredCount,
+  totalCount,
+  viewActivityIds,
+  listExportColumns,
+  textExportData,
+  captureElement,
+  presentationFrame,
+  periodLabel,
+  onClose,
+}: ExportDialogProps) {
+  const formats = getExportFormats(view)
+  const [formatId, setFormatId] = useState<ExportFormatId>('csv')
+  const [scope, setScope] = useState<Scope>('view')
+  const [listStyle, setListStyle] = useState<ListStyle>('table')
+  const [done, setDone] = useState(false)
+  const [clientPending, setClientPending] = useState(false)
+  const { download, isPending: serverPending } = useExport(timelineId, timelineName)
+  const doneTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const format = formats.find(f => f.id === formatId) ?? formats[0]
+  const Icon = format.icon
+  const isPending = serverPending || clientPending
+
+  // Client-side formats (PNG / Markdown / plain text) are inherently shaped by
+  // the active view, so their filename names it. Server data formats (CSV /
+  // xlsx / ICS) can be scoped to the whole timeline, where a view name would
+  // mislead — they keep the plain `<timeline>-<date>` name.
+  const filenameView = format.clientSide ? view : undefined
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  useEffect(() => () => { if (doneTimer.current) clearTimeout(doneTimer.current) }, [])
+
+  const selectFormat = (id: ExportFormatId) => {
+    setFormatId(id)
+    setDone(false)
+  }
+
+  const flashDone = useCallback(() => {
+    setDone(true)
+    doneTimer.current = setTimeout(() => setDone(false), 1600)
+  }, [])
+
+  const handleAction = useCallback(() => {
+    if (format.id === 'png') {
+      if (!captureElement) return
+      setClientPending(true)
+      capturePngSnapshot(captureElement, { timelineName, teamName: teamName ?? null, filterLabel, periodLabel })
+        .then(blob => { saveBlob(blob, buildExportFilename(timelineName, format.ext, view)); flashDone() })
+        .catch(() => { /* capture may fail on unsupported browsers */ })
+        .finally(() => setClientPending(false))
+      return
+    }
+
+    if (format.id === 'printable') {
+      if (!presentationFrame) return
+      printPresentationFrame(presentationFrame, { timelineName, teamName: teamName ?? null, filterLabel, periodLabel })
+      flashDone()
+      return
+    }
+
+    if (format.id === 'html') {
+      if (!presentationFrame) return
+      setClientPending(true)
+      saveFramePresentationHtml(
+        presentationFrame,
+        { timelineName, teamName: teamName ?? null, filterLabel, periodLabel },
+        buildExportFilename(timelineName, format.ext, view),
+      )
+        .then(() => flashDone())
+        .catch(() => { /* stylesheet fetch may fail offline; nothing was saved */ })
+        .finally(() => setClientPending(false))
+      return
+    }
+
+    if (format.clientSide) {
+      const data = textExportData ?? {
+        activities: [],
+        memberById: new Map(),
+        statusById: new Map(),
+        tagById: new Map(),
+        activityTitleById: new Map(),
+        kanbanColumns: null,
+        listDisplayRows: null,
+        listVisibleColumns: null,
+        kanbanShowHierarchy: false,
+        kanbanChildrenByParentId: new Map(),
+      }
+
+      if (format.id === 'clipboard') {
+        const plainText = generatePlainText(view, data, timelineName, filterLabel, listStyle)
+        const htmlText = generateHtml(view, data, timelineName, filterLabel, listStyle)
+        setClientPending(true)
+        copyToClipboard(plainText, htmlText)
+          .then(flashDone)
+          .catch(() => { /* clipboard may be denied */ })
+          .finally(() => setClientPending(false))
+        return
+      }
+
+      // markdown or plaintext — generate and download
+      const isMarkdown = format.id === 'markdown'
+      const content = isMarkdown
+        ? generateMarkdown(view, data, timelineName, filterLabel, listStyle)
+        : generatePlainText(view, data, timelineName, filterLabel, listStyle)
+      const mimeType = isMarkdown ? 'text/markdown;charset=utf-8' : 'text/plain;charset=utf-8'
+      const blob = new Blob([content], { type: mimeType })
+      saveBlob(blob, buildExportFilename(timelineName, format.ext, view))
+      flashDone()
+      return
+    }
+
+    // Server-side: CSV / xlsx / ICS
+    const isDataFormat = format.id === 'csv' || format.id === 'xlsx'
+    void download(format.id, format.ext, {
+      activityIds: scope === 'view' ? viewActivityIds : null,
+      filter: scope === 'view' && !viewActivityIds ? filterDefinition : null,
+      columns: isDataFormat ? listExportColumns : null,
+    }).then(flashDone)
+  }, [format, view, timelineName, teamName, filterLabel, periodLabel, textExportData, captureElement, presentationFrame, scope, listStyle, viewActivityIds, filterDefinition, listExportColumns, download, flashDone])
+
+  const emptyView = filteredCount === 0
+  const subWithFilter = filterLabel !== null
+    ? `${filteredCount} of ${totalCount} activities · matches your filter`
+    : `All ${totalCount} activities · nothing filtered out`
+
+  // Button label / icon for the primary action
+  const actionLabel = format.verb === 'copy'
+    ? done ? 'Copied!' : (isPending ? 'Copying…' : 'Copy to clipboard')
+    : format.verb === 'print'
+    ? done ? 'Print dialog opened' : 'Print…'
+    : done ? 'Downloaded' : (isPending ? 'Downloading…' : `Download ${format.ext}`)
+  const ActionIcon = format.verb === 'copy' ? Copy : format.verb === 'print' ? Printer : Download
+
+  return createPortal(
+    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]">
+      <div className="flex max-h-[88vh] w-[min(620px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]">
+        {/* Header */}
+        <div className="flex shrink-0 items-start gap-3 px-5 py-[18px]">
+          <div className="flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[hsl(188_59%_38%/0.12)] text-primary">
+            <FileOutput size={19} strokeWidth={2.2} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Export this view</h2>
+            <div className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
+              <span className="inline-block h-2 w-2 shrink-0 rounded-sm bg-secondary" />
+              {timelineName ? `${timelineName} · ` : ''}{VIEW_LABELS[view]} view
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
+          >
+            <X size={16} strokeWidth={2.2} />
+          </button>
+        </div>
+
+        {/* Filter context strip */}
+        <div className="shrink-0 border-b border-border px-5 pb-[14px]">
+          <div className={cn(
+            'rounded-[var(--radius-lg)] px-3 py-[9px]',
+            emptyView ? 'bg-[color-mix(in_srgb,var(--warning)_13%,transparent)]' : 'bg-muted',
+          )}>
+            <div className="flex items-center gap-2 text-[12.5px]">
+              {emptyView
+                ? <AlertTriangle size={14} className="shrink-0 text-warning" strokeWidth={2} />
+                : <Filter size={14} className="shrink-0 text-muted-foreground" strokeWidth={2} />}
+              <span className="flex-1 text-foreground">
+                {filterLabel !== null
+                  ? <>Filtered: <span className="font-semibold">{filterLabel}</span></>
+                  : `Exporting the ${VIEW_LABELS[view]} view as you see it`}
+              </span>
+              <span className={cn('shrink-0 text-[11.5px] font-semibold', emptyView ? 'text-warning' : 'text-muted-foreground')}>
+                {filterLabel !== null ? `${filteredCount} of ${totalCount} activities` : `All ${totalCount} activities`}
+              </span>
+            </div>
+            {emptyView && (
+              <div className="ml-[22px] mt-1 text-[12px] text-muted-foreground">
+                This view has no activities — the export will be empty or headers-only.
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Body — format rail + options pane */}
+        <div className="flex flex-1 overflow-hidden">
+          <div role="listbox" aria-label="Export format" className="flex w-[196px] shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-border p-2.5">
+            {formats.map(f => {
+              const FIcon = f.icon
+              const selected = f.id === formatId
+              // Badge icon: copy for clipboard, printer for printable view, download for everything else
+              const BadgeIcon = f.verb === 'copy' ? Copy : f.verb === 'print' ? Printer : Download
+              return (
+                <button
+                  key={f.id}
+                  role="option"
+                  aria-selected={selected}
+                  onClick={() => selectFormat(f.id)}
+                  className={cn(
+                    'flex items-center gap-[9px] rounded-[var(--radius-md)] border-none px-[9px] py-2 text-left text-[13px] transition-colors',
+                    selected ? 'bg-[hsl(188_59%_38%/0.1)] text-foreground font-semibold' : 'bg-transparent text-foreground hover:bg-muted',
+                  )}
+                >
+                  <FIcon size={15} strokeWidth={selected ? 2.2 : 1.8} className={selected ? 'shrink-0 text-primary' : 'shrink-0 text-muted-foreground'} />
+                  <span className="flex-1 truncate">{f.name}</span>
+                  <span title={f.verb === 'copy' ? 'Copy' : f.verb === 'print' ? 'Print' : 'Download'} className={cn('shrink-0 text-muted-foreground', selected ? 'opacity-90' : 'opacity-65')}>
+                    <BadgeIcon size={11} strokeWidth={2} />
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+
+          <div className="flex flex-1 flex-col gap-3.5 overflow-y-auto p-4">
+            {/* Format heading */}
+            <div className="flex items-start gap-2.5">
+              <Icon size={16} strokeWidth={2} className="mt-0.5 shrink-0 text-muted-foreground" />
+              <div>
+                <div className="text-[14px] font-bold text-foreground">{format.name}</div>
+                <div className="mt-0.5 text-[12.5px] leading-[1.5] text-muted-foreground">{format.desc}</div>
+              </div>
+            </div>
+
+            {/* Style picker — table vs outline, only for list view text formats */}
+            {(format.id === 'markdown' || format.id === 'plaintext' || format.id === 'clipboard') && view === 'list' && (
+              <div>
+                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Style</div>
+                <div className="flex overflow-hidden rounded-[var(--radius-lg)] border border-border">
+                  <StyleOption
+                    label="Table"
+                    desc="Aligned columns"
+                    selected={listStyle === 'table'}
+                    onSelect={() => setListStyle('table')}
+                  />
+                  <div className="w-px shrink-0 bg-border" />
+                  <StyleOption
+                    label="Outline"
+                    desc="Bullet list with fields"
+                    selected={listStyle === 'outline'}
+                    onSelect={() => setListStyle('outline')}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Scope picker — only for server-side data formats */}
+            {format.scope && (
+              <div>
+                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Activities to export</div>
+                <div className="overflow-hidden rounded-[var(--radius-lg)] border border-border">
+                  <ScopeRow
+                    label="Current view"
+                    sub={subWithFilter}
+                    selected={scope === 'view'}
+                    onSelect={() => setScope('view')}
+                  />
+                  <div className="border-t border-border" />
+                  <ScopeRow
+                    label="Entire timeline"
+                    sub={`All ${totalCount} activities · ignores filters`}
+                    selected={scope === 'all'}
+                    onSelect={() => setScope('all')}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Filename chip — only for download formats */}
+            {format.verb === 'download' && format.ext && (
+              <div>
+                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">File</div>
+                <div className="flex items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12px] text-foreground">
+                  <FileDown size={13} strokeWidth={2} className="shrink-0 text-muted-foreground" />
+                  <span className="truncate">{buildExportFilename(timelineName, format.ext, filenameView)}</span>
+                </div>
+              </div>
+            )}
+
+            {/* Clipboard note */}
+            {format.id === 'clipboard' && (
+              <div className="rounded-[var(--radius-md)] bg-muted px-3 py-2.5 text-[12px] leading-[1.5] text-muted-foreground">
+                Copies <strong className="text-foreground">rich text</strong> (HTML) + plain text — paste into Slack, Google Docs, or Word to get a formatted {view === 'list' && listStyle === 'outline' ? 'outline' : 'table'}.
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="flex shrink-0 items-center justify-end gap-2.5 border-t border-border px-5 py-[13px]">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={handleAction} disabled={isPending} className="min-w-[168px] justify-center">
+            {done
+              ? <><Check size={14} strokeWidth={2.2} /> {actionLabel}</>
+              : <><ActionIcon size={14} strokeWidth={2.2} /> {actionLabel}</>}
+          </Button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+function StyleOption({ label, desc, selected, onSelect }: { label: string; desc: string; selected: boolean; onSelect: () => void }) {
+  return (
+    <button
+      onClick={onSelect}
+      className={cn(
+        'flex flex-1 flex-col items-start px-3 py-2.5 text-left transition-colors',
+        selected ? 'bg-[hsl(188_59%_38%/0.09)]' : 'bg-transparent hover:bg-muted',
+      )}
+    >
+      <span className="text-[13px] font-semibold text-foreground">{label}</span>
+      <span className="text-[11.5px] text-muted-foreground">{desc}</span>
+    </button>
+  )
+}
+
+function ScopeRow({ label, sub, selected, onSelect }: { label: string; sub: string; selected: boolean; onSelect: () => void }) {
+  return (
+    <button
+      onClick={onSelect}
+      className={cn(
+        'flex w-full items-start gap-2.5 px-3 py-2.5 text-left transition-colors',
+        selected ? 'bg-[hsl(188_59%_38%/0.09)]' : 'bg-transparent hover:bg-muted',
+      )}
+    >
+      <span className={cn(
+        'mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-[1.5px]',
+        selected ? 'border-[5px] border-primary' : 'border-input',
+      )} />
+      <span>
+        <div className="text-[13px] font-semibold text-foreground">{label}</div>
+        <div className="text-[11.5px] text-muted-foreground">{sub}</div>
+      </span>
+    </button>
+  )
+}
+````
+
 ## File: packages/web/src/pages/DashboardPage.tsx
 ````typescript
 /**
@@ -74495,6 +75369,7 @@ import FilterManageModal from '@/components/filters/FilterManageModal'
 import ShareModal from '@/components/ShareModal'
 import CalendarShareModal from '@/components/CalendarShareModal'
 import ExportDialog from '@/components/ExportDialog'
+import ImportWizard from '@/components/import/ImportWizard'
 import { matchesFilter } from '@/lib/filterEngine'
 import { applyActiveFilter } from '@/lib/presetFilters'
 import { useNavigate } from 'react-router-dom'
@@ -74552,6 +75427,7 @@ function DashboardShell() {
   const [filterModalOpen, setFilterModalOpen] = useState(false)
   const [shareModalOpen, setShareModalOpen] = useState(false)
   const [exportDialogOpen, setExportDialogOpen] = useState(false)
+  const [importWizardOpen, setImportWizardOpen] = useState(false)
   // Body + iframe of the PresentationFrame that hosts the export dialog's
   // clean (interactive=false) snapshot — an isolated, always-light document
   // reusing the Phase 13 share viewer's render path for all four views
@@ -75124,6 +76000,7 @@ function DashboardShell() {
           setEditingTimeline(tl ?? null)
           setTimelineModalMode('edit')
         }}
+        onBulkImport={() => setImportWizardOpen(true)}
         onNewActivity={() => {
           const today = new Date().toISOString().slice(0, 10)
           setSelectedActivityId(null)
@@ -75625,6 +76502,17 @@ function DashboardShell() {
           presentationFrame={snapshotFrame}
           periodLabel={view === 'calendar' ? formatAnchorLabel(calendarAnchorDate, calendarLayout) : null}
           onClose={() => { setExportDialogOpen(false); setSnapshotBody(null); setSnapshotFrame(null) }}
+        />
+      )}
+
+      {/* Bulk import wizard — upload → map → preview → commit (Phase 15.2) */}
+      {importWizardOpen && teamId && timelines.length > 0 && (
+        <ImportWizard
+          teamId={teamId}
+          timelines={timelines}
+          activeTimelineId={activeTimelineId ?? null}
+          onGoToTimeline={handleTimelineChange}
+          onClose={() => setImportWizardOpen(false)}
         />
       )}
 
@@ -76950,11 +77838,11 @@ _Planned 2026-07-03 — see [docs/plans/phase-15-import.md](plans/phase-15-impor
 - [x] Table-driven tolerance-rule tests (every parser-contract rule in the plan gets a fixture); round-trip test (14.1 export → import → same activities modulo IDs); dry-run leaves DB byte-identical (unit-verified via table row counts; true byte-identical check lands with 15.3's Docker e2e) — 2026-07-03
 
 **15.2 Web — import wizard:**
-- [ ] Stepped dialog off the sidebar "Bulk import" split-button stub (`onBulkImport`): upload (timeline picker + template links) → map columns (only when auto-mapping incomplete; date-order question only when ambiguous) → preview → commit + result
-- [ ] Preview table: source line numbers, status icons, resolved fields, expandable per-cell messages, All/Warnings/Errors filter chips, summary strip, "Create N missing tags" checkbox (re-runs dry-run)
-- [ ] `useImportPreview` / `useCommitImport` hooks (same endpoint, `dryRun` toggled); invalidate activity queries on commit
-- [ ] Component tests: step flow, mapping override re-runs preview, error rows excluded from commit count, tag-checkbox re-run
-- [ ] Incremental live testing against the real API with a deliberately messy CSV (per working agreement — don't batch testing to the end)
+- [x] Stepped dialog off the sidebar "Bulk import" split-button stub (`onBulkImport`): upload (timeline picker + template links) → map columns (only when auto-mapping incomplete; date-order question only when ambiguous) → preview → commit + result — 2026-07-03
+- [x] Preview table: source line numbers, status icons, resolved fields, expandable per-cell messages, All/Warnings/Errors filter chips, summary strip, "Create N missing tags" checkbox (re-runs dry-run) — 2026-07-03
+- [x] `useImportPreview` / `useCommitImport` hooks (same endpoint, `dryRun` toggled); invalidate activity queries on commit — 2026-07-03
+- [x] Component tests: step flow, mapping override re-runs preview, error rows excluded from commit count, tag-checkbox re-run — 2026-07-03
+- [x] Incremental live testing against the real API with a deliberately messy CSV (per working agreement — don't batch testing to the end) — 2026-07-03; surfaced + fixed a 15.1 server contract bug (nil `fileIssues`/`issues` marshaled as JSON null instead of `[]`, crashing the preview on clean files)
 
 **15.3 Hardening + e2e:**
 - [ ] Messy-file corpus e2e: European semicolon CSV, native Excel dates, mixed date formats, duplicate second run, unknown names, 1,000-row file
@@ -78702,7 +79590,7 @@ Visual exports render **client-side from the live DOM** — no gofpdf, no Chromi
 ---
 
 ### Phase 15 — Import — Tabular
-**Status:** 🔄 In Progress (15.1 server built + all automated checks pass 2026-07-03; 15.2 wizard next, 15.3 hardening after) | **Effort:** M (3–4 days across three pausable sub-phases) | **Plan:** [docs/plans/phase-15-import.md](plans/phase-15-import.md)
+**Status:** 🔄 In Progress (15.1 server + 15.2 wizard built, all automated checks pass, wizard live-verified against the test Docker API 2026-07-03; 15.3 hardening remains) | **Effort:** M (3–4 days across three pausable sub-phases) | **Plan:** [docs/plans/phase-15-import.md](plans/phase-15-import.md)
 
 Get data *into* draba from a spreadsheet — CSV / Excel import with a mandatory preview + validation step before any rows are written. The natural companion to [Phase 14 export](#phase-14--export--data-textual--visual) (round-trip: export → edit in a spreadsheet → re-import), and the seam through which teams migrate off whatever they're planning in today. Sequenced after export because the preview/validation/conflict surface is meaningfully more complex than a one-way dump.
 
@@ -78908,6 +79796,31 @@ Adds i18n infrastructure and ships the first non-English locale. The "Default la
 ## File: docs/log.md
 ````markdown
 # Development Log
+
+---
+
+## 2026-07-03 — Phase 15.2: Import wizard (web)
+
+**Goal:** The client half of tabular import per [the plan](plans/phase-15-import.md) §15.2: a stepped "Bulk import" wizard off the sidebar split-button stub — upload → conditional map-columns → mandatory preview → commit + result — where every option change re-runs the stateless dry-run so the preview always shows exactly what a commit would write.
+
+**Frontend (`packages/web`):**
+- `hooks/useImport.ts` (new) — `useImportPreview` / `useCommitImport` TanStack mutations on the same `POST /teams/:id/timelines/:timelineId/import` endpoint with `dryRun` toggled; multipart body built from the `File` + options JSON part. Commit invalidates `['timelines', id, 'activities']` and `['teams', id, 'tags']` (tag opt-in changes the team tag list). `useImportTemplate` downloads `/import/template.csv|.xlsx` via `authFetchBlob` (the routes are authenticated, so a plain `<a href>` can't work).
+- `lib/api.ts` — `apiFetch` no longer forces `Content-Type: application/json` when the body is `FormData` (the browser must set the multipart boundary itself).
+- `components/import/ImportWizard.tsx` (new) — the 4-step portal dialog (ExportDialog's shell conventions: overlay click doesn't close, Esc/close/Cancel do). Upload step: timeline picker (pre-selected to the active timeline), drag-drop/click file zone, template links; choosing a file fires an immediate auto-mapped dry-run and lands on **map** (if any column came back unmapped) or **preview**. File-scoped 400s (bad type, over cap, no Title column) return to upload with the server's message. Mapping, date-order, and tag-checkbox changes each re-run the dry-run; commit posts `dryRun:false` with the identical file/options, shows created/skipped counts, and offers "View timeline" when the target isn't the active one.
+- `components/import/ImportMappingStep.tsx` (new) — one row per file column → field `<select>` (or *Don't import*); fields already claimed elsewhere are disabled (two-columns-one-field is a server file error, so the UI just prevents it). Unmapped columns sort to the top (the server's mapping object arrives in Go-map-alphabetical order, not file order), frozen per mount so rows don't jump while editing. The MDY/DMY question renders only when the file stayed ambiguous — detected from the server's `"…" read as month-day-year` per-cell warnings, which it emits exactly when the order came from the option rather than the file's own evidence.
+- `components/import/ImportPreviewStep.tsx` (new) — summary strip ("N ready · N with warnings · N errors — errors won't be imported"), file-level issues block, "Create N missing tags: …" checkbox (from `unknownNames.tags`), All/Warnings/Errors filter chips, and the row table: source line, status icon, resolved title/dates/fields, expandable per-cell messages.
+- `components/import/importFields.ts` (new) — field vocabulary + `needsMappingStep` / `hasAmbiguousDates` / `importableCount` helpers.
+- `pages/DashboardPage.tsx` — `onBulkImport` prop wired to the (already-stubbed) Sidebar split-button; renders the wizard with the active team's timelines.
+
+**Backend fix (found by incremental live testing):** the 15.1 importer marshaled nil `fileIssues` / per-row `issues` slices as JSON `null` despite the OpenAPI contract declaring them required arrays — a clean file crashed `ImportPreviewStep` (`null.length`). `importer.Run` now normalizes both to `[]` (new `TestRun_CleanFileMarshalsEmptyIssueArraysNotNull` pins the marshaled JSON); the client additionally guards with `?? []` against servers built before the fix (the test Docker container still runs one).
+
+**Live verification (dev server → test Docker API, per working agreement):** a deliberately messy semicolon CSV (synonym headers `Task/Begin/Finish/Who/State/Labels/% Complete`, unknown `Budget` column, `3/5/26` + `05.03.2026` + `March 20, 2026` + `18/3/2026` dates, unknown assignee/status names, unparseable date, end-before-start, `110%` progress) exercised the whole flow: all seven synonym headers auto-mapped; `Budget` forced the mapping step and its reassignment re-ran the dry-run; day-first was proven file-wide (`3/5/26` → May 3, no per-cell warning); the two bad rows were row-scoped errors; "Create 1 missing tag: q3" re-ran on toggle; commit wrote exactly the 2 importable rows, which appeared on the kanban board immediately via query invalidation; a single-row ambiguous file surfaced the MDY/DMY question and flipping it moved the date 2026-03-05 → 2026-05-03; template CSV downloaded through the authenticated route. Test activities + the created `q3` tag were deleted from the test DB afterwards.
+
+**Tests:** `ImportWizard.test.tsx` (8) mocks at the `createAuthFetch` seam so the real hooks (FormData construction, dryRun toggling) are exercised: auto-map skips to preview, unmapped column forces the map step, mapping reassignment re-runs the dry-run with only mapped columns in the explicit mapping, the import button counts ok+warning rows only, commit posts `dryRun:false` and shows the result, tag-checkbox re-run, filter chips, file-level 400 → back to upload with the message.
+
+**Checks:** `golangci-lint run` 0 issues; `go test ./...` all pass; `pnpm --filter web lint` clean; `pnpm --filter web build` clean (caught one `string | undefined` vs `string | null` prop error that `--noEmit` missed); `pnpm --filter web test` 466/466.
+
+Next: 15.3 hardening (messy-file corpus e2e, `/test-phase 15` Docker verification — the container needs a rebuild to pick up the nil-slice fix — TESTING.md Phase 15 assertions, dedicated `mapping.go` fixtures).
 
 ---
 
