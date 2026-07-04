@@ -42,6 +42,7 @@ import FilterManageModal from '@/components/filters/FilterManageModal'
 import ShareModal from '@/components/ShareModal'
 import CalendarShareModal from '@/components/CalendarShareModal'
 import ExportDialog from '@/components/ExportDialog'
+import ImportWizard from '@/components/import/ImportWizard'
 import { matchesFilter } from '@/lib/filterEngine'
 import { applyActiveFilter } from '@/lib/presetFilters'
 import { useNavigate } from 'react-router-dom'
@@ -99,6 +100,7 @@ function DashboardShell() {
   const [filterModalOpen, setFilterModalOpen] = useState(false)
   const [shareModalOpen, setShareModalOpen] = useState(false)
   const [exportDialogOpen, setExportDialogOpen] = useState(false)
+  const [importWizardOpen, setImportWizardOpen] = useState(false)
   // Body + iframe of the PresentationFrame that hosts the export dialog's
   // clean (interactive=false) snapshot — an isolated, always-light document
   // reusing the Phase 13 share viewer's render path for all four views
@@ -671,6 +673,7 @@ function DashboardShell() {
           setEditingTimeline(tl ?? null)
           setTimelineModalMode('edit')
         }}
+        onBulkImport={() => setImportWizardOpen(true)}
         onNewActivity={() => {
           const today = new Date().toISOString().slice(0, 10)
           setSelectedActivityId(null)
@@ -1172,6 +1175,17 @@ function DashboardShell() {
           presentationFrame={snapshotFrame}
           periodLabel={view === 'calendar' ? formatAnchorLabel(calendarAnchorDate, calendarLayout) : null}
           onClose={() => { setExportDialogOpen(false); setSnapshotBody(null); setSnapshotFrame(null) }}
+        />
+      )}
+
+      {/* Bulk import wizard — upload → map → preview → commit (Phase 15.2) */}
+      {importWizardOpen && teamId && timelines.length > 0 && (
+        <ImportWizard
+          teamId={teamId}
+          timelines={timelines}
+          activeTimelineId={activeTimelineId ?? null}
+          onGoToTimeline={handleTimelineChange}
+          onClose={() => setImportWizardOpen(false)}
         />
       )}
 

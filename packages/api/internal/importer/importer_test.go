@@ -2,6 +2,7 @@ package importer
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -72,6 +73,18 @@ func TestRun_HappyPathTemplateHeaders(t *testing.T) {
 	assert.Equal(t, 50, *rr.Activity.Progress)
 	assert.Equal(t, Summary{Total: 1, OK: 1}, res.Summary)
 	assert.Equal(t, FieldTitle, res.Mapping["Title"])
+}
+
+// A clean file must marshal issue lists as [] — the OpenAPI contract declares
+// them required arrays, and clients index into them without null checks.
+func TestRun_CleanFileMarshalsEmptyIssueArraysNotNull(t *testing.T) {
+	res := runCSV(t, "Title,Start,End\nKickoff,2026-03-02,2026-03-02\n", Options{})
+
+	data, err := json.Marshal(res)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"fileIssues":[]`)
+	assert.Contains(t, string(data), `"issues":[]`)
+	assert.NotContains(t, string(data), "null")
 }
 
 func TestRun_SynonymHeadersAutoMap(t *testing.T) {

@@ -240,6 +240,18 @@ func Run(data []byte, filename string, opts Options, lk Lookups) (*Result, error
 	res := resolveRows(pf, mapping, opts, lk)
 	res.Mapping = mappingByHeader(pf.headers, mapping)
 	res.FileIssues = fileIssues
+
+	// The OpenAPI contract declares fileIssues and per-row issues as required
+	// arrays; nil slices would marshal as JSON null and break clients that
+	// index into them.
+	if res.FileIssues == nil {
+		res.FileIssues = []Issue{}
+	}
+	for i := range res.Rows {
+		if res.Rows[i].Issues == nil {
+			res.Rows[i].Issues = []Issue{}
+		}
+	}
 	return res, nil
 }
 

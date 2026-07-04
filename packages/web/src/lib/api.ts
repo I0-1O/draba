@@ -71,7 +71,10 @@ export async function apiFetch<T>(
 ): Promise<T> {
   const { accessToken, ...rest } = init
   const headers = new Headers(rest.headers)
-  headers.set('Content-Type', 'application/json')
+  // FormData bodies must let the browser set the multipart boundary itself.
+  if (!(rest.body instanceof FormData)) {
+    headers.set('Content-Type', 'application/json')
+  }
   if (accessToken) {
     headers.set('Authorization', `Bearer ${accessToken}`)
   }

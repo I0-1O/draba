@@ -1281,11 +1281,11 @@ _Planned 2026-07-03 — see [docs/plans/phase-15-import.md](plans/phase-15-impor
 - [x] Table-driven tolerance-rule tests (every parser-contract rule in the plan gets a fixture); round-trip test (14.1 export → import → same activities modulo IDs); dry-run leaves DB byte-identical (unit-verified via table row counts; true byte-identical check lands with 15.3's Docker e2e) — 2026-07-03
 
 **15.2 Web — import wizard:**
-- [ ] Stepped dialog off the sidebar "Bulk import" split-button stub (`onBulkImport`): upload (timeline picker + template links) → map columns (only when auto-mapping incomplete; date-order question only when ambiguous) → preview → commit + result
-- [ ] Preview table: source line numbers, status icons, resolved fields, expandable per-cell messages, All/Warnings/Errors filter chips, summary strip, "Create N missing tags" checkbox (re-runs dry-run)
-- [ ] `useImportPreview` / `useCommitImport` hooks (same endpoint, `dryRun` toggled); invalidate activity queries on commit
-- [ ] Component tests: step flow, mapping override re-runs preview, error rows excluded from commit count, tag-checkbox re-run
-- [ ] Incremental live testing against the real API with a deliberately messy CSV (per working agreement — don't batch testing to the end)
+- [x] Stepped dialog off the sidebar "Bulk import" split-button stub (`onBulkImport`): upload (timeline picker + template links) → map columns (only when auto-mapping incomplete; date-order question only when ambiguous) → preview → commit + result — 2026-07-03
+- [x] Preview table: source line numbers, status icons, resolved fields, expandable per-cell messages, All/Warnings/Errors filter chips, summary strip, "Create N missing tags" checkbox (re-runs dry-run) — 2026-07-03
+- [x] `useImportPreview` / `useCommitImport` hooks (same endpoint, `dryRun` toggled); invalidate activity queries on commit — 2026-07-03
+- [x] Component tests: step flow, mapping override re-runs preview, error rows excluded from commit count, tag-checkbox re-run — 2026-07-03
+- [x] Incremental live testing against the real API with a deliberately messy CSV (per working agreement — don't batch testing to the end) — 2026-07-03; surfaced + fixed a 15.1 server contract bug (nil `fileIssues`/`issues` marshaled as JSON null instead of `[]`, crashing the preview on clean files)
 
 **15.3 Hardening + e2e:**
 - [ ] Messy-file corpus e2e: European semicolon CSV, native Excel dates, mixed date formats, duplicate second run, unknown names, 1,000-row file

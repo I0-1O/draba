@@ -2,6 +2,31 @@
 
 ---
 
+## 2026-07-03 — Phase 15.2: Import wizard (web)
+
+**Goal:** The client half of tabular import per [the plan](plans/phase-15-import.md) §15.2: a stepped "Bulk import" wizard off the sidebar split-button stub — upload → conditional map-columns → mandatory preview → commit + result — where every option change re-runs the stateless dry-run so the preview always shows exactly what a commit would write.
+
+**Frontend (`packages/web`):**
+- `hooks/useImport.ts` (new) — `useImportPreview` / `useCommitImport` TanStack mutations on the same `POST /teams/:id/timelines/:timelineId/import` endpoint with `dryRun` toggled; multipart body built from the `File` + options JSON part. Commit invalidates `['timelines', id, 'activities']` and `['teams', id, 'tags']` (tag opt-in changes the team tag list). `useImportTemplate` downloads `/import/template.csv|.xlsx` via `authFetchBlob` (the routes are authenticated, so a plain `<a href>` can't work).
+- `lib/api.ts` — `apiFetch` no longer forces `Content-Type: application/json` when the body is `FormData` (the browser must set the multipart boundary itself).
+- `components/import/ImportWizard.tsx` (new) — the 4-step portal dialog (ExportDialog's shell conventions: overlay click doesn't close, Esc/close/Cancel do). Upload step: timeline picker (pre-selected to the active timeline), drag-drop/click file zone, template links; choosing a file fires an immediate auto-mapped dry-run and lands on **map** (if any column came back unmapped) or **preview**. File-scoped 400s (bad type, over cap, no Title column) return to upload with the server's message. Mapping, date-order, and tag-checkbox changes each re-run the dry-run; commit posts `dryRun:false` with the identical file/options, shows created/skipped counts, and offers "View timeline" when the target isn't the active one.
+- `components/import/ImportMappingStep.tsx` (new) — one row per file column → field `<select>` (or *Don't import*); fields already claimed elsewhere are disabled (two-columns-one-field is a server file error, so the UI just prevents it). Unmapped columns sort to the top (the server's mapping object arrives in Go-map-alphabetical order, not file order), frozen per mount so rows don't jump while editing. The MDY/DMY question renders only when the file stayed ambiguous — detected from the server's `"…" read as month-day-year` per-cell warnings, which it emits exactly when the order came from the option rather than the file's own evidence.
+- `components/import/ImportPreviewStep.tsx` (new) — summary strip ("N ready · N with warnings · N errors — errors won't be imported"), file-level issues block, "Create N missing tags: …" checkbox (from `unknownNames.tags`), All/Warnings/Errors filter chips, and the row table: source line, status icon, resolved title/dates/fields, expandable per-cell messages.
+- `components/import/importFields.ts` (new) — field vocabulary + `needsMappingStep` / `hasAmbiguousDates` / `importableCount` helpers.
+- `pages/DashboardPage.tsx` — `onBulkImport` prop wired to the (already-stubbed) Sidebar split-button; renders the wizard with the active team's timelines.
+
+**Backend fix (found by incremental live testing):** the 15.1 importer marshaled nil `fileIssues` / per-row `issues` slices as JSON `null` despite the OpenAPI contract declaring them required arrays — a clean file crashed `ImportPreviewStep` (`null.length`). `importer.Run` now normalizes both to `[]` (new `TestRun_CleanFileMarshalsEmptyIssueArraysNotNull` pins the marshaled JSON); the client additionally guards with `?? []` against servers built before the fix (the test Docker container still runs one).
+
+**Live verification (dev server → test Docker API, per working agreement):** a deliberately messy semicolon CSV (synonym headers `Task/Begin/Finish/Who/State/Labels/% Complete`, unknown `Budget` column, `3/5/26` + `05.03.2026` + `March 20, 2026` + `18/3/2026` dates, unknown assignee/status names, unparseable date, end-before-start, `110%` progress) exercised the whole flow: all seven synonym headers auto-mapped; `Budget` forced the mapping step and its reassignment re-ran the dry-run; day-first was proven file-wide (`3/5/26` → May 3, no per-cell warning); the two bad rows were row-scoped errors; "Create 1 missing tag: q3" re-ran on toggle; commit wrote exactly the 2 importable rows, which appeared on the kanban board immediately via query invalidation; a single-row ambiguous file surfaced the MDY/DMY question and flipping it moved the date 2026-03-05 → 2026-05-03; template CSV downloaded through the authenticated route. Test activities + the created `q3` tag were deleted from the test DB afterwards.
+
+**Tests:** `ImportWizard.test.tsx` (8) mocks at the `createAuthFetch` seam so the real hooks (FormData construction, dryRun toggling) are exercised: auto-map skips to preview, unmapped column forces the map step, mapping reassignment re-runs the dry-run with only mapped columns in the explicit mapping, the import button counts ok+warning rows only, commit posts `dryRun:false` and shows the result, tag-checkbox re-run, filter chips, file-level 400 → back to upload with the message.
+
+**Checks:** `golangci-lint run` 0 issues; `go test ./...` all pass; `pnpm --filter web lint` clean; `pnpm --filter web build` clean (caught one `string | undefined` vs `string | null` prop error that `--noEmit` missed); `pnpm --filter web test` 466/466.
+
+Next: 15.3 hardening (messy-file corpus e2e, `/test-phase 15` Docker verification — the container needs a rebuild to pick up the nil-slice fix — TESTING.md Phase 15 assertions, dedicated `mapping.go` fixtures).
+
+---
+
 ## 2026-07-03 — /test-phase 15.1
 - Subagents run: static-check, unit-test (Go + Vitest), schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: all pass (8/8; docs/TESTING.md has no Phase 15 section yet, so target-phase assertions were sourced from ROADMAP.md's 15.1 exit criteria + the 2026-07-03 log entry as a stopgap, same approach used for 14.1/14.2 — Phase 15 should be backfilled into TESTING.md, tracked as 15.3 hardening scope)

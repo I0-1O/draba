@@ -1635,7 +1635,7 @@ Visual exports render **client-side from the live DOM** — no gofpdf, no Chromi
 ---
 
 ### Phase 15 — Import — Tabular
-**Status:** 🔄 In Progress (15.1 server built + all automated checks pass 2026-07-03; 15.2 wizard next, 15.3 hardening after) | **Effort:** M (3–4 days across three pausable sub-phases) | **Plan:** [docs/plans/phase-15-import.md](plans/phase-15-import.md)
+**Status:** 🔄 In Progress (15.1 server + 15.2 wizard built, all automated checks pass, wizard live-verified against the test Docker API 2026-07-03; 15.3 hardening remains) | **Effort:** M (3–4 days across three pausable sub-phases) | **Plan:** [docs/plans/phase-15-import.md](plans/phase-15-import.md)
 
 Get data *into* draba from a spreadsheet — CSV / Excel import with a mandatory preview + validation step before any rows are written. The natural companion to [Phase 14 export](#phase-14--export--data-textual--visual) (round-trip: export → edit in a spreadsheet → re-import), and the seam through which teams migrate off whatever they're planning in today. Sequenced after export because the preview/validation/conflict surface is meaningfully more complex than a one-way dump.
 
