@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short. Per-phase implementation detail lives in [docs/log.md](../log.md); this file is a current-state snapshot only._
 
-**Last updated:** 2026-07-03 (Phase 15.2 built — the "Bulk import" wizard: `components/import/` stepped dialog (upload → conditional map-columns → preview → commit + result), `useImportPreview`/`useCommitImport` hooks, sidebar stub wired. Live-verified end-to-end against the test Docker API with a messy semicolon CSV. Also fixed a 15.1 server bug the live test surfaced: nil `fileIssues`/`issues` marshaled as JSON `null` instead of `[]`. All checks pass. Next: 15.3 hardening.)
+**Last updated:** 2026-07-06 (/test-phase 15.2 run: 7 subagents passed; web-e2e caught one dev-only failure — `vite.config.ts` proxy lacked an `/import` entry so template downloads hit the SPA fallback — fixed same session (one-line proxy entry, re-verified live). Entry in log.md. Next: 15.3 hardening; rebuild the test container first.)
 
 ---
 

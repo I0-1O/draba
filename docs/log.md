@@ -2,6 +2,14 @@
 
 ---
 
+## 2026-07-06 — /test-phase 15.2
+- Subagents run: static-check, unit-test (Go + Vitest), schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: 7 pass, 1 fail → fixed same session (web-e2e: dev-only — `vite.config.ts` proxy had no `/import` entry, so `GET /import/template.csv|.xlsx` hit Vite's SPA fallback and downloaded HTML named `.csv`; prod embedded build unaffected. Added the one-line proxy entry and re-verified live: unauthenticated → API 401 JSON, authenticated → 200 `text/csv` with the correct template header row. All other web-e2e assertions passed live against the dev server → test Docker API, including the full wizard flow, commit + immediate board update, and zero console errors — the stale container's JSON-`null` issue arrays were absorbed by the client guard as designed.)
+- Smoke target: the test Docker host (reset via SSH before the run)
+- Notes: TESTING.md still has no Phase 15 section — assertions again sourced from the phase plan's exit criteria + the 2026-07-03 log entries (backfill remains 15.3 scope). api-smoke ran 50/50 including the full import contract (dry-run purity, duplicate warnings, row-scoped errors, tag opt-in, date-order disclosure, template↔export header match). ws-smoke confirmed one `activity.created` per imported row <500ms and cross-team isolation; the ~100s heartbeat soak was skipped per TESTING.md (unit-covered). security-review had no blockers; its advisory (activity `url` field accepts any scheme incl. `javascript:` — pre-existing app-wide parity, not a Phase 15 regression) was spun off as a separate task. The test container still runs a pre-15.2 binary — rebuild before the 15.3 `/test-phase 15` run.
+
+---
+
 ## 2026-07-03 — Phase 15.2: Import wizard (web)
 
 **Goal:** The client half of tabular import per [the plan](plans/phase-15-import.md) §15.2: a stepped "Bulk import" wizard off the sidebar split-button stub — upload → conditional map-columns → mandatory preview → commit + result — where every option change re-runs the stateless dry-run so the preview always shows exactly what a commit would write.

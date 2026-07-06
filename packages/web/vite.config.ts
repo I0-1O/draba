@@ -42,6 +42,7 @@ export default defineConfig(({ mode }) => {
         '/tags': { target: apiTarget, changeOrigin: true },
         '/saved_filters': { target: apiTarget, changeOrigin: true },
         '/shares': { target: apiTarget, changeOrigin: true },
+        '/import': { target: apiTarget, changeOrigin: true },
         '/events': { target: apiTarget, changeOrigin: true },
         '/health': { target: apiTarget, changeOrigin: true },
         '/ws': {
