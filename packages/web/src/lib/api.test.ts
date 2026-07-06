@@ -11,6 +11,7 @@ import {
   ApiError,
   configureSilentRefresh,
   createAuthFetch,
+  createAuthFetchBlob,
 } from './api'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -128,6 +129,40 @@ describe('createAuthFetch', () => {
     await expect(authFetch('/test')).rejects.toMatchObject({ status: 401 })
     // silentRefresh must NOT have been called — it was de-registered.
     expect(silentRefresh).not.toHaveBeenCalled()
+  })
+})
+
+// ── createAuthFetchBlob — content-type guard ─────────────────────────────────
+
+describe('createAuthFetchBlob', () => {
+  it('returns the blob and Content-Disposition filename on a real file response', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response('Title,Start,End\n', {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': 'attachment; filename="draba-import-template.csv"',
+      },
+    }))
+
+    const authFetchBlob = createAuthFetchBlob(() => 'token-abc')
+    const { blob, filename } = await authFetchBlob('/import/template.csv')
+
+    expect(filename).toBe('draba-import-template.csv')
+    expect(await blob.text()).toBe('Title,Start,End\n')
+  })
+
+  it('throws NOT_A_FILE on a 200 text/html response (SPA fallback)', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response('<!doctype html><html></html>', {
+      status: 200,
+      headers: { 'Content-Type': 'text/html' },
+    }))
+
+    const authFetchBlob = createAuthFetchBlob(() => 'token-abc')
+
+    await expect(authFetchBlob('/import/template.csv')).rejects.toMatchObject({
+      status: 200,
+      code: 'NOT_A_FILE',
+    })
   })
 })
 

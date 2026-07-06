@@ -118,6 +118,13 @@ export async function apiFetchBlob(
     throw await parseError(res)
   }
 
+  // An HTML body here means the request never reached the API — it fell
+  // through to the SPA fallback (e.g. a dev-proxy route gap), and saving it
+  // would hand the user an HTML page named .csv/.xlsx. Fail loudly instead.
+  if ((res.headers.get('Content-Type') ?? '').includes('text/html')) {
+    throw new ApiError(res.status, 'NOT_A_FILE', `Expected a file download from ${path} but received an HTML page`)
+  }
+
   return { blob: await res.blob(), filename: filenameFromContentDisposition(res.headers.get('Content-Disposition')) }
 }
 
