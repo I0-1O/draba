@@ -1661,46 +1661,27 @@ Get data *into* draba from a spreadsheet — CSV / Excel import with a mandatory
 ---
 
 ### Phase 16 — Backup & Restore
-**Status:** ⬜ | **Effort:** M (2–3 days, directional estimate)
+**Status:** 🟢 Planned (scope settled 2026-07-08) | **Effort:** M (2.5–3 days across three pausable sub-phases) | **Plan:** [docs/plans/phase-16-backup.md](plans/phase-16-backup.md)
 
 Admin tools for database backup visibility, manual backups, and scheduled backup configuration. Self-hosted deployments need a way to know their data is safe without SSH-ing into the container. **Pulled ahead of the remaining phases** because once real teams start putting real data in (via [import](#phase-15--import--tabular) and [shared](#phase-13--shares--multi-share-views-with-passwords) workflows), data safety stops being optional.
 
-**Directional scope (to be firmed up before the phase):**
+**Design thesis (detail in the plan):** *a backup you haven't verified and can't find is not a backup.* Every backup is `PRAGMA integrity_check`-verified at creation (failed copies are deleted, never left looking like backups), lands in `DRABA_BACKUP_DIR` (default `/data/backups` — on the already-mounted data volume, so it survives container recreation with zero config), and the filename **is** the history record (directory scan, no DB table — a table inside the database being backed up is self-defeating after a restore).
 
-*Backup status (read-only admin surface):*
-- `/settings/admin/backup` page: current DB file path, file size, last-modified timestamp, WAL size (SQLite), connection count
-- Health indicator: green when last backup < 24h old, amber when 1–7 days, red when > 7 days or no backup exists
-- For MySQL/Postgres adapters: show connection string (masked), database size, last `pg_dump`/`mysqldump` timestamp if available
+**Scope (sub-phases — detail in the [plan](plans/phase-16-backup.md)):**
 
-*Manual backup:*
-- "Back up now" button → triggers a hot copy of the SQLite file (using `VACUUM INTO` or the backup API) to a configurable backup directory
-- For MySQL/Postgres: trigger `pg_dump`/`mysqldump` to the backup directory
-- Download backup file directly from the admin UI (optional — evaluate security implications)
+- **16.1 Server — engine + manual backup:** `internal/backup` (`Engine` seam with one `sqliteEngine` impl: `VACUUM INTO` hot copy under WAL + integrity verify; `Manager`: naming, concurrency guard, retention sweep, temp-name→verify→rename so interruptions never leave a pattern-matching corpse), `GET /admin/backup/status` (DB path/size/WAL, health ok/stale/critical at <24h / 1–7d / >7d, last backup, dir writability), `POST /admin/backup` (sync, `409` when one is running), `GET /admin/backup/history`, `DELETE /admin/backup/{filename}` (pattern match = traversal guard). All superadmin-only.
+- **16.2 Server — scheduler + notification:** preset schedules (`off|hourly|every6h|every12h|daily@HH:MM|weekly` — presets, not cron expressions), stored as one `instance_settings` JSON key, **default-on: daily 02:00 / keep-last-14**; purpose-built goroutine with injected clock (first background scheduler in the codebase — deliberately not a job framework); keep-last-N retention counting only pattern-matching files; `backup.completed`/`backup.failed` bus events with an SMTP failure-notification consumer (silent no-op when SMTP unconfigured).
+- **16.3 Web + ops docs + hardening:** Settings › Backup section (status card + health badge, Back up now, schedule form with next-run, history table with delete), `docs/OPERATIONS.md` restore runbook + volume contract (restore = documented `cp` procedure, **not** an in-app feature), live Docker verification incl. walking the runbook once for real, `/test-phase 16`, TESTING.md assertions.
 
-*Scheduled backups:*
-- Cron-style schedule configuration (daily at 2am, every 6 hours, etc.)
-- Retention policy: keep last N backups, or keep backups for N days
-- Backup location: local directory (default), or S3-compatible object storage (stretch)
-- Notification on backup failure (via SMTP if configured)
+**Scope corrections vs. the earlier directional text (2026-07-08 codebase scan):** MySQL/Postgres surfaces cut entirely — no such drivers exist in `go.mod`; the `Engine` interface is the whole concession to the future. Open questions resolved in the plan: `VACUUM INTO` over the backup API (single statement, pure-Go-driver-friendly, compacted standalone output); **no** backup download over HTTP for v1 (the file is the whole instance — password hashes and encrypted credentials included; a self-hosting admin has filesystem access by definition); **no** encryption at rest for v1 (same disk and permissions as the live DB — encrypt at the volume layer if required). Also cut: S3 targets, cron expressions, in-app restore, catch-up runs for missed windows (health indicator covers the gap honestly), success-notification emails.
 
-*API:*
-- `GET /admin/backup/status` — current backup state (superadmin only)
-- `POST /admin/backup` — trigger immediate backup (superadmin only)
-- `GET /admin/backup/history` — list recent backups with size and status
-- `GET/PUT /admin/backup/schedule` — read/update backup schedule config
-- `DELETE /admin/backup/:id` — delete a specific backup file
-
-**Open questions (resolve before starting):**
-- Should backup files be downloadable from the admin UI, or only stored on the server filesystem? (Security tradeoff: convenience vs. risk of unauthorized download)
-- For SQLite, `VACUUM INTO` vs. the SQLite backup API — which handles concurrent writes better under WAL mode?
-- Do we need backup encryption at rest? (Probably not for v1 if the backup directory is on the same host)
-
-**Exit criteria (placeholder — refine in-phase):**
-- A superadmin can see the current DB status (path, size, last modified) on the admin backup page
-- "Back up now" creates a usable copy of the database in the configured backup directory
-- A scheduled backup runs at the configured interval and produces a valid backup file
-- Retention policy automatically cleans up old backups beyond the configured limit
-- Backup history shows the last N backups with timestamps and sizes
+**Exit criteria — safe to pause when** *(full list in the plan)*:
+- The Settings › Backup page shows live DB path/size/WAL and an honest health badge (red on a fresh instance, green + timestamp after a backup)
+- "Back up now" produces an integrity-checked file in the backup dir that restores via the runbook into a working draba — walked through once for real against the test Docker instance
+- A scheduled backup fires at the configured preset time without request traffic; retention keeps exactly N, never touching foreign files in the directory
+- Concurrent backup requests get `409`; path-traversal-shaped delete filenames are rejected
+- An induced failure emails the superadmin when SMTP is configured, and fails loudly in status/logs either way
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean; `pnpm --filter web test` passes
 
 ---
 

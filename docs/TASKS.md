@@ -1296,6 +1296,40 @@ _Planned 2026-07-03 — see [docs/plans/phase-15-import.md](plans/phase-15-impor
 
 ---
 
+### Backup & Restore (Phase 16)
+
+_Planned 2026-07-08 — see [docs/plans/phase-16-backup.md](plans/phase-16-backup.md). Design thesis: a backup you haven't verified and can't find is not a backup. Decisions locked: SQLite-only (`Engine` seam for future drivers — MySQL/Postgres surfaces cut, no such drivers exist); `VACUUM INTO` + `PRAGMA integrity_check`; history = directory scan, filename is the record (no DB table); `DRABA_BACKUP_DIR` default `/data/backups` (on the mounted volume); no HTTP download, no in-app restore (runbook), no encryption at rest for v1; schedule presets not cron, default-on daily 02:00 / keep-last-14._
+
+**16.1 Server — engine, manager, manual backup + status/history API:**
+- [ ] `internal/backup`: `Engine` interface + `sqliteEngine` (`VACUUM INTO` hot copy under WAL; `PRAGMA integrity_check` on the copy; failed copies deleted, never left on disk)
+- [ ] `internal/backup.Manager`: filename scheme `draba-<UTC>Z-<manual|scheduled>.db`, temp-name → verify → rename (interruption never leaves a pattern-matching file), one-at-a-time concurrency guard, keep-last-N retention sweep (pattern-matching files only)
+- [ ] `DRABA_BACKUP_DIR` env (default `/data/backups`), startup create + writability validation, `packages/api/CLAUDE.md` env-block entry
+- [ ] `GET /admin/backup/status` — DB path/size/WAL size/modified, backup-dir writability, last backup, health (ok <24h / stale 1–7d / critical >7d or none), running flag, schedule summary; superadmin-only
+- [ ] `POST /admin/backup` — synchronous run-now; `201` + entry, `409 BACKUP_IN_PROGRESS` under guard, no leftover file on failure
+- [ ] `GET /admin/backup/history` — directory scan, pattern-filtered, newest first; foreign files never listed
+- [ ] `DELETE /admin/backup/{filename}` — exact pattern match as the path-traversal guard; `404`/`204`
+- [ ] OpenAPI: `BackupStatus`, `BackupEntry`, `BackupSchedule`; regenerate TS types
+- [ ] Tests: vacuum under concurrent writes, verify-failure cleanup, filename round-trip + foreign-file exclusion + traversal rejection, retention sweep, concurrency guard, status shape
+
+**16.2 Server — scheduler, retention-in-anger, failure notification:**
+- [ ] `internal/backup.Scheduler`: preset → next-run computation (injected clock), timer loop, config-change recompute, skip-while-running; no catch-up for missed windows (v1)
+- [ ] `GET`/`PUT /admin/backup/schedule` — presets `off|hourly|every6h|every12h|daily@HH:MM|weekly@day+HH:MM` + `keepLast` 1–365, validated; one `instance_settings` JSON key; response echoes `nextRunAt`
+- [ ] Default-on for instances with no stored config: daily 02:00, keep-last-14
+- [ ] `backup.completed` / `backup.failed` bus events (instance-scoped, not team-broadcast); failure consumer emails superadmins via existing mailer, silent no-op without SMTP config
+- [ ] `main.go` wiring: `backup.Manager` + `go scheduler.Run(ctx)` beside the WS hub
+- [ ] Tests: fake-clock runs across every preset, recompute on config change, failure → one email per superadmin, no-SMTP no-op
+
+**16.3 Web + ops docs + hardening:**
+- [ ] Settings › Backup section (superadmin-gated like SMTP): status card + health badge with thresholds spelled out, backup-dir warning when unwritable
+- [ ] "Back up now" button (sync, spinner, toast, disabled while running) + history table (size, trigger chip, delete-with-confirm) + schedule form (preset/time/day/keep-last, shows next run)
+- [ ] `useBackupStatus` / `useBackupHistory` / `useBackupSchedule` hooks + mutations (`useSettings.ts` conventions)
+- [ ] Component tests: health badge states, schedule validation, delete confirm, in-progress disable
+- [ ] `docs/OPERATIONS.md`: restore runbook (stop → copy over `draba.db`, remove `-wal`/`-shm` → start), volume contract + second-mount example, docker-compose snippet
+- [ ] Live Docker verification: real backup of the seeded test DB, restore runbook walked through once for real
+- [ ] `/test-phase 16`, TESTING.md Phase 16 assertions, log.md + session-state.md updates
+
+---
+
 ### External Connectors (Inbound Webhooks) — Phase 18 (was mislabeled "Phase 15"; re-numbered 2026-07-03 to match [ROADMAP Phase 18](ROADMAP.md#phase-18--external-connectors-webhooks))
 Includes both the webhook backend and the per-timeline connector sidebar UI (previously a separate Up-Next block).
 
