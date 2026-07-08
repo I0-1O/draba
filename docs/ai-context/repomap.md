@@ -45157,6 +45157,391 @@ CREATE INDEX idx_users_email ON users(email);
 PRAGMA foreign_keys=ON;
 ````
 
+## File: packages/api/internal/db/activity_repo.go
+````go
+package db
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// ActivityRepo is the persistence layer for Activity records.
+type ActivityRepo struct {
+	db *sqlx.DB
+}
+
+// NewActivityRepo returns an ActivityRepo backed by db.
+func NewActivityRepo(db *sqlx.DB) *ActivityRepo {
+	return &ActivityRepo{db: db}
+}
+
+// Create inserts a new Activity row.
+func (r *ActivityRepo) Create(activity *models.Activity) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO activities (
+			id, timeline_id, title, description, notes, icon, color,
+			start_at, end_at, all_day, status_id, parent_activity_id,
+			percent_complete, location, url, rrule,
+			caldav_uid, google_event_id,
+			created_by, created_at, updated_at
+		) VALUES (
+			:id, :timeline_id, :title, :description, :notes, :icon, :color,
+			:start_at, :end_at, :all_day, :status_id, :parent_activity_id,
+			:percent_complete, :location, :url, :rrule,
+			:caldav_uid, :google_event_id,
+			:created_by, :created_at, :updated_at
+		)
+	`, activity)
+	if err != nil {
+		return fmt.Errorf("creating activity: %w", err)
+	}
+	return nil
+}
+
+// GetByID fetches an Activity by primary key. Returns sql.ErrNoRows (wrapped)
+// when no row matches.
+func (r *ActivityRepo) GetByID(id string) (*models.Activity, error) {
+	var a models.Activity
+	err := r.db.Get(&a, `SELECT * FROM activities WHERE id = ?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("getting activity: %w", err)
+	}
+	return &a, nil
+}
+
+// Update replaces all mutable fields on an existing Activity row.
+func (r *ActivityRepo) Update(activity *models.Activity) error {
+	_, err := r.db.NamedExec(`
+		UPDATE activities SET
+			title              = :title,
+			description        = :description,
+			notes              = :notes,
+			icon               = :icon,
+			color              = :color,
+			start_at           = :start_at,
+			end_at             = :end_at,
+			all_day            = :all_day,
+			status_id          = :status_id,
+			parent_activity_id = :parent_activity_id,
+			percent_complete   = :percent_complete,
+			location           = :location,
+			url                = :url,
+			rrule              = :rrule,
+			updated_at         = :updated_at
+		WHERE id = :id
+	`, activity)
+	if err != nil {
+		return fmt.Errorf("updating activity: %w", err)
+	}
+	return nil
+}
+
+// Delete permanently removes an activity row.
+func (r *ActivityRepo) Delete(id string) error {
+	_, err := r.db.Exec(`DELETE FROM activities WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting activity: %w", err)
+	}
+	return nil
+}
+
+// ClearParentRefs clears parent_activity_id on all activities that reference id
+// as their parent. Called before deleting or archiving the parent so children
+// do not retain a dangling reference.
+func (r *ActivityRepo) ClearParentRefs(id string) error {
+	_, err := r.db.Exec(
+		`UPDATE activities SET parent_activity_id = NULL, updated_at = ? WHERE parent_activity_id = ?`,
+		time.Now().UTC(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("clearing parent refs for %s: %w", id, err)
+	}
+	return nil
+}
+
+// SetArchived sets or clears archived_at on an activity. Pass a non-nil time
+// to archive; pass nil to unarchive.
+func (r *ActivityRepo) SetArchived(id string, at *time.Time) error {
+	_, err := r.db.Exec(
+		`UPDATE activities SET archived_at = ?, updated_at = ? WHERE id = ?`,
+		at, time.Now().UTC(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting activity archived_at: %w", err)
+	}
+	return nil
+}
+
+// SetAssignments replaces all activity_assignments for an activity with the
+// provided member IDs. An empty slice removes all assignments.
+func (r *ActivityRepo) SetAssignments(activityID string, memberIDs []string) error {
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("beginning assignment transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err = tx.Exec(`DELETE FROM activity_assignments WHERE activity_id = ?`, activityID); err != nil {
+		return fmt.Errorf("clearing activity assignments: %w", err)
+	}
+
+	for _, memberID := range memberIDs {
+		if _, err = tx.Exec(
+			`INSERT INTO activity_assignments (activity_id, team_member_id) VALUES (?, ?)`,
+			activityID, memberID,
+		); err != nil {
+			return fmt.Errorf("inserting activity assignment: %w", err)
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("committing activity assignments: %w", err)
+	}
+	return nil
+}
+
+// GetAssignments returns the team_member_ids assigned to an activity.
+func (r *ActivityRepo) GetAssignments(activityID string) ([]string, error) {
+	var ids []string
+	err := r.db.Select(&ids,
+		`SELECT team_member_id FROM activity_assignments WHERE activity_id = ?`, activityID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("getting activity assignments: %w", err)
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids, nil
+}
+
+// SetTags replaces all activity_tags for an activity with the provided tag
+// IDs. An empty slice removes all tag associations.
+func (r *ActivityRepo) SetTags(activityID string, tagIDs []string) error {
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("beginning tag transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err = tx.Exec(`DELETE FROM activity_tags WHERE activity_id = ?`, activityID); err != nil {
+		return fmt.Errorf("clearing activity tags: %w", err)
+	}
+
+	for _, tagID := range tagIDs {
+		if _, err = tx.Exec(
+			`INSERT INTO activity_tags (activity_id, tag_id) VALUES (?, ?)`,
+			activityID, tagID,
+		); err != nil {
+			return fmt.Errorf("inserting activity tag: %w", err)
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("committing activity tags: %w", err)
+	}
+	return nil
+}
+
+// GetTags returns the tag IDs associated with an activity.
+func (r *ActivityRepo) GetTags(activityID string) ([]string, error) {
+	var ids []string
+	err := r.db.Select(&ids,
+		`SELECT tag_id FROM activity_tags WHERE activity_id = ?`, activityID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("getting activity tags: %w", err)
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids, nil
+}
+
+// ImportItem is one activity to create in an import batch, with its
+// association rows. Activity IDs (including in-batch ParentActivityID
+// references) are assigned by the caller before the batch runs.
+type ImportItem struct {
+	Activity    *models.Activity
+	AssigneeIDs []string
+	TagIDs      []string
+}
+
+// CreateImportBatch writes an import commit in a single transaction: new tags
+// first, then activities in the given order (callers order parents before
+// children so the parent_activity_id FK holds), then assignments and tag
+// links. Any failure rolls back the whole batch — an import is all-or-nothing
+// within its accepted rows.
+func (r *ActivityRepo) CreateImportBatch(newTags []*models.Tag, items []ImportItem) error {
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("beginning import transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	for _, tag := range newTags {
+		if _, err = tx.NamedExec(`
+			INSERT INTO tags (id, team_id, name, color, created_by, created_at)
+			VALUES (:id, :team_id, :name, :color, :created_by, :created_at)
+		`, tag); err != nil {
+			return fmt.Errorf("creating imported tag %q: %w", tag.Name, err)
+		}
+	}
+
+	for _, item := range items {
+		if _, err = tx.NamedExec(`
+			INSERT INTO activities (
+				id, timeline_id, title, description, notes, icon, color,
+				start_at, end_at, all_day, status_id, parent_activity_id,
+				percent_complete, location, url, rrule,
+				caldav_uid, google_event_id,
+				created_by, created_at, updated_at
+			) VALUES (
+				:id, :timeline_id, :title, :description, :notes, :icon, :color,
+				:start_at, :end_at, :all_day, :status_id, :parent_activity_id,
+				:percent_complete, :location, :url, :rrule,
+				:caldav_uid, :google_event_id,
+				:created_by, :created_at, :updated_at
+			)
+		`, item.Activity); err != nil {
+			return fmt.Errorf("creating imported activity %q: %w", item.Activity.Title, err)
+		}
+		for _, memberID := range item.AssigneeIDs {
+			if _, err = tx.Exec(
+				`INSERT INTO activity_assignments (activity_id, team_member_id) VALUES (?, ?)`,
+				item.Activity.ID, memberID,
+			); err != nil {
+				return fmt.Errorf("assigning imported activity %q: %w", item.Activity.Title, err)
+			}
+		}
+		for _, tagID := range item.TagIDs {
+			if _, err = tx.Exec(
+				`INSERT INTO activity_tags (activity_id, tag_id) VALUES (?, ?)`,
+				item.Activity.ID, tagID,
+			); err != nil {
+				return fmt.Errorf("tagging imported activity %q: %w", item.Activity.Title, err)
+			}
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("committing import batch: %w", err)
+	}
+	return nil
+}
+
+// ListByTimeline returns activities for a specific timeline. When
+// includeArchived is false archived rows are excluded. The bounds use overlap
+// semantics: from filters on end_at >= from (so a multi-week activity that
+// starts before the window still appears if it crosses it), and to filters on
+// start_at <= to.
+// AssignedMemberIDs is populated via a second query.
+func (r *ActivityRepo) ListByTimeline(timelineID string, from, to *time.Time, includeArchived bool) ([]*models.Activity, error) {
+	query := `SELECT * FROM activities WHERE timeline_id = ?`
+	args := []any{timelineID}
+	if !includeArchived {
+		query += ` AND archived_at IS NULL`
+	}
+
+	if from != nil {
+		// Overlap semantics: include any activity whose end_at is at or after from.
+		// This catches multi-week/multi-month activities that START before the
+		// visible range but still cross it.
+		query += ` AND end_at >= ?`
+		args = append(args, from)
+	}
+	if to != nil {
+		query += ` AND start_at <= ?`
+		args = append(args, to)
+	}
+	query += ` ORDER BY start_at ASC`
+
+	acts := make([]*models.Activity, 0)
+	if err := r.db.Select(&acts, query, args...); err != nil {
+		return nil, fmt.Errorf("listing activities: %w", err)
+	}
+	if len(acts) == 0 {
+		return acts, nil
+	}
+
+	// Initialise AssignedMemberIDs and TagIDs to empty slices so JSON fields are
+	// always arrays (never null) even when an activity has no assignments or tags.
+	ids := make([]string, len(acts))
+	byID := make(map[string]*models.Activity, len(acts))
+	for i, a := range acts {
+		a.AssignedMemberIDs = []string{}
+		a.TagIDs = []string{}
+		ids[i] = a.ID
+		byID[a.ID] = a
+	}
+
+	asnQuery, asnArgs, err := sqlx.In(
+		`SELECT activity_id, team_member_id FROM activity_assignments WHERE activity_id IN (?)`,
+		ids,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("building assignments query: %w", err)
+	}
+	asnQuery = r.db.Rebind(asnQuery)
+
+	type assignment struct {
+		ActivityID   string `db:"activity_id"`
+		TeamMemberID string `db:"team_member_id"`
+	}
+	var assignments []assignment
+	if err := r.db.Select(&assignments, asnQuery, asnArgs...); err != nil {
+		return nil, fmt.Errorf("listing activity assignments: %w", err)
+	}
+	for _, a := range assignments {
+		if act, ok := byID[a.ActivityID]; ok {
+			act.AssignedMemberIDs = append(act.AssignedMemberIDs, a.TeamMemberID)
+		}
+	}
+
+	tagQuery, tagArgs, err := sqlx.In(
+		`SELECT activity_id, tag_id FROM activity_tags WHERE activity_id IN (?)`,
+		ids,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("building tags query: %w", err)
+	}
+	tagQuery = r.db.Rebind(tagQuery)
+
+	type activityTag struct {
+		ActivityID string `db:"activity_id"`
+		TagID      string `db:"tag_id"`
+	}
+	var actTags []activityTag
+	if err := r.db.Select(&actTags, tagQuery, tagArgs...); err != nil {
+		return nil, fmt.Errorf("listing activity tags: %w", err)
+	}
+	for _, at := range actTags {
+		if act, ok := byID[at.ActivityID]; ok {
+			act.TagIDs = append(act.TagIDs, at.TagID)
+		}
+	}
+
+	return acts, nil
+}
+````
+
 ## File: packages/api/internal/db/migrations.go
 ````go
 package db
@@ -50739,147 +51124,6 @@ export function importableCount(result: ImportResult): number {
 }
 ````
 
-## File: packages/web/src/components/import/ImportMappingStep.tsx
-````typescript
-/**
- * ImportMappingStep — the wizard's conditional map-columns step.
- *
- * One row per file column: the column header, a sample of what the server
- * mapped it to, and a field dropdown (or "Don't import"). A field already
- * claimed by another column is disabled — two columns on one field is a
- * server-side file error, so the UI simply prevents it. The date-order
- * question renders here only when the file's numeric dates stayed ambiguous
- * column-wide (see importFields.hasAmbiguousDates).
- */
-
-import { useState } from 'react'
-import { IMPORT_FIELDS } from './importFields'
-
-export interface ImportMappingStepProps {
-  /** Effective mapping — file column → field name, '' = ignored. */
-  mapping: Record<string, string>
-  /** Called with the full updated mapping whenever one dropdown changes. */
-  onMappingChange: (mapping: Record<string, string>) => void
-  /** Whether to show the ambiguous-date-order question. */
-  showDateOrder: boolean
-  dateOrder: 'mdy' | 'dmy'
-  onDateOrderChange: (order: 'mdy' | 'dmy') => void
-}
-
-export default function ImportMappingStep({
-  mapping,
-  onMappingChange,
-  showDateOrder,
-  dateOrder,
-  onDateOrderChange,
-}: ImportMappingStepProps) {
-  // The server returns the mapping as a JSON object whose keys arrive in
-  // alphabetical order (Go map marshaling), not file order. Sort unmapped
-  // columns — the ones needing attention — to the top, and freeze the order
-  // for this mount so rows don't jump around as the user assigns fields.
-  const [columns] = useState(() =>
-    Object.keys(mapping).sort((a, b) => {
-      const rank = (c: string) => (mapping[c] === '' ? 0 : 1)
-      return rank(a) - rank(b) || a.localeCompare(b)
-    }),
-  )
-  const used = new Set(Object.values(mapping).filter(v => v !== ''))
-
-  const handleChange = (column: string, field: string) => {
-    onMappingChange({ ...mapping, [column]: field })
-  }
-
-  return (
-    <div className="flex flex-col gap-4">
-      <div className="text-[12.5px] leading-[1.5] text-muted-foreground">
-        Match each file column to a draba field. Columns set to
-        {' '}<span className="font-semibold text-foreground">Don't import</span> are skipped.
-      </div>
-
-      <div className="overflow-hidden rounded-[var(--radius-lg)] border border-border">
-        {columns.map((column, i) => {
-          const value = mapping[column]
-          return (
-            <div
-              key={column}
-              className={`flex items-center gap-3 px-3 py-2 ${i > 0 ? 'border-t border-border' : ''} ${value === '' ? 'bg-muted/50' : ''}`}
-            >
-              <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] text-foreground" title={column}>
-                {column}
-              </span>
-              <span className="shrink-0 text-[12px] text-muted-foreground">→</span>
-              <select
-                aria-label={`Field for column ${column}`}
-                value={value}
-                onChange={e => handleChange(column, e.target.value)}
-                className="h-8 w-[180px] shrink-0 rounded-[var(--radius-md)] border border-input bg-background px-2 text-[13px] text-foreground"
-              >
-                <option value="">Don't import</option>
-                {IMPORT_FIELDS.map(f => (
-                  <option
-                    key={f.value}
-                    value={f.value}
-                    disabled={used.has(f.value) && value !== f.value}
-                  >
-                    {f.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )
-        })}
-      </div>
-
-      {showDateOrder && (
-        <div>
-          <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">
-            Date order
-          </div>
-          <div className="mb-2 text-[12.5px] leading-[1.5] text-muted-foreground">
-            Dates like <span className="font-mono">3/5/26</span> are ambiguous in this file — which order are they in?
-          </div>
-          <div className="flex overflow-hidden rounded-[var(--radius-lg)] border border-border">
-            <DateOrderOption
-              label="Month / Day / Year"
-              desc="3/5/26 = March 5, 2026"
-              selected={dateOrder === 'mdy'}
-              onSelect={() => onDateOrderChange('mdy')}
-            />
-            <div className="w-px shrink-0 bg-border" />
-            <DateOrderOption
-              label="Day / Month / Year"
-              desc="3/5/26 = May 3, 2026"
-              selected={dateOrder === 'dmy'}
-              onSelect={() => onDateOrderChange('dmy')}
-            />
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-function DateOrderOption({ label, desc, selected, onSelect }: {
-  label: string
-  desc: string
-  selected: boolean
-  onSelect: () => void
-}) {
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={selected}
-      onClick={onSelect}
-      className={`flex flex-1 flex-col items-start px-3 py-2.5 text-left transition-colors ${selected ? 'bg-[hsl(188_59%_38%/0.09)]' : 'bg-transparent hover:bg-muted'}`}
-    >
-      <span className="text-[13px] font-semibold text-foreground">{label}</span>
-      <span className="text-[11.5px] text-muted-foreground">{desc}</span>
-    </button>
-  )
-}
-````
-
 ## File: packages/web/src/components/import/ImportPreviewStep.tsx
 ````typescript
 /**
@@ -55429,391 +55673,6 @@ func randomURLToken() (string, error) {
 }
 ````
 
-## File: packages/api/internal/db/activity_repo.go
-````go
-package db
-
-import (
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// ActivityRepo is the persistence layer for Activity records.
-type ActivityRepo struct {
-	db *sqlx.DB
-}
-
-// NewActivityRepo returns an ActivityRepo backed by db.
-func NewActivityRepo(db *sqlx.DB) *ActivityRepo {
-	return &ActivityRepo{db: db}
-}
-
-// Create inserts a new Activity row.
-func (r *ActivityRepo) Create(activity *models.Activity) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO activities (
-			id, timeline_id, title, description, notes, icon, color,
-			start_at, end_at, all_day, status_id, parent_activity_id,
-			percent_complete, location, url, rrule,
-			caldav_uid, google_event_id,
-			created_by, created_at, updated_at
-		) VALUES (
-			:id, :timeline_id, :title, :description, :notes, :icon, :color,
-			:start_at, :end_at, :all_day, :status_id, :parent_activity_id,
-			:percent_complete, :location, :url, :rrule,
-			:caldav_uid, :google_event_id,
-			:created_by, :created_at, :updated_at
-		)
-	`, activity)
-	if err != nil {
-		return fmt.Errorf("creating activity: %w", err)
-	}
-	return nil
-}
-
-// GetByID fetches an Activity by primary key. Returns sql.ErrNoRows (wrapped)
-// when no row matches.
-func (r *ActivityRepo) GetByID(id string) (*models.Activity, error) {
-	var a models.Activity
-	err := r.db.Get(&a, `SELECT * FROM activities WHERE id = ?`, id)
-	if err != nil {
-		return nil, fmt.Errorf("getting activity: %w", err)
-	}
-	return &a, nil
-}
-
-// Update replaces all mutable fields on an existing Activity row.
-func (r *ActivityRepo) Update(activity *models.Activity) error {
-	_, err := r.db.NamedExec(`
-		UPDATE activities SET
-			title              = :title,
-			description        = :description,
-			notes              = :notes,
-			icon               = :icon,
-			color              = :color,
-			start_at           = :start_at,
-			end_at             = :end_at,
-			all_day            = :all_day,
-			status_id          = :status_id,
-			parent_activity_id = :parent_activity_id,
-			percent_complete   = :percent_complete,
-			location           = :location,
-			url                = :url,
-			rrule              = :rrule,
-			updated_at         = :updated_at
-		WHERE id = :id
-	`, activity)
-	if err != nil {
-		return fmt.Errorf("updating activity: %w", err)
-	}
-	return nil
-}
-
-// Delete permanently removes an activity row.
-func (r *ActivityRepo) Delete(id string) error {
-	_, err := r.db.Exec(`DELETE FROM activities WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting activity: %w", err)
-	}
-	return nil
-}
-
-// ClearParentRefs clears parent_activity_id on all activities that reference id
-// as their parent. Called before deleting or archiving the parent so children
-// do not retain a dangling reference.
-func (r *ActivityRepo) ClearParentRefs(id string) error {
-	_, err := r.db.Exec(
-		`UPDATE activities SET parent_activity_id = NULL, updated_at = ? WHERE parent_activity_id = ?`,
-		time.Now().UTC(), id,
-	)
-	if err != nil {
-		return fmt.Errorf("clearing parent refs for %s: %w", id, err)
-	}
-	return nil
-}
-
-// SetArchived sets or clears archived_at on an activity. Pass a non-nil time
-// to archive; pass nil to unarchive.
-func (r *ActivityRepo) SetArchived(id string, at *time.Time) error {
-	_, err := r.db.Exec(
-		`UPDATE activities SET archived_at = ?, updated_at = ? WHERE id = ?`,
-		at, time.Now().UTC(), id,
-	)
-	if err != nil {
-		return fmt.Errorf("setting activity archived_at: %w", err)
-	}
-	return nil
-}
-
-// SetAssignments replaces all activity_assignments for an activity with the
-// provided member IDs. An empty slice removes all assignments.
-func (r *ActivityRepo) SetAssignments(activityID string, memberIDs []string) error {
-	tx, err := r.db.Beginx()
-	if err != nil {
-		return fmt.Errorf("beginning assignment transaction: %w", err)
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	if _, err = tx.Exec(`DELETE FROM activity_assignments WHERE activity_id = ?`, activityID); err != nil {
-		return fmt.Errorf("clearing activity assignments: %w", err)
-	}
-
-	for _, memberID := range memberIDs {
-		if _, err = tx.Exec(
-			`INSERT INTO activity_assignments (activity_id, team_member_id) VALUES (?, ?)`,
-			activityID, memberID,
-		); err != nil {
-			return fmt.Errorf("inserting activity assignment: %w", err)
-		}
-	}
-
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("committing activity assignments: %w", err)
-	}
-	return nil
-}
-
-// GetAssignments returns the team_member_ids assigned to an activity.
-func (r *ActivityRepo) GetAssignments(activityID string) ([]string, error) {
-	var ids []string
-	err := r.db.Select(&ids,
-		`SELECT team_member_id FROM activity_assignments WHERE activity_id = ?`, activityID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("getting activity assignments: %w", err)
-	}
-	if ids == nil {
-		ids = []string{}
-	}
-	return ids, nil
-}
-
-// SetTags replaces all activity_tags for an activity with the provided tag
-// IDs. An empty slice removes all tag associations.
-func (r *ActivityRepo) SetTags(activityID string, tagIDs []string) error {
-	tx, err := r.db.Beginx()
-	if err != nil {
-		return fmt.Errorf("beginning tag transaction: %w", err)
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	if _, err = tx.Exec(`DELETE FROM activity_tags WHERE activity_id = ?`, activityID); err != nil {
-		return fmt.Errorf("clearing activity tags: %w", err)
-	}
-
-	for _, tagID := range tagIDs {
-		if _, err = tx.Exec(
-			`INSERT INTO activity_tags (activity_id, tag_id) VALUES (?, ?)`,
-			activityID, tagID,
-		); err != nil {
-			return fmt.Errorf("inserting activity tag: %w", err)
-		}
-	}
-
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("committing activity tags: %w", err)
-	}
-	return nil
-}
-
-// GetTags returns the tag IDs associated with an activity.
-func (r *ActivityRepo) GetTags(activityID string) ([]string, error) {
-	var ids []string
-	err := r.db.Select(&ids,
-		`SELECT tag_id FROM activity_tags WHERE activity_id = ?`, activityID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("getting activity tags: %w", err)
-	}
-	if ids == nil {
-		ids = []string{}
-	}
-	return ids, nil
-}
-
-// ImportItem is one activity to create in an import batch, with its
-// association rows. Activity IDs (including in-batch ParentActivityID
-// references) are assigned by the caller before the batch runs.
-type ImportItem struct {
-	Activity    *models.Activity
-	AssigneeIDs []string
-	TagIDs      []string
-}
-
-// CreateImportBatch writes an import commit in a single transaction: new tags
-// first, then activities in the given order (callers order parents before
-// children so the parent_activity_id FK holds), then assignments and tag
-// links. Any failure rolls back the whole batch — an import is all-or-nothing
-// within its accepted rows.
-func (r *ActivityRepo) CreateImportBatch(newTags []*models.Tag, items []ImportItem) error {
-	tx, err := r.db.Beginx()
-	if err != nil {
-		return fmt.Errorf("beginning import transaction: %w", err)
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	for _, tag := range newTags {
-		if _, err = tx.NamedExec(`
-			INSERT INTO tags (id, team_id, name, color, created_by, created_at)
-			VALUES (:id, :team_id, :name, :color, :created_by, :created_at)
-		`, tag); err != nil {
-			return fmt.Errorf("creating imported tag %q: %w", tag.Name, err)
-		}
-	}
-
-	for _, item := range items {
-		if _, err = tx.NamedExec(`
-			INSERT INTO activities (
-				id, timeline_id, title, description, notes, icon, color,
-				start_at, end_at, all_day, status_id, parent_activity_id,
-				percent_complete, location, url, rrule,
-				caldav_uid, google_event_id,
-				created_by, created_at, updated_at
-			) VALUES (
-				:id, :timeline_id, :title, :description, :notes, :icon, :color,
-				:start_at, :end_at, :all_day, :status_id, :parent_activity_id,
-				:percent_complete, :location, :url, :rrule,
-				:caldav_uid, :google_event_id,
-				:created_by, :created_at, :updated_at
-			)
-		`, item.Activity); err != nil {
-			return fmt.Errorf("creating imported activity %q: %w", item.Activity.Title, err)
-		}
-		for _, memberID := range item.AssigneeIDs {
-			if _, err = tx.Exec(
-				`INSERT INTO activity_assignments (activity_id, team_member_id) VALUES (?, ?)`,
-				item.Activity.ID, memberID,
-			); err != nil {
-				return fmt.Errorf("assigning imported activity %q: %w", item.Activity.Title, err)
-			}
-		}
-		for _, tagID := range item.TagIDs {
-			if _, err = tx.Exec(
-				`INSERT INTO activity_tags (activity_id, tag_id) VALUES (?, ?)`,
-				item.Activity.ID, tagID,
-			); err != nil {
-				return fmt.Errorf("tagging imported activity %q: %w", item.Activity.Title, err)
-			}
-		}
-	}
-
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("committing import batch: %w", err)
-	}
-	return nil
-}
-
-// ListByTimeline returns activities for a specific timeline. When
-// includeArchived is false archived rows are excluded. The bounds use overlap
-// semantics: from filters on end_at >= from (so a multi-week activity that
-// starts before the window still appears if it crosses it), and to filters on
-// start_at <= to.
-// AssignedMemberIDs is populated via a second query.
-func (r *ActivityRepo) ListByTimeline(timelineID string, from, to *time.Time, includeArchived bool) ([]*models.Activity, error) {
-	query := `SELECT * FROM activities WHERE timeline_id = ?`
-	args := []any{timelineID}
-	if !includeArchived {
-		query += ` AND archived_at IS NULL`
-	}
-
-	if from != nil {
-		// Overlap semantics: include any activity whose end_at is at or after from.
-		// This catches multi-week/multi-month activities that START before the
-		// visible range but still cross it.
-		query += ` AND end_at >= ?`
-		args = append(args, from)
-	}
-	if to != nil {
-		query += ` AND start_at <= ?`
-		args = append(args, to)
-	}
-	query += ` ORDER BY start_at ASC`
-
-	acts := make([]*models.Activity, 0)
-	if err := r.db.Select(&acts, query, args...); err != nil {
-		return nil, fmt.Errorf("listing activities: %w", err)
-	}
-	if len(acts) == 0 {
-		return acts, nil
-	}
-
-	// Initialise AssignedMemberIDs and TagIDs to empty slices so JSON fields are
-	// always arrays (never null) even when an activity has no assignments or tags.
-	ids := make([]string, len(acts))
-	byID := make(map[string]*models.Activity, len(acts))
-	for i, a := range acts {
-		a.AssignedMemberIDs = []string{}
-		a.TagIDs = []string{}
-		ids[i] = a.ID
-		byID[a.ID] = a
-	}
-
-	asnQuery, asnArgs, err := sqlx.In(
-		`SELECT activity_id, team_member_id FROM activity_assignments WHERE activity_id IN (?)`,
-		ids,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("building assignments query: %w", err)
-	}
-	asnQuery = r.db.Rebind(asnQuery)
-
-	type assignment struct {
-		ActivityID   string `db:"activity_id"`
-		TeamMemberID string `db:"team_member_id"`
-	}
-	var assignments []assignment
-	if err := r.db.Select(&assignments, asnQuery, asnArgs...); err != nil {
-		return nil, fmt.Errorf("listing activity assignments: %w", err)
-	}
-	for _, a := range assignments {
-		if act, ok := byID[a.ActivityID]; ok {
-			act.AssignedMemberIDs = append(act.AssignedMemberIDs, a.TeamMemberID)
-		}
-	}
-
-	tagQuery, tagArgs, err := sqlx.In(
-		`SELECT activity_id, tag_id FROM activity_tags WHERE activity_id IN (?)`,
-		ids,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("building tags query: %w", err)
-	}
-	tagQuery = r.db.Rebind(tagQuery)
-
-	type activityTag struct {
-		ActivityID string `db:"activity_id"`
-		TagID      string `db:"tag_id"`
-	}
-	var actTags []activityTag
-	if err := r.db.Select(&actTags, tagQuery, tagArgs...); err != nil {
-		return nil, fmt.Errorf("listing activity tags: %w", err)
-	}
-	for _, at := range actTags {
-		if act, ok := byID[at.ActivityID]; ok {
-			act.TagIDs = append(act.TagIDs, at.TagID)
-		}
-	}
-
-	return acts, nil
-}
-````
-
 ## File: packages/api/internal/export/csv.go
 ````go
 package export
@@ -57029,6 +56888,147 @@ export function CleanCalendarSnapshot({
         interactive={false}
       />
     </>
+  )
+}
+````
+
+## File: packages/web/src/components/import/ImportMappingStep.tsx
+````typescript
+/**
+ * ImportMappingStep — the wizard's conditional map-columns step.
+ *
+ * One row per file column: the column header and a field dropdown (or
+ * "Don't import"), unmapped columns sorted to the top. A field already
+ * claimed by another column is disabled — two columns on one field is a
+ * server-side file error, so the UI simply prevents it. The date-order
+ * question renders here only when the file's numeric dates stayed ambiguous
+ * column-wide (see importFields.hasAmbiguousDates).
+ */
+
+import { useState } from 'react'
+import { IMPORT_FIELDS } from './importFields'
+
+export interface ImportMappingStepProps {
+  /** Effective mapping — file column → field name, '' = ignored. */
+  mapping: Record<string, string>
+  /** Called with the full updated mapping whenever one dropdown changes. */
+  onMappingChange: (mapping: Record<string, string>) => void
+  /** Whether to show the ambiguous-date-order question. */
+  showDateOrder: boolean
+  dateOrder: 'mdy' | 'dmy'
+  onDateOrderChange: (order: 'mdy' | 'dmy') => void
+}
+
+export default function ImportMappingStep({
+  mapping,
+  onMappingChange,
+  showDateOrder,
+  dateOrder,
+  onDateOrderChange,
+}: ImportMappingStepProps) {
+  // The server returns the mapping as a JSON object whose keys arrive in
+  // alphabetical order (Go map marshaling), not file order. Sort unmapped
+  // columns — the ones needing attention — to the top, and freeze the order
+  // for this mount so rows don't jump around as the user assigns fields.
+  const [columns] = useState(() =>
+    Object.keys(mapping).sort((a, b) => {
+      const rank = (c: string) => (mapping[c] === '' ? 0 : 1)
+      return rank(a) - rank(b) || a.localeCompare(b)
+    }),
+  )
+  const used = new Set(Object.values(mapping).filter(v => v !== ''))
+
+  const handleChange = (column: string, field: string) => {
+    onMappingChange({ ...mapping, [column]: field })
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="text-[12.5px] leading-[1.5] text-muted-foreground">
+        Match each file column to a draba field. Columns set to
+        {' '}<span className="font-semibold text-foreground">Don't import</span> are skipped.
+      </div>
+
+      <div className="overflow-hidden rounded-[var(--radius-lg)] border border-border">
+        {columns.map((column, i) => {
+          const value = mapping[column]
+          return (
+            <div
+              key={column}
+              className={`flex items-center gap-3 px-3 py-2 ${i > 0 ? 'border-t border-border' : ''} ${value === '' ? 'bg-muted/50' : ''}`}
+            >
+              <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] text-foreground" title={column}>
+                {column}
+              </span>
+              <span className="shrink-0 text-[12px] text-muted-foreground">→</span>
+              <select
+                aria-label={`Field for column ${column}`}
+                value={value}
+                onChange={e => handleChange(column, e.target.value)}
+                className="h-8 w-[180px] shrink-0 rounded-[var(--radius-md)] border border-input bg-background px-2 text-[13px] text-foreground"
+              >
+                <option value="">Don't import</option>
+                {IMPORT_FIELDS.map(f => (
+                  <option
+                    key={f.value}
+                    value={f.value}
+                    disabled={used.has(f.value) && value !== f.value}
+                  >
+                    {f.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )
+        })}
+      </div>
+
+      {showDateOrder && (
+        <div>
+          <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">
+            Date order
+          </div>
+          <div className="mb-2 text-[12.5px] leading-[1.5] text-muted-foreground">
+            Dates like <span className="font-mono">3/5/26</span> are ambiguous in this file — which order are they in?
+          </div>
+          <div className="flex overflow-hidden rounded-[var(--radius-lg)] border border-border">
+            <DateOrderOption
+              label="Month / Day / Year"
+              desc="3/5/26 = March 5, 2026"
+              selected={dateOrder === 'mdy'}
+              onSelect={() => onDateOrderChange('mdy')}
+            />
+            <div className="w-px shrink-0 bg-border" />
+            <DateOrderOption
+              label="Day / Month / Year"
+              desc="3/5/26 = May 3, 2026"
+              selected={dateOrder === 'dmy'}
+              onSelect={() => onDateOrderChange('dmy')}
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function DateOrderOption({ label, desc, selected, onSelect }: {
+  label: string
+  desc: string
+  selected: boolean
+  onSelect: () => void
+}) {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={selected}
+      onClick={onSelect}
+      className={`flex flex-1 flex-col items-start px-3 py-2.5 text-left transition-colors ${selected ? 'bg-[hsl(188_59%_38%/0.09)]' : 'bg-transparent hover:bg-muted'}`}
+    >
+      <span className="text-[13px] font-semibold text-foreground">{label}</span>
+      <span className="text-[11.5px] text-muted-foreground">{desc}</span>
+    </button>
   )
 }
 ````
@@ -59260,6 +59260,933 @@ export function forceLightDocumentElement(doc: Document): boolean {
   const hadDark = root.classList.contains('dark')
   root.classList.remove('dark')
   return hadDark
+}
+````
+
+## File: packages/web/src/pages/ShareViewPage.tsx
+````typescript
+/**
+ * ShareViewPage — public read-only view for a share link.
+ *
+ * Mounted at /s/:token outside ProtectedRoute. Fetches the ShareProjection
+ * from the public gateway, then renders the Gantt in interactive=false mode
+ * with the frozen view config (groupBy, sortBy, colorBy, granularity) applied.
+ * Theme is forced to light via useForceLightDocument — its useLayoutEffect runs
+ * synchronously before paint so it beats any dark-class applied from
+ * localStorage by useDarkMode.
+ */
+
+import { useMemo, useEffect, useState, useCallback, useRef } from 'react'
+import { useParams } from 'react-router-dom'
+import { useShareProjection, useUnlockShare } from '@/hooks/useShares'
+import GanttGrid from '@/components/gantt/GanttGrid'
+import { buildRows, type RichActivity } from '@/components/gantt/GanttView'
+import {
+  buildListRows,
+  formatActivityDate,
+  formatTimestamp,
+  formatDuration,
+  COL_CATALOG,
+  type ListDisplayRow,
+  type ColMeta,
+} from '@/components/list/ListView'
+import type { ListGroupBy, ListSortBy, ListColorBy } from '@/components/list/ListToolbar'
+import KanbanBoard from '@/components/kanban/KanbanBoard'
+import {
+  buildColumns,
+  buildHierarchyMaps,
+  DEFAULT_CARD_FIELDS,
+  type KanbanCardField,
+  type KanbanGroupBy,
+  type KanbanSortBy,
+} from '@/components/kanban/kanbanColumns'
+import { resolveActivityColor } from '@/lib/activityColor'
+import { resolveColorHex } from '@/components/identity/identity-constants'
+import { MEMBER_COLORS, ACTIVITY_COLORS } from '@/types'
+import {
+  generateColumns,
+  positionInColumns,
+  todayColumnPosition,
+  autoFitGranularity,
+} from '@/components/gantt/granularity'
+import { ApiError } from '@/lib/api'
+import { useForceLightDocument } from '@/hooks/useForceLightDocument'
+import type { components } from '@draba/shared'
+import type { GroupBy, SortBy, ColorBy, TimeGranularity } from '@/components/gantt/GanttToolbar'
+import type { Member } from '@/types'
+import { AlertCircle, Loader2, KeyRound, Eye, EyeOff } from 'lucide-react'
+import { Badge } from '@/components/identity/Badge'
+
+type PublicActivity = components['schemas']['PublicActivity']
+type PublicMember = components['schemas']['PublicMember']
+type Status = components['schemas']['Status']
+type Tag = components['schemas']['Tag']
+type ApiActivity = components['schemas']['Activity']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+
+// ── View config parsing ───────────────────────────────────────────────────────
+
+interface ParsedViewConfig {
+  groupBy: GroupBy
+  sortBy: SortBy
+  colorBy: ColorBy
+  granularity: TimeGranularity | 'auto'
+}
+
+function parseViewConfig(raw: string): ParsedViewConfig {
+  try {
+    const c = JSON.parse(raw) as Partial<ParsedViewConfig>
+    return {
+      groupBy: (c.groupBy as GroupBy) ?? 'none',
+      sortBy: (c.sortBy as SortBy) ?? 'startDate',
+      colorBy: (c.colorBy as ColorBy) ?? 'activity',
+      granularity: c.granularity ?? 'auto',
+    }
+  } catch {
+    return { groupBy: 'none', sortBy: 'startDate', colorBy: 'activity', granularity: 'auto' }
+  }
+}
+
+interface ParsedListViewConfig {
+  groupBy: ListGroupBy
+  sortBy: ListSortBy
+  colorBy: ListColorBy
+  columns: { id: string; visible: boolean }[] | null
+}
+
+function parseListViewConfig(raw: string): ParsedListViewConfig {
+  try {
+    const c = JSON.parse(raw) as Partial<ParsedListViewConfig>
+    return {
+      groupBy: (c.groupBy as ListGroupBy) ?? 'none',
+      sortBy: (c.sortBy as ListSortBy) ?? 'startDate',
+      colorBy: (c.colorBy as ListColorBy) ?? 'activity',
+      columns: Array.isArray(c.columns) ? c.columns : null,
+    }
+  } catch {
+    return { groupBy: 'none', sortBy: 'startDate', colorBy: 'activity', columns: null }
+  }
+}
+
+interface ParsedKanbanViewConfig {
+  groupBy: KanbanGroupBy
+  sortBy: KanbanSortBy
+  colorBy: ColorBy
+  cardFields: KanbanCardField[]
+  showHierarchy: boolean
+  collapsedColumns: string[]
+}
+
+function parseKanbanViewConfig(raw: string): ParsedKanbanViewConfig {
+  try {
+    const c = JSON.parse(raw) as Partial<ParsedKanbanViewConfig>
+    return {
+      groupBy: (c.groupBy as KanbanGroupBy) ?? 'status',
+      sortBy: (c.sortBy as KanbanSortBy) ?? 'startDate',
+      colorBy: (c.colorBy as ColorBy) ?? 'activity',
+      cardFields: Array.isArray(c.cardFields) && c.cardFields.length > 0 ? c.cardFields as KanbanCardField[] : DEFAULT_CARD_FIELDS,
+      showHierarchy: c.showHierarchy ?? false,
+      collapsedColumns: Array.isArray(c.collapsedColumns) ? c.collapsedColumns as string[] : [],
+    }
+  } catch {
+    return { groupBy: 'status', sortBy: 'startDate', colorBy: 'activity', cardFields: DEFAULT_CARD_FIELDS, showHierarchy: false, collapsedColumns: [] }
+  }
+}
+
+// ── Adapters: projection types → full API shapes ─────────────────────────────
+//
+// The List and Kanban renderers are built around the full Activity / TeamMember
+// shapes (so they can be reused as-is from the authenticated app). The public
+// projection only carries the fields a share is allowed to expose, so these
+// adapters fill the remaining required-but-irrelevant fields with placeholder
+// defaults — mirroring the `optimisticActivity` precedent in ListView.
+
+function toApiActivity(a: PublicActivity, timelineId: string): ApiActivity {
+  return {
+    id: a.id,
+    timelineId,
+    title: a.title,
+    description: a.description ?? null,
+    notes: a.notes ?? null,
+    icon: a.icon ?? null,
+    color: a.color ?? null,
+    startAt: a.startAt,
+    endAt: a.endAt,
+    allDay: a.allDay,
+    statusId: a.statusId ?? null,
+    parentActivityId: a.parentActivityId ?? null,
+    percentComplete: a.percentComplete ?? null,
+    location: null,
+    url: null,
+    rrule: null,
+    caldavUid: null,
+    googleEventId: null,
+    createdBy: '',
+    createdAt: a.startAt,
+    updatedAt: a.startAt,
+    archivedAt: null,
+    assignedMemberIds: a.assignedMemberIds ?? [],
+    tagIds: a.tagIds ?? [],
+  }
+}
+
+function toTeamMemberWithUser(m: PublicMember): TeamMemberWithUser {
+  return {
+    id: m.id,
+    teamId: '',
+    userId: null,
+    role: 'member',
+    color: m.color ?? null,
+    icon: m.icon ?? null,
+    joinedAt: '',
+    archivedAt: null,
+    email: '',
+    displayName: m.displayName,
+    avatarUrl: null,
+  }
+}
+
+function sortListActivities(activities: ApiActivity[], sortBy: ListSortBy): ApiActivity[] {
+  const sorted = [...activities]
+  sorted.sort((a, b) => {
+    if (sortBy === 'startDate') return (a.startAt ?? '').localeCompare(b.startAt ?? '')
+    if (sortBy === 'endDate') return (a.endAt ?? '').localeCompare(b.endAt ?? '')
+    if (sortBy === 'title') return a.title.localeCompare(b.title)
+    if (sortBy === 'status') return (a.statusId ?? '').localeCompare(b.statusId ?? '')
+    if (sortBy === 'progress') return (b.percentComplete ?? 0) - (a.percentComplete ?? 0)
+    return 0
+  })
+  return sorted
+}
+
+// ── Data helpers ──────────────────────────────────────────────────────────────
+
+function initialsFrom(name: string): string {
+  return name.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase()
+}
+
+function toMember(m: PublicMember, index: number): Member {
+  return {
+    id: m.id,
+    name: m.displayName,
+    initials: initialsFrom(m.displayName),
+    color: resolveColorHex(m.color) || MEMBER_COLORS[index % MEMBER_COLORS.length],
+  }
+}
+
+// ── Public List table (read-only) ────────────────────────────────────────────
+//
+// ListView itself is a 2600-line data-fetching container with deep editing/
+// drag/multiselect entanglement — unsuitable for the bypass-the-container
+// pattern. Instead this lightweight renderer reuses ListView's pure helpers
+// (buildListRows, COL_CATALOG, date formatters) to mirror its visuals without
+// any interactivity: no clicks, editing, drag, context menus, or selection.
+
+interface PublicListTableProps {
+  rows: ListDisplayRow[]
+  visibleColumns: ColMeta[]
+  memberById: Map<string, PublicMember>
+  statusById: Map<string, Status>
+  tagById: Map<string, Tag>
+  activityTitleById: Map<string, string>
+}
+
+/**
+ * Drag handle on a column's right edge — lets the viewer resize columns to
+ * taste (a pure display preference; it never touches activity data, so it's
+ * fair game in a read-only viewer). Mirrors the visual idiom of ListView's
+ * SortableColHeader resize handle, minus the TanStack plumbing.
+ */
+function ColumnResizeHandle({ colId, width, onResize }: {
+  colId: string
+  width: number
+  onResize: (colId: string, width: number) => void
+}) {
+  const [isResizing, setIsResizing] = useState(false)
+  const dragStart = useRef<{ x: number; width: number } | null>(null)
+
+  const onMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    dragStart.current = { x: e.clientX, width }
+    setIsResizing(true)
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!dragStart.current) return
+      const next = Math.max(40, dragStart.current.width + (ev.clientX - dragStart.current.x))
+      onResize(colId, next)
+    }
+    const onMouseUp = () => {
+      dragStart.current = null
+      setIsResizing(false)
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+    }
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+  }
+
+  return (
+    <div
+      onMouseDown={onMouseDown}
+      style={{
+        position: 'absolute', right: 0, top: 0, height: '100%', width: 4,
+        cursor: 'col-resize', background: isResizing ? 'var(--primary)' : 'transparent', zIndex: 1,
+      }}
+      onMouseEnter={e => { if (!isResizing) (e.currentTarget as HTMLElement).style.background = '#d1d5db' }}
+      onMouseLeave={e => { if (!isResizing) (e.currentTarget as HTMLElement).style.background = 'transparent' }}
+    />
+  )
+}
+
+export function PublicListTable({ rows, visibleColumns, memberById, statusById, tagById, activityTitleById }: PublicListTableProps) {
+  const [widths, setWidths] = useState<Record<string, number>>(
+    () => Object.fromEntries(visibleColumns.map(c => [c.id, c.defaultWidth])),
+  )
+
+  // Re-seed widths when the visible-column set changes (e.g. share swap).
+  useEffect(() => {
+    setWidths(prev => {
+      const next: Record<string, number> = {}
+      let changed = false
+      for (const c of visibleColumns) {
+        next[c.id] = prev[c.id] ?? c.defaultWidth
+        if (next[c.id] !== prev[c.id]) changed = true
+      }
+      if (Object.keys(prev).length !== Object.keys(next).length) changed = true
+      return changed ? next : prev
+    })
+  }, [visibleColumns])
+
+  const handleResize = useCallback((colId: string, width: number) => {
+    setWidths(w => ({ ...w, [colId]: width }))
+  }, [])
+
+  const rowHoverProps = {
+    onMouseEnter: (e: React.MouseEvent<HTMLTableRowElement>) => { e.currentTarget.style.background = '#f9fafb' },
+    onMouseLeave: (e: React.MouseEvent<HTMLTableRowElement>) => { e.currentTarget.style.background = 'transparent' },
+  }
+
+  return (
+    <div data-export-role="list-table-wrap" style={{ flex: 1, overflow: 'auto', background: '#ffffff' }}>
+      <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, tableLayout: 'fixed' }}>
+        <colgroup>
+          {visibleColumns.map(c => <col key={c.id} style={{ width: widths[c.id] ?? c.defaultWidth }} />)}
+        </colgroup>
+        <thead>
+          <tr style={{ height: 36 }}>
+            {visibleColumns.map(c => (
+              <th key={c.id} style={{
+                position: 'sticky', top: 0, zIndex: 2, background: '#f9fafb',
+                borderBottom: '2px solid #e5e7eb', textAlign: 'left',
+                fontSize: 11, fontWeight: 600, color: '#6b7280', textTransform: 'uppercase',
+                letterSpacing: '0.04em', padding: '0 8px', overflow: 'visible', whiteSpace: 'nowrap',
+              }}>
+                <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.label}</span>
+                {c.id !== 'colorBar' && (
+                  <ColumnResizeHandle colId={c.id} width={widths[c.id] ?? c.defaultWidth} onResize={handleResize} />
+                )}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 && (
+            <tr>
+              <td colSpan={visibleColumns.length} style={{ textAlign: 'center', padding: '48px 0', color: '#9ca3af', fontSize: 13 }}>
+                No activities to show.
+              </td>
+            </tr>
+          )}
+          {rows.map((row, i) => {
+            if (row.kind === 'group') {
+              return (
+                <tr key={`group-${row.key}`}>
+                  <td colSpan={visibleColumns.length} style={{
+                    padding: '4px 8px', background: '#f3f4f6', borderBottom: '1px solid #e5e7eb',
+                    borderTop: i > 0 ? '1px solid #e5e7eb' : undefined, fontSize: 11, fontWeight: 600,
+                    color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.05em',
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      {row.memberColors && row.memberColors.length > 0 && (
+                        <div style={{ display: 'flex', flexShrink: 0 }}>
+                          {row.memberColors.map((c, j) => (
+                            <div key={j} style={{ width: 9, height: 9, borderRadius: '50%', background: c, marginLeft: j === 0 ? 0 : -3, outline: '1.5px solid #f3f4f6' }} />
+                          ))}
+                        </div>
+                      )}
+                      {row.label}
+                      <span style={{ fontWeight: 400, opacity: 0.6 }}>({row.count})</span>
+                    </div>
+                  </td>
+                </tr>
+              )
+            }
+
+            return (
+              <tr key={row.activity.id} style={{ height: 36 }} {...rowHoverProps}>
+                {visibleColumns.map(col => (
+                  <PublicListCell
+                    key={col.id}
+                    colId={col.id}
+                    activity={row.activity}
+                    depth={row.depth}
+                    memberById={memberById}
+                    statusById={statusById}
+                    tagById={tagById}
+                    activityTitleById={activityTitleById}
+                  />
+                ))}
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function PublicListCell({ colId, activity, depth, memberById, statusById, tagById, activityTitleById }: {
+  colId: string
+  activity: ApiActivity
+  depth: number
+  memberById: Map<string, PublicMember>
+  statusById: Map<string, Status>
+  tagById: Map<string, Tag>
+  activityTitleById: Map<string, string>
+}) {
+  const cellStyle: React.CSSProperties = {
+    padding: '0 8px',
+    borderBottom: '1px solid #f3f4f6',
+    fontSize: 12,
+    color: '#111827',
+    overflow: 'hidden',
+    whiteSpace: 'nowrap',
+    textOverflow: 'ellipsis',
+    verticalAlign: 'middle',
+  }
+
+  switch (colId) {
+    case 'colorBar':
+      return <td style={{ ...cellStyle, padding: 0 }}><div style={{ width: 4, height: 24, borderRadius: 2, background: resolveColorHex(activity.color ?? null) ?? '#9ca3af', marginLeft: 6 }} /></td>
+
+    case 'identity':
+      return (
+        <td style={{ ...cellStyle, textAlign: 'center' }}>
+          <Badge identity={{ color: activity.color ?? '#288C9B', icon: activity.icon ?? '__none__' }} name={activity.title} shape="square" size={28} />
+        </td>
+      )
+
+    case 'title':
+      return (
+        <td style={cellStyle}>
+          <span style={{ paddingLeft: depth * 20, fontWeight: 500 }}>{activity.title}</span>
+        </td>
+      )
+
+    case 'startAt':
+      return <td style={cellStyle}>{formatActivityDate(activity.startAt)}</td>
+
+    case 'endAt':
+      return <td style={cellStyle}>{formatActivityDate(activity.endAt)}</td>
+
+    case 'duration':
+      return <td style={{ ...cellStyle, color: '#6b7280' }}>{formatDuration(activity.startAt, activity.endAt)}</td>
+
+    case 'status': {
+      const status = activity.statusId ? statusById.get(activity.statusId) : null
+      const hex = status ? resolveColorHex(status.color ?? null) ?? '#888888' : null
+      return (
+        <td style={cellStyle}>
+          {status ? (
+            <span style={{
+              display: 'inline-flex', alignItems: 'center', gap: 5, padding: '2px 8px', borderRadius: 4,
+              fontSize: 11, fontWeight: 500, background: `${hex}26`, color: hex ?? '#111827', border: `1px solid ${hex}66`,
+            }}>
+              <span style={{ width: 7, height: 7, borderRadius: '50%', background: hex ?? '#888', flexShrink: 0 }} />
+              {status.name}
+            </span>
+          ) : <span style={{ color: '#9ca3af' }}>—</span>}
+        </td>
+      )
+    }
+
+    case 'assignees': {
+      const ids = activity.assignedMemberIds ?? []
+      const members = ids.map(id => memberById.get(id)).filter((m): m is PublicMember => Boolean(m))
+      return (
+        <td style={cellStyle}>
+          <div style={{ display: 'flex', alignItems: 'center', overflow: 'hidden' }}>
+            {members.length === 0 && <span style={{ color: '#9ca3af' }}>—</span>}
+            {members.slice(0, 4).map((m, i) => (
+              <div key={m.id} title={m.displayName} style={{ marginLeft: i === 0 ? 0 : -6 }}>
+                <Badge identity={{ color: m.color ?? '#288C9B', icon: m.icon ?? '__name_2__' }} name={m.displayName} shape="circle" size={22} />
+              </div>
+            ))}
+            {members.length > 4 && <span style={{ fontSize: 10, color: '#9ca3af', marginLeft: 4 }}>+{members.length - 4}</span>}
+          </div>
+        </td>
+      )
+    }
+
+    case 'tags': {
+      const tags = (activity.tagIds ?? []).map(id => tagById.get(id)).filter((t): t is Tag => Boolean(t))
+      return (
+        <td style={cellStyle}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden' }}>
+            {tags.length === 0 && <span style={{ color: '#9ca3af' }}>—</span>}
+            {tags.slice(0, 3).map(t => {
+              const hex = resolveColorHex(t.color ?? null)
+              return (
+                <span key={t.id} style={{
+                  padding: '1px 6px', borderRadius: 4, fontSize: 10, whiteSpace: 'nowrap',
+                  background: hex ? `${hex}26` : '#f3f4f6', color: hex ?? '#111827', border: `1px solid ${hex ?? '#e5e7eb'}66`,
+                }}>
+                  {t.name}
+                </span>
+              )
+            })}
+            {tags.length > 3 && <span style={{ fontSize: 10, color: '#9ca3af' }}>+{tags.length - 3}</span>}
+          </div>
+        </td>
+      )
+    }
+
+    case 'progress': {
+      const pct = activity.percentComplete ?? 0
+      return (
+        <td style={cellStyle}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{ flex: 1, height: 4, background: '#e5e7eb', borderRadius: 2, overflow: 'hidden' }}>
+              <div style={{ height: '100%', width: `${pct}%`, background: 'var(--primary)', borderRadius: 2 }} />
+            </div>
+            <span style={{ fontSize: 11, color: '#9ca3af', flexShrink: 0 }}>{pct}%</span>
+          </div>
+        </td>
+      )
+    }
+
+    case 'description':
+      return <td style={{ ...cellStyle, color: activity.description ? '#374151' : '#9ca3af' }}>{activity.description || '—'}</td>
+
+    case 'notes':
+      return <td style={{ ...cellStyle, color: activity.notes ? '#374151' : '#9ca3af' }}>{activity.notes || '—'}</td>
+
+    case 'location':
+      return <td style={{ ...cellStyle, color: '#9ca3af' }}>—</td>
+
+    case 'url':
+      return <td style={{ ...cellStyle, color: '#9ca3af' }}>—</td>
+
+    case 'parent': {
+      const parentTitle = activity.parentActivityId ? activityTitleById.get(activity.parentActivityId) : null
+      return <td style={{ ...cellStyle, color: parentTitle ? '#374151' : '#9ca3af' }}>{parentTitle ?? '—'}</td>
+    }
+
+    case 'createdAt':
+      return <td style={{ ...cellStyle, color: '#9ca3af' }}>{formatTimestamp(activity.createdAt)}</td>
+
+    case 'updatedAt':
+      return <td style={{ ...cellStyle, color: '#9ca3af' }}>{formatTimestamp(activity.updatedAt)}</td>
+
+    default:
+      return <td style={cellStyle} />
+  }
+}
+
+// ── Unlock prompt (password-protected shares) ─────────────────────────────────
+
+function UnlockPrompt({ token, onUnlocked }: { token: string | undefined; onUnlocked: (viewToken: string) => void }) {
+  const unlock = useUnlockShare(token)
+  const [pw, setPw] = useState('')
+  const [showPw, setShowPw] = useState(false)
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!pw || unlock.isPending) return
+    unlock.mutate(pw, { onSuccess: onUnlocked })
+  }
+
+  const err = unlock.error as ApiError | null
+  const message = err
+    ? err.status === 429
+      ? 'Too many attempts. Please wait a minute and try again.'
+      : 'Incorrect password. Please try again.'
+    : null
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', background: '#ffffff', padding: 24, fontFamily: 'var(--font-sans)' }}>
+      <form onSubmit={submit} style={{ width: 'min(380px, 100%)', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, textAlign: 'center' }}>
+        <div style={{ width: 48, height: 48, borderRadius: 'var(--radius-lg)', background: 'hsl(30 87% 62% / 0.16)', color: 'var(--secondary)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <KeyRound size={22} strokeWidth={2} />
+        </div>
+        <div>
+          <h1 style={{ fontSize: 17, fontWeight: 700, color: 'var(--foreground)', margin: 0 }}>This view is password protected</h1>
+          <p style={{ fontSize: 13, color: 'var(--muted-foreground)', margin: '4px 0 0' }}>Enter the password you were given to open it.</p>
+        </div>
+        <div style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, background: 'var(--card)', border: '1px solid var(--input)', borderRadius: 'var(--radius-md)', padding: '0 10px' }}>
+          <KeyRound size={14} style={{ color: 'var(--muted-foreground)' }} strokeWidth={2} />
+          {/* eslint-disable-next-line jsx-a11y/no-autofocus */}
+          <input
+            autoFocus
+            value={pw}
+            onChange={e => setPw(e.target.value)}
+            type={showPw ? 'text' : 'password'}
+            placeholder="Password"
+            aria-label="Password"
+            style={{ flex: 1, fontSize: 14, color: 'var(--foreground)', padding: '10px 0', border: 'none', outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)' }}
+          />
+          <button type="button" onClick={() => setShowPw(v => !v)} aria-label={showPw ? 'Hide password' : 'Show password'} style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--muted-foreground)', display: 'flex', padding: 4 }}>
+            {showPw ? <EyeOff size={15} strokeWidth={2} /> : <Eye size={15} strokeWidth={2} />}
+          </button>
+        </div>
+        {message && <p style={{ fontSize: 12.5, color: 'var(--destructive)', margin: 0 }}>{message}</p>}
+        <button
+          type="submit"
+          disabled={!pw || unlock.isPending}
+          style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontSize: 14, fontWeight: 600, padding: '10px 0', borderRadius: 'var(--radius-md)', border: 'none', cursor: pw && !unlock.isPending ? 'pointer' : 'not-allowed', background: 'var(--primary)', color: 'var(--primary-foreground)', opacity: pw && !unlock.isPending ? 1 : 0.55 }}
+        >
+          {unlock.isPending ? <Loader2 size={15} className="animate-spin" /> : null}
+          {unlock.isPending ? 'Unlocking…' : 'Unlock view'}
+        </button>
+      </form>
+    </div>
+  )
+}
+
+// ── ShareViewPage ─────────────────────────────────────────────────────────────
+
+export default function ShareViewPage() {
+  const { token } = useParams<{ token: string }>()
+  const [viewToken, setViewToken] = useState<string | null>(null)
+  const { data: proj, isLoading, isError, error } = useShareProjection(token, viewToken)
+
+  // Force light mode synchronously before first paint, restoring the viewer's
+  // dark class on unmount.
+  useForceLightDocument()
+
+  // Re-apply on mount in case ThemeSync fires after useLayoutEffect.
+  useEffect(() => {
+    document.documentElement.classList.remove('dark')
+  }, [])
+
+  const vc = useMemo(
+    () => parseViewConfig(proj?.share.viewConfig ?? '{}'),
+    [proj?.share.viewConfig],
+  )
+
+  const { columns, resolvedGranularity } = useMemo(() => {
+    if (!proj) return { columns: [], resolvedGranularity: 'week' as TimeGranularity }
+    const start = new Date(proj.timeline.startDate)
+    const end = new Date(proj.timeline.endDate)
+    if (vc.granularity === 'auto') {
+      const gr = autoFitGranularity(start, end, window.innerWidth || 1000)
+      return { columns: generateColumns(start, end, gr), resolvedGranularity: gr }
+    }
+    return {
+      columns: generateColumns(start, end, vc.granularity as TimeGranularity),
+      resolvedGranularity: vc.granularity as TimeGranularity,
+    }
+  }, [proj, vc.granularity])
+
+  const todayIdx = useMemo(() => todayColumnPosition(columns), [columns])
+
+  const memberArray = useMemo<Member[]>(
+    () => (proj?.members ?? []).map((m, i) => toMember(m, i)),
+    [proj],
+  )
+
+  const memberById = useMemo(
+    () => Object.fromEntries(memberArray.map(m => [m.id, m])),
+    [memberArray],
+  )
+
+  const statusColorById = useMemo(() => {
+    const m = new Map<string, string>()
+    proj?.statuses.forEach((s: Status) => m.set(s.id, s.color))
+    return m
+  }, [proj])
+
+  // Build RichActivity array (mirrors GanttView's toRichActivity).
+  const richActivities = useMemo((): RichActivity[] => {
+    if (!proj || columns.length === 0) return []
+    const viewStart = columns[0].start
+    const viewEnd = columns[columns.length - 1].end
+
+    return proj.activities.flatMap((a: PublicActivity, i: number) => {
+      const start = new Date(a.startAt)
+      const end = new Date(a.endAt)
+      if (end < viewStart || start > viewEnd) return []
+
+      const clampedStart = start < viewStart ? viewStart : start
+      const clampedEnd = end > viewEnd ? viewEnd : end
+      const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns)
+
+      const members = (a.assignedMemberIds ?? [])
+        .map(id => memberById[id])
+        .filter((m): m is Member => Boolean(m))
+
+      let color: string
+      if (vc.colorBy === 'member') {
+        color = members[0]?.color ?? a.color ?? ACTIVITY_COLORS[i % ACTIVITY_COLORS.length]
+      } else if (vc.colorBy === 'status') {
+        color = statusColorById.get(a.statusId ?? '') ?? '#6b7280'
+      } else {
+        color = a.color ?? ACTIVITY_COLORS[i % ACTIVITY_COLORS.length]
+      }
+
+      return [{
+        id: a.id,
+        title: a.title,
+        startCol,
+        span,
+        color,
+        icon: a.icon ?? undefined,
+        members,
+        isChild: Boolean(a.parentActivityId),
+        depth: 0,
+        startAtMs: start.getTime(),
+        endAtMs: end.getTime(),
+        parentActivityId: a.parentActivityId ?? null,
+        primaryMemberId: members[0]?.id ?? null,
+        assignedMemberIds: a.assignedMemberIds ?? [],
+        statusId: a.statusId ?? null,
+      } satisfies RichActivity]
+    })
+  }, [proj, columns, memberById, statusColorById, vc.colorBy])
+
+  // Apply groupBy + sortBy via the same buildRows used by GanttView.
+  const rows = useMemo(
+    () => buildRows(
+      richActivities,
+      memberArray,
+      vc.groupBy,
+      vc.sortBy,
+      new Set<string>(),
+      new Set<string>(),
+      proj?.statuses,
+    ),
+    [richActivities, memberArray, vc.groupBy, vc.sortBy, proj?.statuses],
+  )
+
+  // ── List / Kanban shared lookups ──────────────────────────────────────────
+
+  const apiActivities = useMemo<ApiActivity[]>(
+    () => (proj?.activities ?? []).map(a => toApiActivity(a, proj?.timeline.id ?? '')),
+    [proj],
+  )
+
+  const publicMemberById = useMemo(() => {
+    const m = new Map<string, PublicMember>()
+    proj?.members.forEach(member => m.set(member.id, member))
+    return m
+  }, [proj])
+
+  const statusById = useMemo(() => {
+    const m = new Map<string, Status>()
+    proj?.statuses.forEach(s => m.set(s.id, s))
+    return m
+  }, [proj])
+
+  const tagById = useMemo(() => {
+    const m = new Map<string, Tag>()
+    proj?.tags.forEach(t => m.set(t.id, t))
+    return m
+  }, [proj])
+
+  const activityTitleById = useMemo(() => {
+    const m = new Map<string, string>()
+    apiActivities.forEach(a => m.set(a.id, a.title))
+    return m
+  }, [apiActivities])
+
+  // ── List view derived data ────────────────────────────────────────────────
+
+  const listVc = useMemo(
+    () => parseListViewConfig(proj?.share.viewConfig ?? '{}'),
+    [proj?.share.viewConfig],
+  )
+
+  const visibleListColumns = useMemo<ColMeta[]>(() => {
+    if (!listVc.columns) return COL_CATALOG.filter(c => c.defaultVisible)
+    const byId = new Map(COL_CATALOG.map(c => [c.id, c]))
+    return listVc.columns
+      .filter(c => c.visible)
+      .map(c => byId.get(c.id))
+      .filter((c): c is ColMeta => Boolean(c))
+  }, [listVc.columns])
+
+  const listRows = useMemo(() => {
+    if (!proj || proj.share.viewType !== 'list') return []
+    const sorted = sortListActivities(apiActivities, listVc.sortBy)
+    return buildListRows(sorted, listVc.groupBy, publicMemberById, statusById, proj.statuses, new Set<string>())
+  }, [proj, apiActivities, listVc.groupBy, listVc.sortBy, publicMemberById, statusById])
+
+  // ── Kanban view derived data ──────────────────────────────────────────────
+
+  const kanbanVc = useMemo(
+    () => parseKanbanViewConfig(proj?.share.viewConfig ?? '{}'),
+    [proj?.share.viewConfig],
+  )
+
+  const adaptedMembers = useMemo<TeamMemberWithUser[]>(
+    () => (proj?.members ?? []).map(toTeamMemberWithUser),
+    [proj],
+  )
+
+  const kanbanStatusColorById = useMemo(() => {
+    const m = new Map<string, string>()
+    proj?.statuses.forEach(s => m.set(s.id, s.color))
+    return m
+  }, [proj])
+
+  const kanbanColorMap = useMemo(() => {
+    const m = new Map<string, string>()
+    apiActivities.forEach((a, i) => m.set(a.id, resolveActivityColor(a, i, memberById, kanbanVc.colorBy, kanbanStatusColorById)))
+    return m
+  }, [apiActivities, memberById, kanbanVc.colorBy, kanbanStatusColorById])
+
+  const kanbanHierarchy = useMemo(
+    () => kanbanVc.showHierarchy ? buildHierarchyMaps(apiActivities) : { childrenByParentId: new Map<string, ApiActivity[]>(), childIds: new Set<string>() },
+    [apiActivities, kanbanVc.showHierarchy],
+  )
+
+  // When hierarchy is on, children get nested under their parent's card by
+  // KanbanColumn — they must be excluded here or they'd also appear as their
+  // own top-level card in whichever column their status places them (mirrors
+  // KanbanView's `columnActivities`).
+  const kanbanColumnActivities = useMemo(
+    () => kanbanVc.showHierarchy
+      ? apiActivities.filter(a => !kanbanHierarchy.childIds.has(a.id))
+      : apiActivities,
+    [apiActivities, kanbanVc.showHierarchy, kanbanHierarchy],
+  )
+
+  const kanbanCollapsedSet = useMemo(() => new Set(kanbanVc.collapsedColumns), [kanbanVc.collapsedColumns])
+
+  const kanbanColumnsResolved = useMemo(() => {
+    if (!proj || proj.share.viewType !== 'kanban') return []
+    return buildColumns(kanbanVc.groupBy, kanbanColumnActivities, adaptedMembers, proj.statuses, kanbanVc.sortBy)
+  }, [proj, kanbanVc.groupBy, kanbanVc.sortBy, kanbanColumnActivities, adaptedMembers])
+
+  const kanbanActivityById = useMemo(() => {
+    const m = new Map<string, ApiActivity>()
+    apiActivities.forEach(a => m.set(a.id, a))
+    return m
+  }, [apiActivities])
+
+  // ── Render ────────────────────────────────────────────────────────────────
+
+  if (isLoading) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', gap: 10, color: '#6b7280', fontFamily: 'var(--font-sans)' }}>
+        <Loader2 size={20} className="animate-spin" />
+        <span>Loading shared view…</span>
+      </div>
+    )
+  }
+
+  // A locked share surfaces as a PASSWORD_REQUIRED error until a valid view
+  // token is obtained — show the unlock prompt rather than a dead-end error.
+  if (isError && (error as ApiError | null)?.code === 'PASSWORD_REQUIRED') {
+    return <UnlockPrompt token={token} onUnlocked={setViewToken} />
+  }
+
+  if (isError) {
+    const apiErr = error as { status?: number } | null
+    const is404 = apiErr?.status === 404
+    const is410 = apiErr?.status === 410
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', gap: 12, color: '#374151', fontFamily: 'var(--font-sans)', padding: 24 }}>
+        <AlertCircle size={32} style={{ color: '#ef4444' }} />
+        <h1 style={{ fontSize: 18, fontWeight: 600, margin: 0 }}>
+          {is404 ? 'Share not found' : is410 ? 'This share has expired or been revoked' : 'Could not load this view'}
+        </h1>
+        <p style={{ fontSize: 13, color: '#6b7280', margin: 0, textAlign: 'center' }}>
+          {is404 || is410 ? 'The link may have been removed or may never have existed.' : 'Please try again later.'}
+        </p>
+      </div>
+    )
+  }
+
+  if (!proj) return null
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#ffffff' }}>
+      {/* Branding strip */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8, padding: '0 16px', height: 44,
+        background: '#f9fafb', borderBottom: '1px solid #e5e7eb', flexShrink: 0,
+        color: '#111827',
+      }}>
+        <Badge
+          identity={{ color: proj.timeline.color ?? '#6b7280', icon: proj.timeline.icon ?? '__none__' }}
+          name={proj.timeline.name}
+          size={24}
+        />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 0, lineHeight: 1.2 }}>
+          <span style={{ fontSize: 13, fontWeight: 700, color: '#111827' }}>{proj.timeline.name}</span>
+          <span style={{ fontSize: 11, color: '#6b7280' }}>{proj.teamName}{proj.share.name ? ` · ${proj.share.name}` : ''}</span>
+        </div>
+        <span style={{ marginLeft: 'auto', fontSize: 11, color: '#9ca3af' }}>
+          {proj.activities.length} {proj.activities.length === 1 ? 'activity' : 'activities'}
+        </span>
+      </div>
+
+      {/* View body — interactive=false for every view type */}
+      {proj.share.viewType === 'list' ? (
+        <PublicListTable
+          rows={listRows}
+          visibleColumns={visibleListColumns}
+          memberById={publicMemberById}
+          statusById={statusById}
+          tagById={tagById}
+          activityTitleById={activityTitleById}
+        />
+      ) : proj.share.viewType === 'kanban' ? (
+        <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+          <KanbanBoard
+            columns={kanbanColumnsResolved}
+            groupBy={kanbanVc.groupBy}
+            members={memberArray}
+            statusById={statusById}
+            tagById={tagById}
+            colorMap={kanbanColorMap}
+            cardFields={kanbanVc.cardFields}
+            suppressedFields={new Set()}
+            selectedActivityId={null}
+            matchedIds={new Set()}
+            activeMatchId={null}
+            hasQuery={false}
+            collapsedColumnIds={kanbanCollapsedSet}
+            onToggleCollapse={() => {}}
+            onCardClick={() => {}}
+            onAddInColumn={() => {}}
+            onDrop={() => {}}
+            activityById={kanbanActivityById}
+            activityTitleById={activityTitleById}
+            showHierarchy={kanbanVc.showHierarchy}
+            childrenByParentId={kanbanHierarchy.childrenByParentId}
+            collapsedParents={new Set()}
+            onToggleParent={() => {}}
+            interactive={false}
+          />
+        </div>
+      ) : (
+        <div style={{ flex: 1, minHeight: 0 }}>
+          <GanttGrid
+            rows={rows}
+            columns={columns}
+            todayIndex={todayIdx}
+            selectedActivityId={null}
+            onSelectActivity={() => {}}
+            resolvedGranularity={resolvedGranularity}
+            interactive={false}
+          />
+        </div>
+      )}
+    </div>
+  )
 }
 ````
 
@@ -61980,933 +62907,6 @@ export function buildCalendarHtml(
   })
 
   return `${htmlHeaderBlock(timelineName, filterLabel)}${sections.join('')}`
-}
-````
-
-## File: packages/web/src/pages/ShareViewPage.tsx
-````typescript
-/**
- * ShareViewPage — public read-only view for a share link.
- *
- * Mounted at /s/:token outside ProtectedRoute. Fetches the ShareProjection
- * from the public gateway, then renders the Gantt in interactive=false mode
- * with the frozen view config (groupBy, sortBy, colorBy, granularity) applied.
- * Theme is forced to light via useForceLightDocument — its useLayoutEffect runs
- * synchronously before paint so it beats any dark-class applied from
- * localStorage by useDarkMode.
- */
-
-import { useMemo, useEffect, useState, useCallback, useRef } from 'react'
-import { useParams } from 'react-router-dom'
-import { useShareProjection, useUnlockShare } from '@/hooks/useShares'
-import GanttGrid from '@/components/gantt/GanttGrid'
-import { buildRows, type RichActivity } from '@/components/gantt/GanttView'
-import {
-  buildListRows,
-  formatActivityDate,
-  formatTimestamp,
-  formatDuration,
-  COL_CATALOG,
-  type ListDisplayRow,
-  type ColMeta,
-} from '@/components/list/ListView'
-import type { ListGroupBy, ListSortBy, ListColorBy } from '@/components/list/ListToolbar'
-import KanbanBoard from '@/components/kanban/KanbanBoard'
-import {
-  buildColumns,
-  buildHierarchyMaps,
-  DEFAULT_CARD_FIELDS,
-  type KanbanCardField,
-  type KanbanGroupBy,
-  type KanbanSortBy,
-} from '@/components/kanban/kanbanColumns'
-import { resolveActivityColor } from '@/lib/activityColor'
-import { resolveColorHex } from '@/components/identity/identity-constants'
-import { MEMBER_COLORS, ACTIVITY_COLORS } from '@/types'
-import {
-  generateColumns,
-  positionInColumns,
-  todayColumnPosition,
-  autoFitGranularity,
-} from '@/components/gantt/granularity'
-import { ApiError } from '@/lib/api'
-import { useForceLightDocument } from '@/hooks/useForceLightDocument'
-import type { components } from '@draba/shared'
-import type { GroupBy, SortBy, ColorBy, TimeGranularity } from '@/components/gantt/GanttToolbar'
-import type { Member } from '@/types'
-import { AlertCircle, Loader2, KeyRound, Eye, EyeOff } from 'lucide-react'
-import { Badge } from '@/components/identity/Badge'
-
-type PublicActivity = components['schemas']['PublicActivity']
-type PublicMember = components['schemas']['PublicMember']
-type Status = components['schemas']['Status']
-type Tag = components['schemas']['Tag']
-type ApiActivity = components['schemas']['Activity']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-
-// ── View config parsing ───────────────────────────────────────────────────────
-
-interface ParsedViewConfig {
-  groupBy: GroupBy
-  sortBy: SortBy
-  colorBy: ColorBy
-  granularity: TimeGranularity | 'auto'
-}
-
-function parseViewConfig(raw: string): ParsedViewConfig {
-  try {
-    const c = JSON.parse(raw) as Partial<ParsedViewConfig>
-    return {
-      groupBy: (c.groupBy as GroupBy) ?? 'none',
-      sortBy: (c.sortBy as SortBy) ?? 'startDate',
-      colorBy: (c.colorBy as ColorBy) ?? 'activity',
-      granularity: c.granularity ?? 'auto',
-    }
-  } catch {
-    return { groupBy: 'none', sortBy: 'startDate', colorBy: 'activity', granularity: 'auto' }
-  }
-}
-
-interface ParsedListViewConfig {
-  groupBy: ListGroupBy
-  sortBy: ListSortBy
-  colorBy: ListColorBy
-  columns: { id: string; visible: boolean }[] | null
-}
-
-function parseListViewConfig(raw: string): ParsedListViewConfig {
-  try {
-    const c = JSON.parse(raw) as Partial<ParsedListViewConfig>
-    return {
-      groupBy: (c.groupBy as ListGroupBy) ?? 'none',
-      sortBy: (c.sortBy as ListSortBy) ?? 'startDate',
-      colorBy: (c.colorBy as ListColorBy) ?? 'activity',
-      columns: Array.isArray(c.columns) ? c.columns : null,
-    }
-  } catch {
-    return { groupBy: 'none', sortBy: 'startDate', colorBy: 'activity', columns: null }
-  }
-}
-
-interface ParsedKanbanViewConfig {
-  groupBy: KanbanGroupBy
-  sortBy: KanbanSortBy
-  colorBy: ColorBy
-  cardFields: KanbanCardField[]
-  showHierarchy: boolean
-  collapsedColumns: string[]
-}
-
-function parseKanbanViewConfig(raw: string): ParsedKanbanViewConfig {
-  try {
-    const c = JSON.parse(raw) as Partial<ParsedKanbanViewConfig>
-    return {
-      groupBy: (c.groupBy as KanbanGroupBy) ?? 'status',
-      sortBy: (c.sortBy as KanbanSortBy) ?? 'startDate',
-      colorBy: (c.colorBy as ColorBy) ?? 'activity',
-      cardFields: Array.isArray(c.cardFields) && c.cardFields.length > 0 ? c.cardFields as KanbanCardField[] : DEFAULT_CARD_FIELDS,
-      showHierarchy: c.showHierarchy ?? false,
-      collapsedColumns: Array.isArray(c.collapsedColumns) ? c.collapsedColumns as string[] : [],
-    }
-  } catch {
-    return { groupBy: 'status', sortBy: 'startDate', colorBy: 'activity', cardFields: DEFAULT_CARD_FIELDS, showHierarchy: false, collapsedColumns: [] }
-  }
-}
-
-// ── Adapters: projection types → full API shapes ─────────────────────────────
-//
-// The List and Kanban renderers are built around the full Activity / TeamMember
-// shapes (so they can be reused as-is from the authenticated app). The public
-// projection only carries the fields a share is allowed to expose, so these
-// adapters fill the remaining required-but-irrelevant fields with placeholder
-// defaults — mirroring the `optimisticActivity` precedent in ListView.
-
-function toApiActivity(a: PublicActivity, timelineId: string): ApiActivity {
-  return {
-    id: a.id,
-    timelineId,
-    title: a.title,
-    description: a.description ?? null,
-    notes: a.notes ?? null,
-    icon: a.icon ?? null,
-    color: a.color ?? null,
-    startAt: a.startAt,
-    endAt: a.endAt,
-    allDay: a.allDay,
-    statusId: a.statusId ?? null,
-    parentActivityId: a.parentActivityId ?? null,
-    percentComplete: a.percentComplete ?? null,
-    location: null,
-    url: null,
-    rrule: null,
-    caldavUid: null,
-    googleEventId: null,
-    createdBy: '',
-    createdAt: a.startAt,
-    updatedAt: a.startAt,
-    archivedAt: null,
-    assignedMemberIds: a.assignedMemberIds ?? [],
-    tagIds: a.tagIds ?? [],
-  }
-}
-
-function toTeamMemberWithUser(m: PublicMember): TeamMemberWithUser {
-  return {
-    id: m.id,
-    teamId: '',
-    userId: null,
-    role: 'member',
-    color: m.color ?? null,
-    icon: m.icon ?? null,
-    joinedAt: '',
-    archivedAt: null,
-    email: '',
-    displayName: m.displayName,
-    avatarUrl: null,
-  }
-}
-
-function sortListActivities(activities: ApiActivity[], sortBy: ListSortBy): ApiActivity[] {
-  const sorted = [...activities]
-  sorted.sort((a, b) => {
-    if (sortBy === 'startDate') return (a.startAt ?? '').localeCompare(b.startAt ?? '')
-    if (sortBy === 'endDate') return (a.endAt ?? '').localeCompare(b.endAt ?? '')
-    if (sortBy === 'title') return a.title.localeCompare(b.title)
-    if (sortBy === 'status') return (a.statusId ?? '').localeCompare(b.statusId ?? '')
-    if (sortBy === 'progress') return (b.percentComplete ?? 0) - (a.percentComplete ?? 0)
-    return 0
-  })
-  return sorted
-}
-
-// ── Data helpers ──────────────────────────────────────────────────────────────
-
-function initialsFrom(name: string): string {
-  return name.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase()
-}
-
-function toMember(m: PublicMember, index: number): Member {
-  return {
-    id: m.id,
-    name: m.displayName,
-    initials: initialsFrom(m.displayName),
-    color: resolveColorHex(m.color) || MEMBER_COLORS[index % MEMBER_COLORS.length],
-  }
-}
-
-// ── Public List table (read-only) ────────────────────────────────────────────
-//
-// ListView itself is a 2600-line data-fetching container with deep editing/
-// drag/multiselect entanglement — unsuitable for the bypass-the-container
-// pattern. Instead this lightweight renderer reuses ListView's pure helpers
-// (buildListRows, COL_CATALOG, date formatters) to mirror its visuals without
-// any interactivity: no clicks, editing, drag, context menus, or selection.
-
-interface PublicListTableProps {
-  rows: ListDisplayRow[]
-  visibleColumns: ColMeta[]
-  memberById: Map<string, PublicMember>
-  statusById: Map<string, Status>
-  tagById: Map<string, Tag>
-  activityTitleById: Map<string, string>
-}
-
-/**
- * Drag handle on a column's right edge — lets the viewer resize columns to
- * taste (a pure display preference; it never touches activity data, so it's
- * fair game in a read-only viewer). Mirrors the visual idiom of ListView's
- * SortableColHeader resize handle, minus the TanStack plumbing.
- */
-function ColumnResizeHandle({ colId, width, onResize }: {
-  colId: string
-  width: number
-  onResize: (colId: string, width: number) => void
-}) {
-  const [isResizing, setIsResizing] = useState(false)
-  const dragStart = useRef<{ x: number; width: number } | null>(null)
-
-  const onMouseDown = (e: React.MouseEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
-    dragStart.current = { x: e.clientX, width }
-    setIsResizing(true)
-
-    const onMouseMove = (ev: MouseEvent) => {
-      if (!dragStart.current) return
-      const next = Math.max(40, dragStart.current.width + (ev.clientX - dragStart.current.x))
-      onResize(colId, next)
-    }
-    const onMouseUp = () => {
-      dragStart.current = null
-      setIsResizing(false)
-      window.removeEventListener('mousemove', onMouseMove)
-      window.removeEventListener('mouseup', onMouseUp)
-    }
-    window.addEventListener('mousemove', onMouseMove)
-    window.addEventListener('mouseup', onMouseUp)
-  }
-
-  return (
-    <div
-      onMouseDown={onMouseDown}
-      style={{
-        position: 'absolute', right: 0, top: 0, height: '100%', width: 4,
-        cursor: 'col-resize', background: isResizing ? 'var(--primary)' : 'transparent', zIndex: 1,
-      }}
-      onMouseEnter={e => { if (!isResizing) (e.currentTarget as HTMLElement).style.background = '#d1d5db' }}
-      onMouseLeave={e => { if (!isResizing) (e.currentTarget as HTMLElement).style.background = 'transparent' }}
-    />
-  )
-}
-
-export function PublicListTable({ rows, visibleColumns, memberById, statusById, tagById, activityTitleById }: PublicListTableProps) {
-  const [widths, setWidths] = useState<Record<string, number>>(
-    () => Object.fromEntries(visibleColumns.map(c => [c.id, c.defaultWidth])),
-  )
-
-  // Re-seed widths when the visible-column set changes (e.g. share swap).
-  useEffect(() => {
-    setWidths(prev => {
-      const next: Record<string, number> = {}
-      let changed = false
-      for (const c of visibleColumns) {
-        next[c.id] = prev[c.id] ?? c.defaultWidth
-        if (next[c.id] !== prev[c.id]) changed = true
-      }
-      if (Object.keys(prev).length !== Object.keys(next).length) changed = true
-      return changed ? next : prev
-    })
-  }, [visibleColumns])
-
-  const handleResize = useCallback((colId: string, width: number) => {
-    setWidths(w => ({ ...w, [colId]: width }))
-  }, [])
-
-  const rowHoverProps = {
-    onMouseEnter: (e: React.MouseEvent<HTMLTableRowElement>) => { e.currentTarget.style.background = '#f9fafb' },
-    onMouseLeave: (e: React.MouseEvent<HTMLTableRowElement>) => { e.currentTarget.style.background = 'transparent' },
-  }
-
-  return (
-    <div data-export-role="list-table-wrap" style={{ flex: 1, overflow: 'auto', background: '#ffffff' }}>
-      <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, tableLayout: 'fixed' }}>
-        <colgroup>
-          {visibleColumns.map(c => <col key={c.id} style={{ width: widths[c.id] ?? c.defaultWidth }} />)}
-        </colgroup>
-        <thead>
-          <tr style={{ height: 36 }}>
-            {visibleColumns.map(c => (
-              <th key={c.id} style={{
-                position: 'sticky', top: 0, zIndex: 2, background: '#f9fafb',
-                borderBottom: '2px solid #e5e7eb', textAlign: 'left',
-                fontSize: 11, fontWeight: 600, color: '#6b7280', textTransform: 'uppercase',
-                letterSpacing: '0.04em', padding: '0 8px', overflow: 'visible', whiteSpace: 'nowrap',
-              }}>
-                <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.label}</span>
-                {c.id !== 'colorBar' && (
-                  <ColumnResizeHandle colId={c.id} width={widths[c.id] ?? c.defaultWidth} onResize={handleResize} />
-                )}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.length === 0 && (
-            <tr>
-              <td colSpan={visibleColumns.length} style={{ textAlign: 'center', padding: '48px 0', color: '#9ca3af', fontSize: 13 }}>
-                No activities to show.
-              </td>
-            </tr>
-          )}
-          {rows.map((row, i) => {
-            if (row.kind === 'group') {
-              return (
-                <tr key={`group-${row.key}`}>
-                  <td colSpan={visibleColumns.length} style={{
-                    padding: '4px 8px', background: '#f3f4f6', borderBottom: '1px solid #e5e7eb',
-                    borderTop: i > 0 ? '1px solid #e5e7eb' : undefined, fontSize: 11, fontWeight: 600,
-                    color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.05em',
-                  }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      {row.memberColors && row.memberColors.length > 0 && (
-                        <div style={{ display: 'flex', flexShrink: 0 }}>
-                          {row.memberColors.map((c, j) => (
-                            <div key={j} style={{ width: 9, height: 9, borderRadius: '50%', background: c, marginLeft: j === 0 ? 0 : -3, outline: '1.5px solid #f3f4f6' }} />
-                          ))}
-                        </div>
-                      )}
-                      {row.label}
-                      <span style={{ fontWeight: 400, opacity: 0.6 }}>({row.count})</span>
-                    </div>
-                  </td>
-                </tr>
-              )
-            }
-
-            return (
-              <tr key={row.activity.id} style={{ height: 36 }} {...rowHoverProps}>
-                {visibleColumns.map(col => (
-                  <PublicListCell
-                    key={col.id}
-                    colId={col.id}
-                    activity={row.activity}
-                    depth={row.depth}
-                    memberById={memberById}
-                    statusById={statusById}
-                    tagById={tagById}
-                    activityTitleById={activityTitleById}
-                  />
-                ))}
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
-    </div>
-  )
-}
-
-function PublicListCell({ colId, activity, depth, memberById, statusById, tagById, activityTitleById }: {
-  colId: string
-  activity: ApiActivity
-  depth: number
-  memberById: Map<string, PublicMember>
-  statusById: Map<string, Status>
-  tagById: Map<string, Tag>
-  activityTitleById: Map<string, string>
-}) {
-  const cellStyle: React.CSSProperties = {
-    padding: '0 8px',
-    borderBottom: '1px solid #f3f4f6',
-    fontSize: 12,
-    color: '#111827',
-    overflow: 'hidden',
-    whiteSpace: 'nowrap',
-    textOverflow: 'ellipsis',
-    verticalAlign: 'middle',
-  }
-
-  switch (colId) {
-    case 'colorBar':
-      return <td style={{ ...cellStyle, padding: 0 }}><div style={{ width: 4, height: 24, borderRadius: 2, background: resolveColorHex(activity.color ?? null) ?? '#9ca3af', marginLeft: 6 }} /></td>
-
-    case 'identity':
-      return (
-        <td style={{ ...cellStyle, textAlign: 'center' }}>
-          <Badge identity={{ color: activity.color ?? '#288C9B', icon: activity.icon ?? '__none__' }} name={activity.title} shape="square" size={28} />
-        </td>
-      )
-
-    case 'title':
-      return (
-        <td style={cellStyle}>
-          <span style={{ paddingLeft: depth * 20, fontWeight: 500 }}>{activity.title}</span>
-        </td>
-      )
-
-    case 'startAt':
-      return <td style={cellStyle}>{formatActivityDate(activity.startAt)}</td>
-
-    case 'endAt':
-      return <td style={cellStyle}>{formatActivityDate(activity.endAt)}</td>
-
-    case 'duration':
-      return <td style={{ ...cellStyle, color: '#6b7280' }}>{formatDuration(activity.startAt, activity.endAt)}</td>
-
-    case 'status': {
-      const status = activity.statusId ? statusById.get(activity.statusId) : null
-      const hex = status ? resolveColorHex(status.color ?? null) ?? '#888888' : null
-      return (
-        <td style={cellStyle}>
-          {status ? (
-            <span style={{
-              display: 'inline-flex', alignItems: 'center', gap: 5, padding: '2px 8px', borderRadius: 4,
-              fontSize: 11, fontWeight: 500, background: `${hex}26`, color: hex ?? '#111827', border: `1px solid ${hex}66`,
-            }}>
-              <span style={{ width: 7, height: 7, borderRadius: '50%', background: hex ?? '#888', flexShrink: 0 }} />
-              {status.name}
-            </span>
-          ) : <span style={{ color: '#9ca3af' }}>—</span>}
-        </td>
-      )
-    }
-
-    case 'assignees': {
-      const ids = activity.assignedMemberIds ?? []
-      const members = ids.map(id => memberById.get(id)).filter((m): m is PublicMember => Boolean(m))
-      return (
-        <td style={cellStyle}>
-          <div style={{ display: 'flex', alignItems: 'center', overflow: 'hidden' }}>
-            {members.length === 0 && <span style={{ color: '#9ca3af' }}>—</span>}
-            {members.slice(0, 4).map((m, i) => (
-              <div key={m.id} title={m.displayName} style={{ marginLeft: i === 0 ? 0 : -6 }}>
-                <Badge identity={{ color: m.color ?? '#288C9B', icon: m.icon ?? '__name_2__' }} name={m.displayName} shape="circle" size={22} />
-              </div>
-            ))}
-            {members.length > 4 && <span style={{ fontSize: 10, color: '#9ca3af', marginLeft: 4 }}>+{members.length - 4}</span>}
-          </div>
-        </td>
-      )
-    }
-
-    case 'tags': {
-      const tags = (activity.tagIds ?? []).map(id => tagById.get(id)).filter((t): t is Tag => Boolean(t))
-      return (
-        <td style={cellStyle}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden' }}>
-            {tags.length === 0 && <span style={{ color: '#9ca3af' }}>—</span>}
-            {tags.slice(0, 3).map(t => {
-              const hex = resolveColorHex(t.color ?? null)
-              return (
-                <span key={t.id} style={{
-                  padding: '1px 6px', borderRadius: 4, fontSize: 10, whiteSpace: 'nowrap',
-                  background: hex ? `${hex}26` : '#f3f4f6', color: hex ?? '#111827', border: `1px solid ${hex ?? '#e5e7eb'}66`,
-                }}>
-                  {t.name}
-                </span>
-              )
-            })}
-            {tags.length > 3 && <span style={{ fontSize: 10, color: '#9ca3af' }}>+{tags.length - 3}</span>}
-          </div>
-        </td>
-      )
-    }
-
-    case 'progress': {
-      const pct = activity.percentComplete ?? 0
-      return (
-        <td style={cellStyle}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <div style={{ flex: 1, height: 4, background: '#e5e7eb', borderRadius: 2, overflow: 'hidden' }}>
-              <div style={{ height: '100%', width: `${pct}%`, background: 'var(--primary)', borderRadius: 2 }} />
-            </div>
-            <span style={{ fontSize: 11, color: '#9ca3af', flexShrink: 0 }}>{pct}%</span>
-          </div>
-        </td>
-      )
-    }
-
-    case 'description':
-      return <td style={{ ...cellStyle, color: activity.description ? '#374151' : '#9ca3af' }}>{activity.description || '—'}</td>
-
-    case 'notes':
-      return <td style={{ ...cellStyle, color: activity.notes ? '#374151' : '#9ca3af' }}>{activity.notes || '—'}</td>
-
-    case 'location':
-      return <td style={{ ...cellStyle, color: '#9ca3af' }}>—</td>
-
-    case 'url':
-      return <td style={{ ...cellStyle, color: '#9ca3af' }}>—</td>
-
-    case 'parent': {
-      const parentTitle = activity.parentActivityId ? activityTitleById.get(activity.parentActivityId) : null
-      return <td style={{ ...cellStyle, color: parentTitle ? '#374151' : '#9ca3af' }}>{parentTitle ?? '—'}</td>
-    }
-
-    case 'createdAt':
-      return <td style={{ ...cellStyle, color: '#9ca3af' }}>{formatTimestamp(activity.createdAt)}</td>
-
-    case 'updatedAt':
-      return <td style={{ ...cellStyle, color: '#9ca3af' }}>{formatTimestamp(activity.updatedAt)}</td>
-
-    default:
-      return <td style={cellStyle} />
-  }
-}
-
-// ── Unlock prompt (password-protected shares) ─────────────────────────────────
-
-function UnlockPrompt({ token, onUnlocked }: { token: string | undefined; onUnlocked: (viewToken: string) => void }) {
-  const unlock = useUnlockShare(token)
-  const [pw, setPw] = useState('')
-  const [showPw, setShowPw] = useState(false)
-
-  const submit = (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!pw || unlock.isPending) return
-    unlock.mutate(pw, { onSuccess: onUnlocked })
-  }
-
-  const err = unlock.error as ApiError | null
-  const message = err
-    ? err.status === 429
-      ? 'Too many attempts. Please wait a minute and try again.'
-      : 'Incorrect password. Please try again.'
-    : null
-
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', background: '#ffffff', padding: 24, fontFamily: 'var(--font-sans)' }}>
-      <form onSubmit={submit} style={{ width: 'min(380px, 100%)', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, textAlign: 'center' }}>
-        <div style={{ width: 48, height: 48, borderRadius: 'var(--radius-lg)', background: 'hsl(30 87% 62% / 0.16)', color: 'var(--secondary)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <KeyRound size={22} strokeWidth={2} />
-        </div>
-        <div>
-          <h1 style={{ fontSize: 17, fontWeight: 700, color: 'var(--foreground)', margin: 0 }}>This view is password protected</h1>
-          <p style={{ fontSize: 13, color: 'var(--muted-foreground)', margin: '4px 0 0' }}>Enter the password you were given to open it.</p>
-        </div>
-        <div style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, background: 'var(--card)', border: '1px solid var(--input)', borderRadius: 'var(--radius-md)', padding: '0 10px' }}>
-          <KeyRound size={14} style={{ color: 'var(--muted-foreground)' }} strokeWidth={2} />
-          {/* eslint-disable-next-line jsx-a11y/no-autofocus */}
-          <input
-            autoFocus
-            value={pw}
-            onChange={e => setPw(e.target.value)}
-            type={showPw ? 'text' : 'password'}
-            placeholder="Password"
-            aria-label="Password"
-            style={{ flex: 1, fontSize: 14, color: 'var(--foreground)', padding: '10px 0', border: 'none', outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)' }}
-          />
-          <button type="button" onClick={() => setShowPw(v => !v)} aria-label={showPw ? 'Hide password' : 'Show password'} style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--muted-foreground)', display: 'flex', padding: 4 }}>
-            {showPw ? <EyeOff size={15} strokeWidth={2} /> : <Eye size={15} strokeWidth={2} />}
-          </button>
-        </div>
-        {message && <p style={{ fontSize: 12.5, color: 'var(--destructive)', margin: 0 }}>{message}</p>}
-        <button
-          type="submit"
-          disabled={!pw || unlock.isPending}
-          style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontSize: 14, fontWeight: 600, padding: '10px 0', borderRadius: 'var(--radius-md)', border: 'none', cursor: pw && !unlock.isPending ? 'pointer' : 'not-allowed', background: 'var(--primary)', color: 'var(--primary-foreground)', opacity: pw && !unlock.isPending ? 1 : 0.55 }}
-        >
-          {unlock.isPending ? <Loader2 size={15} className="animate-spin" /> : null}
-          {unlock.isPending ? 'Unlocking…' : 'Unlock view'}
-        </button>
-      </form>
-    </div>
-  )
-}
-
-// ── ShareViewPage ─────────────────────────────────────────────────────────────
-
-export default function ShareViewPage() {
-  const { token } = useParams<{ token: string }>()
-  const [viewToken, setViewToken] = useState<string | null>(null)
-  const { data: proj, isLoading, isError, error } = useShareProjection(token, viewToken)
-
-  // Force light mode synchronously before first paint, restoring the viewer's
-  // dark class on unmount.
-  useForceLightDocument()
-
-  // Re-apply on mount in case ThemeSync fires after useLayoutEffect.
-  useEffect(() => {
-    document.documentElement.classList.remove('dark')
-  }, [])
-
-  const vc = useMemo(
-    () => parseViewConfig(proj?.share.viewConfig ?? '{}'),
-    [proj?.share.viewConfig],
-  )
-
-  const { columns, resolvedGranularity } = useMemo(() => {
-    if (!proj) return { columns: [], resolvedGranularity: 'week' as TimeGranularity }
-    const start = new Date(proj.timeline.startDate)
-    const end = new Date(proj.timeline.endDate)
-    if (vc.granularity === 'auto') {
-      const gr = autoFitGranularity(start, end, window.innerWidth || 1000)
-      return { columns: generateColumns(start, end, gr), resolvedGranularity: gr }
-    }
-    return {
-      columns: generateColumns(start, end, vc.granularity as TimeGranularity),
-      resolvedGranularity: vc.granularity as TimeGranularity,
-    }
-  }, [proj, vc.granularity])
-
-  const todayIdx = useMemo(() => todayColumnPosition(columns), [columns])
-
-  const memberArray = useMemo<Member[]>(
-    () => (proj?.members ?? []).map((m, i) => toMember(m, i)),
-    [proj],
-  )
-
-  const memberById = useMemo(
-    () => Object.fromEntries(memberArray.map(m => [m.id, m])),
-    [memberArray],
-  )
-
-  const statusColorById = useMemo(() => {
-    const m = new Map<string, string>()
-    proj?.statuses.forEach((s: Status) => m.set(s.id, s.color))
-    return m
-  }, [proj])
-
-  // Build RichActivity array (mirrors GanttView's toRichActivity).
-  const richActivities = useMemo((): RichActivity[] => {
-    if (!proj || columns.length === 0) return []
-    const viewStart = columns[0].start
-    const viewEnd = columns[columns.length - 1].end
-
-    return proj.activities.flatMap((a: PublicActivity, i: number) => {
-      const start = new Date(a.startAt)
-      const end = new Date(a.endAt)
-      if (end < viewStart || start > viewEnd) return []
-
-      const clampedStart = start < viewStart ? viewStart : start
-      const clampedEnd = end > viewEnd ? viewEnd : end
-      const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns)
-
-      const members = (a.assignedMemberIds ?? [])
-        .map(id => memberById[id])
-        .filter((m): m is Member => Boolean(m))
-
-      let color: string
-      if (vc.colorBy === 'member') {
-        color = members[0]?.color ?? a.color ?? ACTIVITY_COLORS[i % ACTIVITY_COLORS.length]
-      } else if (vc.colorBy === 'status') {
-        color = statusColorById.get(a.statusId ?? '') ?? '#6b7280'
-      } else {
-        color = a.color ?? ACTIVITY_COLORS[i % ACTIVITY_COLORS.length]
-      }
-
-      return [{
-        id: a.id,
-        title: a.title,
-        startCol,
-        span,
-        color,
-        icon: a.icon ?? undefined,
-        members,
-        isChild: Boolean(a.parentActivityId),
-        depth: 0,
-        startAtMs: start.getTime(),
-        endAtMs: end.getTime(),
-        parentActivityId: a.parentActivityId ?? null,
-        primaryMemberId: members[0]?.id ?? null,
-        assignedMemberIds: a.assignedMemberIds ?? [],
-        statusId: a.statusId ?? null,
-      } satisfies RichActivity]
-    })
-  }, [proj, columns, memberById, statusColorById, vc.colorBy])
-
-  // Apply groupBy + sortBy via the same buildRows used by GanttView.
-  const rows = useMemo(
-    () => buildRows(
-      richActivities,
-      memberArray,
-      vc.groupBy,
-      vc.sortBy,
-      new Set<string>(),
-      new Set<string>(),
-      proj?.statuses,
-    ),
-    [richActivities, memberArray, vc.groupBy, vc.sortBy, proj?.statuses],
-  )
-
-  // ── List / Kanban shared lookups ──────────────────────────────────────────
-
-  const apiActivities = useMemo<ApiActivity[]>(
-    () => (proj?.activities ?? []).map(a => toApiActivity(a, proj?.timeline.id ?? '')),
-    [proj],
-  )
-
-  const publicMemberById = useMemo(() => {
-    const m = new Map<string, PublicMember>()
-    proj?.members.forEach(member => m.set(member.id, member))
-    return m
-  }, [proj])
-
-  const statusById = useMemo(() => {
-    const m = new Map<string, Status>()
-    proj?.statuses.forEach(s => m.set(s.id, s))
-    return m
-  }, [proj])
-
-  const tagById = useMemo(() => {
-    const m = new Map<string, Tag>()
-    proj?.tags.forEach(t => m.set(t.id, t))
-    return m
-  }, [proj])
-
-  const activityTitleById = useMemo(() => {
-    const m = new Map<string, string>()
-    apiActivities.forEach(a => m.set(a.id, a.title))
-    return m
-  }, [apiActivities])
-
-  // ── List view derived data ────────────────────────────────────────────────
-
-  const listVc = useMemo(
-    () => parseListViewConfig(proj?.share.viewConfig ?? '{}'),
-    [proj?.share.viewConfig],
-  )
-
-  const visibleListColumns = useMemo<ColMeta[]>(() => {
-    if (!listVc.columns) return COL_CATALOG.filter(c => c.defaultVisible)
-    const byId = new Map(COL_CATALOG.map(c => [c.id, c]))
-    return listVc.columns
-      .filter(c => c.visible)
-      .map(c => byId.get(c.id))
-      .filter((c): c is ColMeta => Boolean(c))
-  }, [listVc.columns])
-
-  const listRows = useMemo(() => {
-    if (!proj || proj.share.viewType !== 'list') return []
-    const sorted = sortListActivities(apiActivities, listVc.sortBy)
-    return buildListRows(sorted, listVc.groupBy, publicMemberById, statusById, proj.statuses, new Set<string>())
-  }, [proj, apiActivities, listVc.groupBy, listVc.sortBy, publicMemberById, statusById])
-
-  // ── Kanban view derived data ──────────────────────────────────────────────
-
-  const kanbanVc = useMemo(
-    () => parseKanbanViewConfig(proj?.share.viewConfig ?? '{}'),
-    [proj?.share.viewConfig],
-  )
-
-  const adaptedMembers = useMemo<TeamMemberWithUser[]>(
-    () => (proj?.members ?? []).map(toTeamMemberWithUser),
-    [proj],
-  )
-
-  const kanbanStatusColorById = useMemo(() => {
-    const m = new Map<string, string>()
-    proj?.statuses.forEach(s => m.set(s.id, s.color))
-    return m
-  }, [proj])
-
-  const kanbanColorMap = useMemo(() => {
-    const m = new Map<string, string>()
-    apiActivities.forEach((a, i) => m.set(a.id, resolveActivityColor(a, i, memberById, kanbanVc.colorBy, kanbanStatusColorById)))
-    return m
-  }, [apiActivities, memberById, kanbanVc.colorBy, kanbanStatusColorById])
-
-  const kanbanHierarchy = useMemo(
-    () => kanbanVc.showHierarchy ? buildHierarchyMaps(apiActivities) : { childrenByParentId: new Map<string, ApiActivity[]>(), childIds: new Set<string>() },
-    [apiActivities, kanbanVc.showHierarchy],
-  )
-
-  // When hierarchy is on, children get nested under their parent's card by
-  // KanbanColumn — they must be excluded here or they'd also appear as their
-  // own top-level card in whichever column their status places them (mirrors
-  // KanbanView's `columnActivities`).
-  const kanbanColumnActivities = useMemo(
-    () => kanbanVc.showHierarchy
-      ? apiActivities.filter(a => !kanbanHierarchy.childIds.has(a.id))
-      : apiActivities,
-    [apiActivities, kanbanVc.showHierarchy, kanbanHierarchy],
-  )
-
-  const kanbanCollapsedSet = useMemo(() => new Set(kanbanVc.collapsedColumns), [kanbanVc.collapsedColumns])
-
-  const kanbanColumnsResolved = useMemo(() => {
-    if (!proj || proj.share.viewType !== 'kanban') return []
-    return buildColumns(kanbanVc.groupBy, kanbanColumnActivities, adaptedMembers, proj.statuses, kanbanVc.sortBy)
-  }, [proj, kanbanVc.groupBy, kanbanVc.sortBy, kanbanColumnActivities, adaptedMembers])
-
-  const kanbanActivityById = useMemo(() => {
-    const m = new Map<string, ApiActivity>()
-    apiActivities.forEach(a => m.set(a.id, a))
-    return m
-  }, [apiActivities])
-
-  // ── Render ────────────────────────────────────────────────────────────────
-
-  if (isLoading) {
-    return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', gap: 10, color: '#6b7280', fontFamily: 'var(--font-sans)' }}>
-        <Loader2 size={20} className="animate-spin" />
-        <span>Loading shared view…</span>
-      </div>
-    )
-  }
-
-  // A locked share surfaces as a PASSWORD_REQUIRED error until a valid view
-  // token is obtained — show the unlock prompt rather than a dead-end error.
-  if (isError && (error as ApiError | null)?.code === 'PASSWORD_REQUIRED') {
-    return <UnlockPrompt token={token} onUnlocked={setViewToken} />
-  }
-
-  if (isError) {
-    const apiErr = error as { status?: number } | null
-    const is404 = apiErr?.status === 404
-    const is410 = apiErr?.status === 410
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', gap: 12, color: '#374151', fontFamily: 'var(--font-sans)', padding: 24 }}>
-        <AlertCircle size={32} style={{ color: '#ef4444' }} />
-        <h1 style={{ fontSize: 18, fontWeight: 600, margin: 0 }}>
-          {is404 ? 'Share not found' : is410 ? 'This share has expired or been revoked' : 'Could not load this view'}
-        </h1>
-        <p style={{ fontSize: 13, color: '#6b7280', margin: 0, textAlign: 'center' }}>
-          {is404 || is410 ? 'The link may have been removed or may never have existed.' : 'Please try again later.'}
-        </p>
-      </div>
-    )
-  }
-
-  if (!proj) return null
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#ffffff' }}>
-      {/* Branding strip */}
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 8, padding: '0 16px', height: 44,
-        background: '#f9fafb', borderBottom: '1px solid #e5e7eb', flexShrink: 0,
-        color: '#111827',
-      }}>
-        <Badge
-          identity={{ color: proj.timeline.color ?? '#6b7280', icon: proj.timeline.icon ?? '__none__' }}
-          name={proj.timeline.name}
-          size={24}
-        />
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 0, lineHeight: 1.2 }}>
-          <span style={{ fontSize: 13, fontWeight: 700, color: '#111827' }}>{proj.timeline.name}</span>
-          <span style={{ fontSize: 11, color: '#6b7280' }}>{proj.teamName}{proj.share.name ? ` · ${proj.share.name}` : ''}</span>
-        </div>
-        <span style={{ marginLeft: 'auto', fontSize: 11, color: '#9ca3af' }}>
-          {proj.activities.length} {proj.activities.length === 1 ? 'activity' : 'activities'}
-        </span>
-      </div>
-
-      {/* View body — interactive=false for every view type */}
-      {proj.share.viewType === 'list' ? (
-        <PublicListTable
-          rows={listRows}
-          visibleColumns={visibleListColumns}
-          memberById={publicMemberById}
-          statusById={statusById}
-          tagById={tagById}
-          activityTitleById={activityTitleById}
-        />
-      ) : proj.share.viewType === 'kanban' ? (
-        <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
-          <KanbanBoard
-            columns={kanbanColumnsResolved}
-            groupBy={kanbanVc.groupBy}
-            members={memberArray}
-            statusById={statusById}
-            tagById={tagById}
-            colorMap={kanbanColorMap}
-            cardFields={kanbanVc.cardFields}
-            suppressedFields={new Set()}
-            selectedActivityId={null}
-            matchedIds={new Set()}
-            activeMatchId={null}
-            hasQuery={false}
-            collapsedColumnIds={kanbanCollapsedSet}
-            onToggleCollapse={() => {}}
-            onCardClick={() => {}}
-            onAddInColumn={() => {}}
-            onDrop={() => {}}
-            activityById={kanbanActivityById}
-            activityTitleById={activityTitleById}
-            showHierarchy={kanbanVc.showHierarchy}
-            childrenByParentId={kanbanHierarchy.childrenByParentId}
-            collapsedParents={new Set()}
-            onToggleParent={() => {}}
-            interactive={false}
-          />
-        </div>
-      ) : (
-        <div style={{ flex: 1, minHeight: 0 }}>
-          <GanttGrid
-            rows={rows}
-            columns={columns}
-            todayIndex={todayIdx}
-            selectedActivityId={null}
-            onSelectActivity={() => {}}
-            resolvedGranularity={resolvedGranularity}
-            interactive={false}
-          />
-        </div>
-      )}
-    </div>
-  )
 }
 ````
 
