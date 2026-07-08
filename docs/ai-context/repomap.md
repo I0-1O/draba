@@ -114,6 +114,7 @@ docs/
     phase-13-shares.md
     phase-14-export.md
     phase-15-import.md
+    phase-16-backup.md
   ARCHITECTURE.md
   CONVENTIONS.md
   GreatEventToActivity.md
@@ -15833,6 +15834,28 @@ ALTER TABLE shares ADD COLUMN name TEXT;
 ALTER TABLE shares ADD COLUMN description TEXT;
 ````
 
+## File: packages/api/internal/db/migrations/022_share_kind.sql
+````sql
+-- Migration 022: shares.kind discriminator + ICS feed scope columns.
+--
+-- Phase 13.4: a Calendar share is a subscribable ICS feed, not a frozen view
+-- snapshot. Both flavors live in the shares table, discriminated by kind:
+--   kind = 'view' — frozen view-config share served at /s/{token} (13.1–13.3)
+--   kind = 'ics'  — live calendar feed served at GET /shares/{token}.ics
+--
+-- ICS rows carry scope ('timeline' = every activity, 'member' = one member's
+-- assigned activities) plus member_id when scope = 'member'. They never carry
+-- a view_config, filter, or password — the token is the secret.
+--
+-- member_id uses ON DELETE CASCADE (unlike the RESTRICT FKs of migration 011):
+-- a per-member feed is meaningless once the member row is gone, so the feed
+-- row is dropped with the member rather than blocking the delete.
+
+ALTER TABLE shares ADD COLUMN kind TEXT NOT NULL DEFAULT 'view';
+ALTER TABLE shares ADD COLUMN scope TEXT;
+ALTER TABLE shares ADD COLUMN member_id TEXT REFERENCES team_members(id) ON DELETE CASCADE;
+````
+
 ## File: packages/api/internal/db/api_token_repo.go
 ````go
 package db
@@ -16374,6 +16397,132 @@ func SeedSampleDataIfEmpty(database *sqlx.DB, sql string) (bool, error) {
 		return false, fmt.Errorf("seeding sample data: %w", err)
 	}
 	return true, nil
+}
+````
+
+## File: packages/api/internal/db/share_repo.go
+````go
+// Package db contains the persistence layer for draba.
+package db
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// ShareRepo is the persistence layer for Share records.
+type ShareRepo struct {
+	db *sqlx.DB
+}
+
+// NewShareRepo returns a ShareRepo backed by db.
+func NewShareRepo(db *sqlx.DB) *ShareRepo {
+	return &ShareRepo{db: db}
+}
+
+// Create inserts a new Share row.
+func (r *ShareRepo) Create(s *models.Share) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO shares (
+			id, timeline_id, token, kind, scope, member_id, name, description,
+			view_type, view_config, password_hash, created_by, created_at, view_count
+		) VALUES (
+			:id, :timeline_id, :token, :kind, :scope, :member_id, :name, :description,
+			:view_type, :view_config, :password_hash, :created_by, :created_at, :view_count
+		)
+	`, s)
+	if err != nil {
+		return fmt.Errorf("creating share: %w", err)
+	}
+	return nil
+}
+
+// GetByID fetches a Share by primary key. Returns sql.ErrNoRows (wrapped) when
+// no row matches.
+func (r *ShareRepo) GetByID(id string) (*models.Share, error) {
+	var s models.Share
+	if err := r.db.Get(&s, `SELECT * FROM shares WHERE id = ?`, id); err != nil {
+		return nil, fmt.Errorf("getting share: %w", err)
+	}
+	s.Protected = s.PasswordHash != nil
+	return &s, nil
+}
+
+// GetByToken fetches a Share by its public token. Returns sql.ErrNoRows
+// (wrapped) when no row matches.
+func (r *ShareRepo) GetByToken(token string) (*models.Share, error) {
+	var s models.Share
+	if err := r.db.Get(&s, `SELECT * FROM shares WHERE token = ?`, token); err != nil {
+		return nil, fmt.Errorf("getting share by token: %w", err)
+	}
+	s.Protected = s.PasswordHash != nil
+	return &s, nil
+}
+
+// ListByTimeline returns all non-revoked shares for a timeline, ordered by
+// creation time ascending.
+func (r *ShareRepo) ListByTimeline(timelineID string) ([]*models.Share, error) {
+	out := make([]*models.Share, 0)
+	if err := r.db.Select(&out,
+		`SELECT * FROM shares WHERE timeline_id = ? ORDER BY created_at ASC`,
+		timelineID,
+	); err != nil {
+		return nil, fmt.Errorf("listing shares: %w", err)
+	}
+	for _, s := range out {
+		s.Protected = s.PasswordHash != nil
+	}
+	return out, nil
+}
+
+// Update writes mutable fields for an existing share.
+func (r *ShareRepo) Update(s *models.Share) error {
+	_, err := r.db.NamedExec(`
+		UPDATE shares SET
+			name          = :name,
+			description   = :description,
+			view_type     = :view_type,
+			view_config   = :view_config,
+			password_hash = :password_hash
+		WHERE id = :id
+	`, s)
+	if err != nil {
+		return fmt.Errorf("updating share: %w", err)
+	}
+	return nil
+}
+
+// RotateToken replaces a share's token, immediately invalidating the old URL.
+// This is the revocation story for ICS feeds, which have no password gate.
+func (r *ShareRepo) RotateToken(id, newToken string) error {
+	if _, err := r.db.Exec(`UPDATE shares SET token = ? WHERE id = ?`, newToken, id); err != nil {
+		return fmt.Errorf("rotating share token: %w", err)
+	}
+	return nil
+}
+
+// Delete permanently removes a share row.
+func (r *ShareRepo) Delete(id string) error {
+	if _, err := r.db.Exec(`DELETE FROM shares WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("deleting share: %w", err)
+	}
+	return nil
+}
+
+// RecordView increments view_count and sets last_viewed_at to now for a share.
+func (r *ShareRepo) RecordView(id string) error {
+	_, err := r.db.Exec(
+		`UPDATE shares SET view_count = view_count + 1, last_viewed_at = ? WHERE id = ?`,
+		time.Now().UTC(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("recording share view: %w", err)
+	}
+	return nil
 }
 ````
 
@@ -17809,6 +17958,84 @@ INSERT INTO activity_tags (activity_id, tag_id) VALUES
   ('a-reb-14', 'tag-mcf-launch'),
   ('a-reb-15', 'tag-mcf-analytics'),
   ('a-reb-15', 'tag-mcf-launch');
+````
+
+## File: packages/api/sample_data/11_shares.sql
+````sql
+-- Shares: 10 share links across 4 timelines (4 open view links, 4 password-
+-- protected view links, 2 ICS calendar feeds),
+-- exercising the Phase 13.2 share module — named links, descriptions, view
+-- counts, varied view configs, and the password/protected indicator. Phase
+-- 13.3 added List and Kanban as read-only viewers (Gantt shipped in 13.1);
+-- one of each is included below alongside the Gantt links so the public
+-- projection's view-type branches and the List "notes" column-gating nuance
+-- (view_config.columns) are exercisable against the seeded dataset.
+--
+-- created_by references team_members(id) (NOT users). password_hash is a bcrypt
+-- hash of "password" (the sample-data convention; all logins use "password").
+
+INSERT INTO shares (id, timeline_id, token, name, description, view_type, view_config, password_hash, created_by, created_at, last_viewed_at, view_count) VALUES
+  -- Product Marketing · Q1 Workload — an open all-hands link and a protected stakeholder view.
+  ('sh-pm-q1-allhands', 'tl-pm-q1', 'share-demo-allhands',
+   'All-hands public link', 'Embedded in the company all-hands deck. Read-only, grouped by assignee.',
+   'gantt', '{"groupBy":"assignee","sortBy":"startDate","colorBy":"member","granularity":"week","filter":{"logic":"and","conditions":[]}}',
+   NULL, 'tm-pm-erik', datetime('now', '-12 days'), datetime('now', '-1 days'), 126),
+
+  ('sh-pm-q1-acme', 'tl-pm-q1', 'share-demo-acme',
+   'Acme stakeholder view', 'Read-only status for the weekly Acme client review. Updated automatically.',
+   'gantt', '{"groupBy":"none","sortBy":"startDate","colorBy":"activity","granularity":"week","filter":{"logic":"and","conditions":[]}}',
+   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-pm-lindsay', datetime('now', '-20 days'), datetime('now', '-2 days'), 48),
+
+  -- Product Marketing · Sales Kick Off — open link for sales leadership.
+  ('sh-pm-sko-leadership', 'tl-pm-sko', 'share-demo-sko',
+   'Sales leadership', 'Snapshot for the SKO steering committee.',
+   'gantt', '{"groupBy":"none","sortBy":"startDate","colorBy":"status","granularity":"week","filter":{"logic":"and","conditions":[]}}',
+   NULL, 'tm-pm-erik', datetime('now', '-6 days'), datetime('now', '-1 days'), 31),
+
+  -- P&B Tiger Team · Right to Win — protected exec readout.
+  ('sh-pb-rtw-exec', 'tl-pb-rtw', 'share-demo-exec',
+   'Exec readout', 'Scoped exec view for the Right to Win steering review.',
+   'gantt', '{"groupBy":"none","sortBy":"startDate","colorBy":"activity","granularity":"month","filter":{"logic":"and","conditions":[]}}',
+   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-pb-brian', datetime('now', '-30 days'), datetime('now', '-5 days'), 9),
+
+  -- Marketing Cross Functional · Web Site Rebrand — open contractor link + protected agency review.
+  ('sh-mcf-contractor', 'tl-mcf-rebrand', 'share-demo-contractor',
+   'Design contractor view', 'Scoped view for the two external design contractors.',
+   'gantt', '{"groupBy":"none","sortBy":"startDate","colorBy":"activity","granularity":"week","filter":{"logic":"and","conditions":[]}}',
+   NULL, 'tm-mcf-scott', datetime('now', '-18 days'), datetime('now', '-1 days'), 64),
+
+  ('sh-mcf-agency', 'tl-mcf-rebrand', 'share-demo-agency',
+   'Agency review', 'Weekly read-only link for the rebrand agency. Password protected.',
+   'gantt', '{"groupBy":"assignee","sortBy":"endDate","colorBy":"member","granularity":"month","filter":{"logic":"and","conditions":[]}}',
+   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-mcf-paula', datetime('now', '-9 days'), datetime('now', '-3 days'), 17),
+
+  -- Product Marketing · Sales Kick Off — open List link for the extended planning group.
+  -- columns captures the column-visibility snapshot at share time, incl. Notes
+  -- visible (drives the Phase 13.3 "notes" projection nuance) and Tags hidden
+  -- (exercises "exposes exactly its enabled columns; no over-exposure").
+  ('sh-pm-sko-list', 'tl-pm-sko', 'share-demo-sko-list',
+   'Planning group list', 'Read-only task list for the extended SKO planning group, with notes visible.',
+   'list', '{"groupBy":"none","sortBy":"startDate","colorBy":"status","granularity":"week","filter":{"logic":"and","conditions":[]},"columns":[{"id":"colorBar","visible":true},{"id":"identity","visible":true},{"id":"title","visible":true},{"id":"startAt","visible":true},{"id":"endAt","visible":true},{"id":"status","visible":true},{"id":"assignees","visible":true},{"id":"tags","visible":false},{"id":"notes","visible":true}]}',
+   NULL, 'tm-pm-erik', datetime('now', '-4 days'), datetime('now', '-1 days'), 22),
+
+  -- P&B Tiger Team · Right to Win — protected Kanban board for the extended steering group.
+  ('sh-pb-rtw-kanban', 'tl-pb-rtw', 'share-demo-rtw-kanban',
+   'Steering board', 'Read-only Kanban board for the Right to Win steering group, grouped by status.',
+   'kanban', '{"groupBy":"status","sortBy":"startDate","colorBy":"member","granularity":"week","filter":{"logic":"and","conditions":[]}}',
+   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-pb-brian', datetime('now', '-7 days'), datetime('now', '-2 days'), 13);
+
+-- ICS calendar feeds (Phase 13.4): kind='ics' rows are live subscribable
+-- feeds served at GET /shares/{token}.ics — no view_config, filter, or
+-- password (the token is the secret). One whole-timeline feed and one
+-- per-member feed so both scopes are exercisable against the seeded dataset.
+INSERT INTO shares (id, timeline_id, token, kind, scope, member_id, name, view_type, view_config, created_by, created_at, view_count) VALUES
+  -- Product Marketing · Q1 Workload — whole-timeline feed.
+  ('sh-pm-q1-ics', 'tl-pm-q1', 'share-demo-q1-ics', 'ics', 'timeline', NULL,
+   'Q1 Workload calendar feed', 'calendar', '{}', 'tm-pm-erik', datetime('now', '-10 days'), 204),
+
+  -- Product Marketing · Q1 Workload — Lindsay's personal feed.
+  ('sh-pm-q1-ics-lindsay', 'tl-pm-q1', 'share-demo-q1-ics-lindsay', 'ics', 'member', 'tm-pm-lindsay',
+   'Lindsay''s calendar feed', 'calendar', '{}', 'tm-pm-lindsay', datetime('now', '-8 days'), 96);
 ````
 
 ## File: packages/api/sample_data/README.md
@@ -42055,6 +42282,158 @@ Resolved 2026-06-05 (re-sequencing):
 - **Password on ICS feeds** — calendar clients can't unlock interactively; the token is the secret.
 ````
 
+## File: docs/plans/phase-16-backup.md
+````markdown
+# Phase 16 — Backup & Restore
+
+**UI name:** "Backup" (new admin-only section on the Settings page, alongside SMTP / Organization).
+
+**Status:** 🟢 Planned — scope settled (2026-07-08). This plan supersedes the ROADMAP §16 directional scope and resolves its three open questions.
+
+---
+
+## What we're actually building
+
+Give a self-hosted admin confidence their data is safe without SSH-ing into the container: a read-only status surface (where the database is, how big, when it was last backed up, whether that's recent enough), a "Back up now" button that produces a real, verified copy, and a scheduler that does it unattended with retention cleanup and failure notification.
+
+The through-line: **a backup you haven't verified and can't find is not a backup.** Every backup this phase produces is integrity-checked at creation, lands in a well-known directory on a mounted volume, and is listed (with size and timestamp) in the UI. The health indicator makes staleness impossible to miss.
+
+### Scope correction vs. the ROADMAP text (2026-07-08 codebase scan)
+
+The ROADMAP §16 text included MySQL/Postgres surfaces (`pg_dump`/`mysqldump` triggers, connection-string display). **Cut entirely: the API is SQLite-only today** — `go.mod` has no mysql/pgx/pq driver; `DRABA_DB_DRIVER` values other than `sqlite` are aspirational. The backup subsystem is built against SQLite, with a clean seam (a `backup.Engine` interface with one implementation) so a dump-based engine can slot in when other adapters actually land. No speculative code for databases we can't open.
+
+### Decisions locked (2026-07-08)
+
+1. **Hot copy via `VACUUM INTO`** *(resolves ROADMAP open question 2)*. Under WAL mode `VACUUM INTO` takes a consistent read snapshot without blocking concurrent writers, runs as a single SQL statement over the existing `*sql.DB` (no C-level backup API — relevant since we're on the pure-Go `modernc.org/sqlite` driver), and produces a compacted, standalone, WAL-free file. Every backup is verified immediately after creation with `PRAGMA integrity_check` against the *copy* — a backup that fails verification is deleted and reported as a failure, never left on disk looking like a backup.
+2. **Backup history is a directory scan, not a DB table** *(new question the ROADMAP didn't ask)*. Recording backups inside the database being backed up is self-defeating — after a restore, the table would describe a different timeline than the directory. The filename is the record: `draba-20260708T020000Z-scheduled.db` / `-manual.db` (UTC, sortable, trigger type visible). History = list the backup dir, filter on the pattern, stat for size/mtime. No migration needed for history; one `instance_settings` key for schedule config.
+3. **Backups land on the data volume by default: `DRABA_BACKUP_DIR`, default `/data/backups`** *(the Docker contract the ROADMAP missed)*. `/data` is already the mounted volume (`DRABA_DB_DSN` defaults to `/data/draba.db`), so backups survive container recreation with zero new configuration. Same-disk backups protect against bad migrations, botched imports, and accidental deletion — not disk loss; the ops doc says exactly that and shows how to point `DRABA_BACKUP_DIR` at a second mount. Startup validates the dir is creatable + writable and the status endpoint reports it.
+4. **No backup download from the admin UI in v1** *(resolves ROADMAP open question 1, on the conservative side)*. The backup file is the entire instance — every team's data, password hashes, encrypted SMTP credentials. Serving it over HTTP behind a bearer token is a single-credential-compromise-away from total exfiltration, and the convenience case is thin (a self-hosting admin has filesystem access by definition). Filesystem/volume only; revisit only with real demand.
+5. **No backup encryption at rest in v1** *(resolves ROADMAP open question 3, as the ROADMAP leaned)*. The backup sits next to the live DB with the same filesystem permissions; encrypting one and not the other is theater. Note-in-doc: encrypt at the volume/filesystem layer if required.
+6. **Restore is a documented runbook + startup log line, not a UI.** In-app restore means the running server replacing its own open database — a rabbit hole of connection draining and half-states, for an action taken once a year under stress. v1: `docs/OPERATIONS.md` runbook (stop container → copy backup over `draba.db`, remove `-wal`/`-shm` → start). Backups are standard SQLite files; the procedure is `cp`. The server already logs the DB path at boot, which doubles as restore confirmation.
+7. **Schedule = presets, not cron expressions.** `off | hourly | every6h | every12h | daily@HH:MM | weekly@day+HH:MM`, stored as one JSON value in `instance_settings` (the 010 key/value store — no new table). Presets cover the real use cases, need no cron-parser dependency, and render as a two-dropdown UI instead of a syntax textbox. Default for new instances: **daily at 02:00, keep 14** — safe-by-default beats opt-in for a data-safety feature; the admin page shows what's configured.
+8. **Retention = keep-last-N** (default 14), enforced after every successful backup, counting only files matching our filename pattern (a hand-copied `pre-upgrade.db` the admin dropped in the dir is never touched). One knob; age-based expiry is a second knob v1 doesn't need.
+9. **Scheduler is a purpose-built goroutine, not a job framework.** `internal/backup.Scheduler`: compute next-run from the preset, `time.Timer` until then, run, repeat; config changes signal a recompute; clock injected for tests. This is the first background scheduler in the codebase — resist the urge to generalize it (feature-creep principle); a second consumer can extract the pattern later.
+10. **Backups emit bus events** (`backup.completed` / `backup.failed`) per the event-driven principle. Failure notification (SMTP to superadmins, silent no-op when SMTP is unconfigured) is an event consumer, not scheduler code — same shape as every other side effect in the app.
+11. **Concurrency guard:** one backup at a time, enforced with a mutex/atomic in the manager. Manual trigger while one runs → `409 BACKUP_IN_PROGRESS`. Scheduled tick while one runs → skipped with a log line.
+
+---
+
+## Reused infrastructure (do not rebuild)
+
+| Concern | Existing asset | Notes |
+|---|---|---|
+| Admin auth | `requireSuperadmin` (`internal/api/admin_handler.go`) | Every backup endpoint uses the same guard; route family `/admin/backup*` beside `/admin/smtp`. |
+| Config storage | `instance_settings` key/value (migration 010) + `InstanceSettingsRepo` | Schedule config = one JSON value under `backup.schedule`. No new table, no new migration. |
+| Failure email | `internal/mailer` (SMTP config, encrypted password, send path) | Consumer sends via the existing mailer; unconfigured SMTP = skip silently (health indicator still shows staleness). |
+| Event bus | `internal/events` | `backup.completed` / `backup.failed`; notification consumer subscribes. Instance-scoped events — **not** broadcast to team WebSocket clients. |
+| Env config pattern | `getenv` in `cmd/draba/main.go`, `DRABA_*` family | `DRABA_BACKUP_DIR` joins `DRABA_DB_DSN` etc.; documented in `packages/api/CLAUDE.md` env block. |
+| Wiring | `cmd/draba/main.go` (repos → server; `go hub.Run()` precedent) | `backup.Manager` constructed with the DB + dsn + dir; `go scheduler.Run(ctx)` beside the hub. |
+| Settings UI | `SettingsPage.tsx` admin section, SMTP form patterns, `useSettings.ts` | Backup section follows the SMTP card's superadmin-gating and form conventions; shadcn components throughout. |
+| DB size / WAL facts | `DRABA_DB_DSN` path + `os.Stat` on `draba.db` / `draba.db-wal` | Status endpoint is file stats + one `PRAGMA`; no new introspection layer. |
+
+---
+
+## API
+
+All endpoints superadmin-only (`requireSuperadmin`), JSON, in the `/admin/backup` family.
+
+### `GET /admin/backup/status`
+
+```jsonc
+{
+  "database": { "driver": "sqlite", "path": "/data/draba.db", "sizeBytes": 1234567, "walSizeBytes": 32768, "modifiedAt": "…" },
+  "backupDir": { "path": "/data/backups", "writable": true },
+  "lastBackup": { "filename": "draba-20260708T020000Z-scheduled.db", "sizeBytes": 1200000, "createdAt": "…", "trigger": "scheduled" }, // null when none
+  "health": "ok",            // ok (<24h) | stale (1–7d) | critical (>7d or none) — thresholds fixed in v1
+  "running": false,
+  "schedule": { "preset": "daily", "time": "02:00", "keepLast": 14 }  // null = disabled
+}
+```
+
+### `POST /admin/backup`
+
+Runs `VACUUM INTO` a temp name in the backup dir → `PRAGMA integrity_check` on the copy → rename to final `-manual` name → retention sweep → emit event. Synchronous (seconds at this product's DB sizes; simplest correct thing — an async job adds state for no v1 benefit). Returns `201` with the history entry. `409 BACKUP_IN_PROGRESS` under the concurrency guard; `500` with the reason (and no leftover file) on failure.
+
+### `GET /admin/backup/history`
+
+Directory scan, pattern-filtered, newest first: `{ "backups": [ { "filename", "sizeBytes", "createdAt", "trigger" } ] }`. Filesystem is the source of truth — files deleted out-of-band just disappear; foreign files never appear.
+
+### `DELETE /admin/backup/{filename}`
+
+Deletes one backup. Filename must **exactly match the backup pattern** (regex, no separators accepted) and resolve inside the backup dir — the pattern check is the path-traversal guard. `404` unknown, `204` deleted. (ROADMAP said `:id`; the filename *is* the id per decision 2.)
+
+### `GET /admin/backup/schedule` / `PUT /admin/backup/schedule`
+
+Read/write `{ "preset": "off|hourly|every6h|every12h|daily|weekly", "time": "HH:MM", "day": "mon…sun", "keepLast": 1–365 }` (`time` for daily/weekly, `day` for weekly; validated). PUT persists to `instance_settings` and pokes the scheduler to recompute; response echoes config + `nextRunAt`.
+
+### OpenAPI
+
+`BackupStatus`, `BackupEntry`, `BackupSchedule` schemas; regenerate TS types into `packages/shared`.
+
+---
+
+## Server internals — `internal/backup`
+
+- **`Engine`** — `Backup(ctx, destPath) error` + `Verify(ctx, path) error`. One implementation, `sqliteEngine` (`VACUUM INTO` + `integrity_check`). The seam for future dump-based engines; deliberately tiny.
+- **`Manager`** — owns dir + naming + concurrency guard; `RunNow(trigger)` does temp-name → verify → rename → retention → event (rename-last means an interrupted backup never leaves a pattern-matching corpse); `History()`, `Delete(filename)`, `Status()`.
+- **`Scheduler`** — goroutine: load config → compute next run (injected clock) → timer → `Manager.RunNow("scheduled")` → recompute. Missed windows (container down at 2am) are **not** made up on boot in v1 — next window just runs; the health indicator covers the gap honestly.
+- **Notification consumer** — subscribes to `backup.failed`, emails superadmins via `mailer` (subject + error + doc pointer), no-ops silently without SMTP config.
+
+Failure modes handled explicitly (each a table-driven test): backup dir missing/unwritable (status flags it; run fails cleanly), disk full mid-vacuum (temp file removed, `backup.failed`), verify failure (copy deleted, failure reported), process killed mid-backup (temp name never matches the pattern → invisible to history, overwritten next run).
+
+---
+
+## Web — Settings › Backup
+
+Superadmin-only section on the Settings surface (same gating as SMTP), one page, four blocks:
+
+1. **Status card** — DB path/size/WAL size/last-modified; health badge (green *Backed up 3h ago* / amber *Last backup 4 days old* / red *No backups yet*) with the thresholds spelled out in the sublabel; backup-dir path with an inline warning when `writable: false`.
+2. **Back up now** — button → `POST /admin/backup` → spinner (sync call) → toast + refetch. Disabled with *Backup in progress…* when `running`.
+3. **Schedule card** — preset dropdown, time picker (daily/weekly), day picker (weekly), keep-last-N input; save → PUT; shows *Next backup: …* from `nextRunAt`.
+4. **History table** — filename, created, size, trigger chip, delete (confirm dialog names the file). Empty state points at Back up now.
+
+Hooks: `useBackupStatus` / `useBackupHistory` / `useBackupSchedule` + mutations (TanStack, `useSettings.ts` conventions). Status refetches on window focus; no WebSocket wiring (admin page, not a live surface).
+
+---
+
+## Sub-phases
+
+### 16.1 — Server: engine, manager, manual backup + status/history API (M, ~1 day)
+`internal/backup` (`Engine`, `sqliteEngine`, `Manager`), `DRABA_BACKUP_DIR` wiring + startup validation, the four non-schedule endpoints, OpenAPI + regenerated types. Tests: vacuum-under-concurrent-writes, verify-failure cleanup, filename pattern (parse/format round-trip, foreign files excluded, traversal attempts rejected), retention sweep, concurrency guard, full status shape. **Pausable:** manual backup alone is already the core value.
+
+### 16.2 — Server: scheduler, retention-in-anger, failure notification (M, ~1 day)
+`Scheduler` (injected clock; next-run computation table-tested across presets/DST-less UTC), schedule GET/PUT + validation, `instance_settings` persistence, default-on (daily 02:00 / keep 14) for instances with no stored config, bus events + SMTP failure consumer, `main.go` wiring. Tests: fake-clock runs across every preset, config-change recompute, skip-while-running, failure → one email to each superadmin, no-SMTP no-op.
+
+### 16.3 — Web UI + ops docs + hardening (M, ~1 day)
+Settings › Backup section (four blocks above), hooks, component tests (health badge states, schedule form validation, delete confirm, in-progress disable). `docs/OPERATIONS.md`: restore runbook, volume contract (`DRABA_BACKUP_DIR` default + second-mount example), docker-compose snippet; `packages/api/CLAUDE.md` env-block update. Live verification against the test Docker instance (real backup of the real seeded DB, restore-runbook walked through once for real). `/test-phase 16`, TESTING.md Phase 16 assertions, log.md + session-state updates.
+
+---
+
+## Cut from scope (v1)
+
+- **MySQL/Postgres backup** — no drivers exist in the codebase; the `Engine` seam is the whole concession to the future.
+- **Backup download over HTTP** — decision 4. Revisit with demand, not speculatively.
+- **In-app restore** — runbook instead; decision 6.
+- **Backup encryption at rest** — decision 5.
+- **S3/object-storage targets** — the ROADMAP's own stretch goal; local dir only. An S3 target is a natural second `Engine`-adjacent feature *after* someone asks.
+- **Cron-expression schedules** — presets; decision 7.
+- **Catch-up runs for missed windows** — health indicator + next window instead.
+- **Success notifications** — failure-only email; a daily "backup OK" email trains people to ignore email.
+
+---
+
+## Exit criteria — safe to pause when
+
+- The Settings › Backup page shows the live DB path, size, WAL size, and an honest health badge on a fresh instance (red *No backups yet*) and after a backup (green, timestamped)
+- **Back up now** produces a file in `DRABA_BACKUP_DIR` that passes `PRAGMA integrity_check` and — walked through once for real against the test Docker instance — restores via the runbook into a working draba with the same data
+- A scheduled backup fires at the configured preset time without any request traffic, and the history table shows it with the `scheduled` trigger
+- Retention: with keep-last-2 configured, a third backup deletes the oldest; a foreign file in the directory is never touched and never listed
+- A second backup request during a running backup returns `409`; the UI disables the button while `running`
+- With SMTP configured, an induced backup failure (unwritable dir) emails the superadmin; without SMTP, it fails loudly in status/logs and silently skips email
+- `DELETE` with a path-traversal-shaped filename is rejected; only pattern-matching files are deletable
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean; `pnpm --filter web test` passes
+````
+
 ## File: docs/TESTING.md
 ````markdown
 # Testing & Review Procedures
@@ -44995,28 +45374,6 @@ func CheckPassword(hash, password string) error {
 }
 ````
 
-## File: packages/api/internal/db/migrations/022_share_kind.sql
-````sql
--- Migration 022: shares.kind discriminator + ICS feed scope columns.
---
--- Phase 13.4: a Calendar share is a subscribable ICS feed, not a frozen view
--- snapshot. Both flavors live in the shares table, discriminated by kind:
---   kind = 'view' — frozen view-config share served at /s/{token} (13.1–13.3)
---   kind = 'ics'  — live calendar feed served at GET /shares/{token}.ics
---
--- ICS rows carry scope ('timeline' = every activity, 'member' = one member's
--- assigned activities) plus member_id when scope = 'member'. They never carry
--- a view_config, filter, or password — the token is the secret.
---
--- member_id uses ON DELETE CASCADE (unlike the RESTRICT FKs of migration 011):
--- a per-member feed is meaningless once the member row is gone, so the feed
--- row is dropped with the member rather than blocking the delete.
-
-ALTER TABLE shares ADD COLUMN kind TEXT NOT NULL DEFAULT 'view';
-ALTER TABLE shares ADD COLUMN scope TEXT;
-ALTER TABLE shares ADD COLUMN member_id TEXT REFERENCES team_members(id) ON DELETE CASCADE;
-````
-
 ## File: packages/api/internal/db/migrations/023_share_created_by_nullable.sql
 ````sql
 -- Migration 023: make shares.created_by nullable.
@@ -45643,132 +46000,6 @@ func checkForeignKeys(database *sqlx.DB, migration string) error {
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("foreign_key_check after %s: %w", migration, err)
-	}
-	return nil
-}
-````
-
-## File: packages/api/internal/db/share_repo.go
-````go
-// Package db contains the persistence layer for draba.
-package db
-
-import (
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// ShareRepo is the persistence layer for Share records.
-type ShareRepo struct {
-	db *sqlx.DB
-}
-
-// NewShareRepo returns a ShareRepo backed by db.
-func NewShareRepo(db *sqlx.DB) *ShareRepo {
-	return &ShareRepo{db: db}
-}
-
-// Create inserts a new Share row.
-func (r *ShareRepo) Create(s *models.Share) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO shares (
-			id, timeline_id, token, kind, scope, member_id, name, description,
-			view_type, view_config, password_hash, created_by, created_at, view_count
-		) VALUES (
-			:id, :timeline_id, :token, :kind, :scope, :member_id, :name, :description,
-			:view_type, :view_config, :password_hash, :created_by, :created_at, :view_count
-		)
-	`, s)
-	if err != nil {
-		return fmt.Errorf("creating share: %w", err)
-	}
-	return nil
-}
-
-// GetByID fetches a Share by primary key. Returns sql.ErrNoRows (wrapped) when
-// no row matches.
-func (r *ShareRepo) GetByID(id string) (*models.Share, error) {
-	var s models.Share
-	if err := r.db.Get(&s, `SELECT * FROM shares WHERE id = ?`, id); err != nil {
-		return nil, fmt.Errorf("getting share: %w", err)
-	}
-	s.Protected = s.PasswordHash != nil
-	return &s, nil
-}
-
-// GetByToken fetches a Share by its public token. Returns sql.ErrNoRows
-// (wrapped) when no row matches.
-func (r *ShareRepo) GetByToken(token string) (*models.Share, error) {
-	var s models.Share
-	if err := r.db.Get(&s, `SELECT * FROM shares WHERE token = ?`, token); err != nil {
-		return nil, fmt.Errorf("getting share by token: %w", err)
-	}
-	s.Protected = s.PasswordHash != nil
-	return &s, nil
-}
-
-// ListByTimeline returns all non-revoked shares for a timeline, ordered by
-// creation time ascending.
-func (r *ShareRepo) ListByTimeline(timelineID string) ([]*models.Share, error) {
-	out := make([]*models.Share, 0)
-	if err := r.db.Select(&out,
-		`SELECT * FROM shares WHERE timeline_id = ? ORDER BY created_at ASC`,
-		timelineID,
-	); err != nil {
-		return nil, fmt.Errorf("listing shares: %w", err)
-	}
-	for _, s := range out {
-		s.Protected = s.PasswordHash != nil
-	}
-	return out, nil
-}
-
-// Update writes mutable fields for an existing share.
-func (r *ShareRepo) Update(s *models.Share) error {
-	_, err := r.db.NamedExec(`
-		UPDATE shares SET
-			name          = :name,
-			description   = :description,
-			view_type     = :view_type,
-			view_config   = :view_config,
-			password_hash = :password_hash
-		WHERE id = :id
-	`, s)
-	if err != nil {
-		return fmt.Errorf("updating share: %w", err)
-	}
-	return nil
-}
-
-// RotateToken replaces a share's token, immediately invalidating the old URL.
-// This is the revocation story for ICS feeds, which have no password gate.
-func (r *ShareRepo) RotateToken(id, newToken string) error {
-	if _, err := r.db.Exec(`UPDATE shares SET token = ? WHERE id = ?`, newToken, id); err != nil {
-		return fmt.Errorf("rotating share token: %w", err)
-	}
-	return nil
-}
-
-// Delete permanently removes a share row.
-func (r *ShareRepo) Delete(id string) error {
-	if _, err := r.db.Exec(`DELETE FROM shares WHERE id = ?`, id); err != nil {
-		return fmt.Errorf("deleting share: %w", err)
-	}
-	return nil
-}
-
-// RecordView increments view_count and sets last_viewed_at to now for a share.
-func (r *ShareRepo) RecordView(id string) error {
-	_, err := r.db.Exec(
-		`UPDATE shares SET view_count = view_count + 1, last_viewed_at = ? WHERE id = ?`,
-		time.Now().UTC(), id,
-	)
-	if err != nil {
-		return fmt.Errorf("recording share view: %w", err)
 	}
 	return nil
 }
@@ -48749,84 +48980,6 @@ func (c *client) writePump(h *Hub) {
 		}
 	}
 }
-````
-
-## File: packages/api/sample_data/11_shares.sql
-````sql
--- Shares: 10 share links across 4 timelines (4 open view links, 4 password-
--- protected view links, 2 ICS calendar feeds),
--- exercising the Phase 13.2 share module — named links, descriptions, view
--- counts, varied view configs, and the password/protected indicator. Phase
--- 13.3 added List and Kanban as read-only viewers (Gantt shipped in 13.1);
--- one of each is included below alongside the Gantt links so the public
--- projection's view-type branches and the List "notes" column-gating nuance
--- (view_config.columns) are exercisable against the seeded dataset.
---
--- created_by references team_members(id) (NOT users). password_hash is a bcrypt
--- hash of "password" (the sample-data convention; all logins use "password").
-
-INSERT INTO shares (id, timeline_id, token, name, description, view_type, view_config, password_hash, created_by, created_at, last_viewed_at, view_count) VALUES
-  -- Product Marketing · Q1 Workload — an open all-hands link and a protected stakeholder view.
-  ('sh-pm-q1-allhands', 'tl-pm-q1', 'share-demo-allhands',
-   'All-hands public link', 'Embedded in the company all-hands deck. Read-only, grouped by assignee.',
-   'gantt', '{"groupBy":"assignee","sortBy":"startDate","colorBy":"member","granularity":"week","filter":{"logic":"and","conditions":[]}}',
-   NULL, 'tm-pm-erik', datetime('now', '-12 days'), datetime('now', '-1 days'), 126),
-
-  ('sh-pm-q1-acme', 'tl-pm-q1', 'share-demo-acme',
-   'Acme stakeholder view', 'Read-only status for the weekly Acme client review. Updated automatically.',
-   'gantt', '{"groupBy":"none","sortBy":"startDate","colorBy":"activity","granularity":"week","filter":{"logic":"and","conditions":[]}}',
-   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-pm-lindsay', datetime('now', '-20 days'), datetime('now', '-2 days'), 48),
-
-  -- Product Marketing · Sales Kick Off — open link for sales leadership.
-  ('sh-pm-sko-leadership', 'tl-pm-sko', 'share-demo-sko',
-   'Sales leadership', 'Snapshot for the SKO steering committee.',
-   'gantt', '{"groupBy":"none","sortBy":"startDate","colorBy":"status","granularity":"week","filter":{"logic":"and","conditions":[]}}',
-   NULL, 'tm-pm-erik', datetime('now', '-6 days'), datetime('now', '-1 days'), 31),
-
-  -- P&B Tiger Team · Right to Win — protected exec readout.
-  ('sh-pb-rtw-exec', 'tl-pb-rtw', 'share-demo-exec',
-   'Exec readout', 'Scoped exec view for the Right to Win steering review.',
-   'gantt', '{"groupBy":"none","sortBy":"startDate","colorBy":"activity","granularity":"month","filter":{"logic":"and","conditions":[]}}',
-   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-pb-brian', datetime('now', '-30 days'), datetime('now', '-5 days'), 9),
-
-  -- Marketing Cross Functional · Web Site Rebrand — open contractor link + protected agency review.
-  ('sh-mcf-contractor', 'tl-mcf-rebrand', 'share-demo-contractor',
-   'Design contractor view', 'Scoped view for the two external design contractors.',
-   'gantt', '{"groupBy":"none","sortBy":"startDate","colorBy":"activity","granularity":"week","filter":{"logic":"and","conditions":[]}}',
-   NULL, 'tm-mcf-scott', datetime('now', '-18 days'), datetime('now', '-1 days'), 64),
-
-  ('sh-mcf-agency', 'tl-mcf-rebrand', 'share-demo-agency',
-   'Agency review', 'Weekly read-only link for the rebrand agency. Password protected.',
-   'gantt', '{"groupBy":"assignee","sortBy":"endDate","colorBy":"member","granularity":"month","filter":{"logic":"and","conditions":[]}}',
-   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-mcf-paula', datetime('now', '-9 days'), datetime('now', '-3 days'), 17),
-
-  -- Product Marketing · Sales Kick Off — open List link for the extended planning group.
-  -- columns captures the column-visibility snapshot at share time, incl. Notes
-  -- visible (drives the Phase 13.3 "notes" projection nuance) and Tags hidden
-  -- (exercises "exposes exactly its enabled columns; no over-exposure").
-  ('sh-pm-sko-list', 'tl-pm-sko', 'share-demo-sko-list',
-   'Planning group list', 'Read-only task list for the extended SKO planning group, with notes visible.',
-   'list', '{"groupBy":"none","sortBy":"startDate","colorBy":"status","granularity":"week","filter":{"logic":"and","conditions":[]},"columns":[{"id":"colorBar","visible":true},{"id":"identity","visible":true},{"id":"title","visible":true},{"id":"startAt","visible":true},{"id":"endAt","visible":true},{"id":"status","visible":true},{"id":"assignees","visible":true},{"id":"tags","visible":false},{"id":"notes","visible":true}]}',
-   NULL, 'tm-pm-erik', datetime('now', '-4 days'), datetime('now', '-1 days'), 22),
-
-  -- P&B Tiger Team · Right to Win — protected Kanban board for the extended steering group.
-  ('sh-pb-rtw-kanban', 'tl-pb-rtw', 'share-demo-rtw-kanban',
-   'Steering board', 'Read-only Kanban board for the Right to Win steering group, grouped by status.',
-   'kanban', '{"groupBy":"status","sortBy":"startDate","colorBy":"member","granularity":"week","filter":{"logic":"and","conditions":[]}}',
-   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-pb-brian', datetime('now', '-7 days'), datetime('now', '-2 days'), 13);
-
--- ICS calendar feeds (Phase 13.4): kind='ics' rows are live subscribable
--- feeds served at GET /shares/{token}.ics — no view_config, filter, or
--- password (the token is the secret). One whole-timeline feed and one
--- per-member feed so both scopes are exercisable against the seeded dataset.
-INSERT INTO shares (id, timeline_id, token, kind, scope, member_id, name, view_type, view_config, created_by, created_at, view_count) VALUES
-  -- Product Marketing · Q1 Workload — whole-timeline feed.
-  ('sh-pm-q1-ics', 'tl-pm-q1', 'share-demo-q1-ics', 'ics', 'timeline', NULL,
-   'Q1 Workload calendar feed', 'calendar', '{}', 'tm-pm-erik', datetime('now', '-10 days'), 204),
-
-  -- Product Marketing · Q1 Workload — Lindsay's personal feed.
-  ('sh-pm-q1-ics-lindsay', 'tl-pm-q1', 'share-demo-q1-ics-lindsay', 'ics', 'member', 'tm-pm-lindsay',
-   'Lindsay''s calendar feed', 'calendar', '{}', 'tm-pm-lindsay', datetime('now', '-8 days'), 96);
 ````
 
 ## File: packages/web/src/components/calendar/CalendarGrid.tsx
@@ -53339,6 +53492,526 @@ export function usePublicSettings() {
 }
 ````
 
+## File: packages/web/src/hooks/useShares.test.ts
+````typescript
+/**
+ * useShares hooks — unit tests verifying query keys, mutation endpoints,
+ * cache invalidation, and the public share projection fetch.
+ * Uses a real QueryClient with fetch mocked globally.
+ */
+
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { renderHook, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { createElement } from 'react'
+import {
+  useListShares,
+  useCreateShare,
+  useDeleteShare,
+  useRegenerateShare,
+  useShareProjection,
+  useUnlockShare,
+} from './useShares'
+
+// ── Auth mock ─────────────────────────────────────────────────────────────────
+
+vi.mock('@/contexts/AuthContext', () => ({
+  useAuth: () => ({ getAccessToken: async () => 'test-token' }),
+}))
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function makeWrapper() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return {
+    qc,
+    wrapper: ({ children }: { children: React.ReactNode }) =>
+      createElement(QueryClientProvider, { client: qc }, children),
+  }
+}
+
+const SHARE_FIXTURE = {
+  id: 'share-1',
+  timelineId: 'tl-1',
+  token: 'abc123',
+  viewType: 'gantt',
+  viewConfig: '{}',
+  createdBy: 'member-1',
+  createdAt: '2026-01-01T00:00:00Z',
+  viewCount: 0,
+}
+
+// ── useListShares ─────────────────────────────────────────────────────────────
+
+describe('useListShares', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('fetches shares from the correct URL', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify([SHARE_FIXTURE]), { status: 200 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useListShares('team-1', 'tl-1'), { wrapper })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/teams/team-1/timelines/tl-1/shares'),
+      expect.any(Object),
+    )
+    expect(result.current.data).toHaveLength(1)
+  })
+
+  it('refetches on every mount despite a non-zero app-wide staleTime', async () => {
+    // Fresh Response per call — a Response body can only be consumed once.
+    vi.mocked(fetch).mockImplementation(() =>
+      Promise.resolve(new Response(JSON.stringify([SHARE_FIXTURE]), { status: 200 })),
+    )
+
+    // Mirror the app QueryClient's 30s default staleTime: the hook must
+    // override it (staleTime: 0 + refetchOnMount: 'always') so the view
+    // telemetry it renders (viewCount / lastViewedAt) is current every time
+    // a share modal opens.
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: 30_000 } },
+    })
+    const wrapper = ({ children }: { children: React.ReactNode }) =>
+      createElement(QueryClientProvider, { client: qc }, children)
+
+    const first = renderHook(() => useListShares('team-1', 'tl-1'), { wrapper })
+    await waitFor(() => expect(first.result.current.isSuccess).toBe(true))
+    first.unmount()
+
+    renderHook(() => useListShares('team-1', 'tl-1'), { wrapper })
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2))
+  })
+
+  it('does not fetch when teamId is empty', () => {
+    const { wrapper } = makeWrapper()
+    renderHook(() => useListShares('', 'tl-1'), { wrapper })
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
+  })
+
+  it('does not fetch when timelineId is empty', () => {
+    const { wrapper } = makeWrapper()
+    renderHook(() => useListShares('team-1', ''), { wrapper })
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
+  })
+})
+
+// ── useCreateShare ────────────────────────────────────────────────────────────
+
+describe('useCreateShare', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('POSTs to the correct URL and invalidates the share list', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(SHARE_FIXTURE), { status: 201 }),
+    )
+
+    const { wrapper, qc } = makeWrapper()
+    const invalidate = vi.spyOn(qc, 'invalidateQueries')
+
+    const { result } = renderHook(() => useCreateShare('team-1', 'tl-1'), { wrapper })
+    result.current.mutate({ viewType: 'gantt', viewConfig: '{}' })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/timelines/tl-1/shares'),
+      expect.objectContaining({ method: 'POST' }),
+    )
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        queryKey: ['teams', 'team-1', 'timelines', 'tl-1', 'shares'],
+      }),
+    )
+  })
+})
+
+describe('useCreateShare (ICS feeds)', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('sends kind/scope/memberId for a member-scoped ICS feed', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ ...SHARE_FIXTURE, kind: 'ics', scope: 'member', memberId: 'm-1' }), { status: 201 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useCreateShare('team-1', 'tl-1'), { wrapper })
+    result.current.mutate({ kind: 'ics', scope: 'member', memberId: 'm-1', name: 'Feed' })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    const opts = vi.mocked(fetch).mock.calls[0][1] as RequestInit
+    expect(JSON.parse(String(opts.body))).toMatchObject({
+      kind: 'ics',
+      scope: 'member',
+      memberId: 'm-1',
+    })
+  })
+})
+
+// ── useRegenerateShare ────────────────────────────────────────────────────────
+
+describe('useRegenerateShare', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('POSTs to the regenerate endpoint and invalidates the share list', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ ...SHARE_FIXTURE, token: 'rotated' }), { status: 200 }),
+    )
+
+    const { wrapper, qc } = makeWrapper()
+    const invalidate = vi.spyOn(qc, 'invalidateQueries')
+
+    const { result } = renderHook(() => useRegenerateShare('team-1', 'tl-1'), { wrapper })
+    result.current.mutate('share-1')
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/shares/share-1/regenerate'),
+      expect.objectContaining({ method: 'POST' }),
+    )
+    expect(result.current.data?.token).toBe('rotated')
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        queryKey: ['teams', 'team-1', 'timelines', 'tl-1', 'shares'],
+      }),
+    )
+  })
+})
+
+// ── useDeleteShare ────────────────────────────────────────────────────────────
+
+describe('useDeleteShare', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('DELETEs the correct URL and invalidates the share list', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 204 }))
+
+    const { wrapper, qc } = makeWrapper()
+    const invalidate = vi.spyOn(qc, 'invalidateQueries')
+
+    const { result } = renderHook(() => useDeleteShare('team-1', 'tl-1'), { wrapper })
+    result.current.mutate('share-1')
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/shares/share-1'),
+      expect.objectContaining({ method: 'DELETE' }),
+    )
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        queryKey: ['teams', 'team-1', 'timelines', 'tl-1', 'shares'],
+      }),
+    )
+  })
+})
+
+// ── useShareProjection ────────────────────────────────────────────────────────
+
+const PROJECTION_FIXTURE = {
+  share: {
+    id: 'share-1',
+    timelineId: 'tl-1',
+    token: 'abc123',
+    viewType: 'gantt',
+    viewConfig: '{}',
+    createdAt: '2026-01-01T00:00:00Z',
+  },
+  teamName: 'Test Team',
+  timeline: { id: 'tl-1', name: 'Q1 Plan', startDate: '2026-01-01', endDate: '2026-12-31' },
+  members: [],
+  statuses: [],
+  tags: [],
+  activities: [],
+}
+
+describe('useShareProjection', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('fetches the public projection without an auth header', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(PROJECTION_FIXTURE), { status: 200 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useShareProjection('abc123'), { wrapper })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/shares/abc123'),
+      expect.anything(),
+    )
+    // No Authorization header — this is a public endpoint (no view token passed).
+    const callArgs = vi.mocked(fetch).mock.calls[0]
+    const opts = callArgs[1] as RequestInit | undefined
+    const headers = (opts?.headers ?? {}) as Record<string, string>
+    expect(headers.Authorization).toBeUndefined()
+    expect(result.current.data?.teamName).toBe('Test Team')
+  })
+
+  it('does not fetch when token is undefined', () => {
+    const { wrapper } = makeWrapper()
+    renderHook(() => useShareProjection(undefined), { wrapper })
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
+  })
+
+  it('throws an ApiError with the response status on non-200', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ error: { code: 'NOT_FOUND', message: 'share not found' } }),
+        { status: 404 },
+      ),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useShareProjection('bad-token'), { wrapper })
+
+    await waitFor(() => expect(result.current.isError).toBe(true))
+
+    const err = result.current.error as { status?: number; code?: string }
+    expect(err.status).toBe(404)
+    expect(err.code).toBe('NOT_FOUND')
+  })
+
+  it('sends the view token as a Bearer header when provided', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(PROJECTION_FIXTURE), { status: 200 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useShareProjection('abc123', 'view-jwt'), { wrapper })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    const opts = vi.mocked(fetch).mock.calls[0][1] as RequestInit | undefined
+    const headers = (opts?.headers ?? {}) as Record<string, string>
+    expect(headers.Authorization).toBe('Bearer view-jwt')
+  })
+
+  it('maps a 401 { passwordRequired } response to a PASSWORD_REQUIRED error', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ passwordRequired: true }), { status: 401 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useShareProjection('locked-token'), { wrapper })
+
+    await waitFor(() => expect(result.current.isError).toBe(true))
+
+    const err = result.current.error as { status?: number; code?: string }
+    expect(err.status).toBe(401)
+    expect(err.code).toBe('PASSWORD_REQUIRED')
+  })
+})
+
+// ── useUnlockShare ──────────────────────────────────────────────────────────────
+
+describe('useUnlockShare', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('POSTs the password to the unlock endpoint and returns the view token', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ token: 'view-jwt' }), { status: 200 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useUnlockShare('abc123'), { wrapper })
+
+    let token = ''
+    await waitFor(async () => { token = await result.current.mutateAsync('hunter2') })
+
+    expect(token).toBe('view-jwt')
+    const [url, opts] = vi.mocked(fetch).mock.calls[0]
+    expect(String(url)).toContain('/shares/abc123/unlock')
+    expect(opts?.method).toBe('POST')
+    expect(JSON.parse(String(opts?.body))).toEqual({ password: 'hunter2' })
+  })
+
+  it('throws an ApiError on a wrong password (401)', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: { code: 'INVALID_PASSWORD', message: 'incorrect password' } }), { status: 401 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useUnlockShare('abc123'), { wrapper })
+
+    await expect(result.current.mutateAsync('wrong')).rejects.toMatchObject({ status: 401 })
+  })
+})
+````
+
+## File: packages/web/src/hooks/useShares.ts
+````typescript
+/**
+ * TanStack Query hooks for Share CRUD and the public share projection.
+ *
+ * Authenticated hooks (useCreateShare, useListShares, useDeleteShare) require
+ * an auth token. useShareProjection is public and uses a plain fetch.
+ */
+
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import type { components } from '@draba/shared'
+import { createAuthFetch, API_BASE, ApiError } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
+
+type Share = components['schemas']['Share']
+type ShareProjection = components['schemas']['ShareProjection']
+
+const sharesKey = (teamId: string, timelineId: string) =>
+  ['teams', teamId, 'timelines', timelineId, 'shares'] as const
+
+// ── Authenticated hooks ───────────────────────────────────────────────────────
+
+/** Lists all shares for a timeline. */
+export function useListShares(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  return useQuery({
+    queryKey: sharesKey(teamId, timelineId),
+    queryFn: () =>
+      authFetch<Share[]>(`/teams/${teamId}/timelines/${timelineId}/shares`),
+    enabled: Boolean(teamId) && Boolean(timelineId),
+    // The share modals are this query's only consumers and mount on demand —
+    // override the app-wide 30s staleTime so the view telemetry they render
+    // (viewCount / lastViewedAt) is current every time a modal opens.
+    staleTime: 0,
+    refetchOnMount: 'always',
+  })
+}
+
+interface CreateShareInput {
+  /** "view" (default) or "ics" — ICS shares are live calendar feeds. */
+  kind?: 'view' | 'ics'
+  /** ICS shares only: "timeline" (every activity) or "member" (one member's). */
+  scope?: 'timeline' | 'member'
+  /** ICS shares with scope "member" only. */
+  memberId?: string
+  name?: string | null
+  description?: string | null
+  viewType?: string
+  viewConfig?: string
+  /** When set, the share is locked and requires unlocking to view. View shares only. */
+  password?: string
+}
+
+/** Creates a share and invalidates the list. */
+export function useCreateShare(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: CreateShareInput) =>
+      authFetch<Share>(`/timelines/${timelineId}/shares`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
+  })
+}
+
+/**
+ * Rotates a share's token, immediately invalidating the old URL — the
+ * revocation story for ICS feeds, which have no password gate.
+ */
+export function useRegenerateShare(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (shareId: string) =>
+      authFetch<Share>(`/shares/${shareId}/regenerate`, { method: 'POST' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
+  })
+}
+
+/** Deletes a share and invalidates the list. */
+export function useDeleteShare(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (shareId: string) =>
+      authFetch<void>(`/shares/${shareId}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
+  })
+}
+
+// ── Public hooks (no auth) ────────────────────────────────────────────────────
+
+/**
+ * Fetches a public share projection. No authentication required.
+ *
+ * For password-protected shares, pass the `viewToken` obtained from
+ * {@link useUnlockShare}; it is sent as a Bearer credential. Without a valid
+ * token a locked share responds 401 — surfaced here as an ApiError with code
+ * `PASSWORD_REQUIRED` so the viewer can render an unlock prompt.
+ */
+export function useShareProjection(token: string | undefined, viewToken?: string | null) {
+  return useQuery({
+    queryKey: ['shares', token, viewToken ?? null] as const,
+    queryFn: async () => {
+      const headers: HeadersInit = viewToken ? { Authorization: `Bearer ${viewToken}` } : {}
+      const res = await fetch(`${API_BASE}/shares/${token}`, { headers })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        // A locked share returns { passwordRequired: true } (no error envelope).
+        if (res.status === 401 && body?.passwordRequired) {
+          throw new ApiError(401, 'PASSWORD_REQUIRED', 'password required')
+        }
+        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
+      }
+      return res.json() as Promise<ShareProjection>
+    },
+    enabled: Boolean(token),
+    staleTime: 60_000,
+    retry: false,
+  })
+}
+
+/**
+ * Exchanges a share password for a short-lived view token. No authentication
+ * required. The returned token is scoped to this share and expires server-side.
+ */
+export function useUnlockShare(token: string | undefined) {
+  return useMutation({
+    mutationFn: async (password: string): Promise<string> => {
+      const res = await fetch(`${API_BASE}/shares/${token}/unlock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
+      }
+      return (body as { token: string }).token
+    },
+  })
+}
+````
+
 ## File: packages/web/src/lib/api.test.ts
 ````typescript
 /**
@@ -55908,6 +56581,129 @@ func WriteXLSXColumns(w io.Writer, rows []Row, columns []string) error {
 }
 ````
 
+## File: packages/api/internal/ics/ics.go
+````go
+// Package ics serializes activities into RFC 5545 iCalendar feeds for the
+// Phase 13.4 calendar share endpoint (GET /shares/{token}.ics). It implements
+// only the slice of the spec draba needs — all-day VEVENTs in a PUBLISH
+// calendar — rather than wrapping a general-purpose library.
+package ics
+
+import (
+	"strings"
+	"time"
+)
+
+// Event is one all-day calendar entry. Start and End are inclusive calendar
+// dates (draba's activity model, Phase 11.1.1); End is converted to the
+// RFC 5545 exclusive DTEND during serialization.
+type Event struct {
+	UID         string
+	Summary     string
+	Description string
+	// Categories become the CATEGORIES property (draba tags); clients that
+	// support it (Thunderbird, Apple Calendar) render them as event tags.
+	Categories []string
+	Start      time.Time
+	End        time.Time
+	// Stamp becomes DTSTAMP — the activity's last-modified time, which lets
+	// calendar clients detect changed events between polls.
+	Stamp time.Time
+}
+
+// Calendar renders a complete VCALENDAR document with CRLF line endings.
+// name becomes X-WR-CALNAME, the display name most clients adopt when the
+// user subscribes.
+func Calendar(name string, events []Event) string {
+	var b strings.Builder
+	writeLine(&b, "BEGIN:VCALENDAR")
+	writeLine(&b, "VERSION:2.0")
+	writeLine(&b, "PRODID:-//draba//draba//EN")
+	writeLine(&b, "CALSCALE:GREGORIAN")
+	writeLine(&b, "METHOD:PUBLISH")
+	// X-WR-CALNAME is the de-facto property older clients read; NAME is its
+	// standardized RFC 7986 successor. Emit both so every client that names
+	// the calendar from feed content gets the right answer.
+	writeLine(&b, "X-WR-CALNAME:"+escapeText(name))
+	writeLine(&b, "NAME:"+escapeText(name))
+	// Suggest an hourly poll to clients that honor a published refresh
+	// cadence (RFC 7986 REFRESH-INTERVAL; X-PUBLISHED-TTL for older ones).
+	writeLine(&b, "REFRESH-INTERVAL;VALUE=DURATION:PT1H")
+	writeLine(&b, "X-PUBLISHED-TTL:PT1H")
+	for i := range events {
+		writeEvent(&b, &events[i])
+	}
+	writeLine(&b, "END:VCALENDAR")
+	return b.String()
+}
+
+func writeEvent(b *strings.Builder, e *Event) {
+	writeLine(b, "BEGIN:VEVENT")
+	writeLine(b, "UID:"+escapeText(e.UID))
+	writeLine(b, "DTSTAMP:"+e.Stamp.UTC().Format("20060102T150405Z"))
+	writeLine(b, "DTSTART;VALUE=DATE:"+e.Start.UTC().Format("20060102"))
+	// RFC 5545 DTEND is exclusive: an event covering its inclusive end date
+	// must end at midnight of the following day.
+	writeLine(b, "DTEND;VALUE=DATE:"+e.End.UTC().AddDate(0, 0, 1).Format("20060102"))
+	writeLine(b, "SUMMARY:"+escapeText(e.Summary))
+	if e.Description != "" {
+		writeLine(b, "DESCRIPTION:"+escapeText(e.Description))
+	}
+	if len(e.Categories) > 0 {
+		// Commas separate list items here, so each value is escaped
+		// individually and joined with bare (unescaped) commas.
+		escaped := make([]string, len(e.Categories))
+		for i, c := range e.Categories {
+			escaped[i] = escapeText(c)
+		}
+		writeLine(b, "CATEGORIES:"+strings.Join(escaped, ","))
+	}
+	writeLine(b, "END:VEVENT")
+}
+
+// writeLine emits one content line, folded per RFC 5545 §3.1: lines longer
+// than 75 octets continue on the next line after a CRLF + single space.
+// Folding happens on rune boundaries so multi-byte UTF-8 sequences are never
+// split mid-character.
+func writeLine(b *strings.Builder, line string) {
+	const limit = 75
+	octets := 0
+	for _, r := range line {
+		rl := len(string(r))
+		if octets+rl > limit {
+			b.WriteString("\r\n ")
+			// The leading fold space counts against the next line's budget.
+			octets = 1
+		}
+		b.WriteRune(r)
+		octets += rl
+	}
+	b.WriteString("\r\n")
+}
+
+// escapeText escapes a value per RFC 5545 §3.3.11: backslash, semicolon, and
+// comma are backslash-escaped; newlines become literal "\n". A bare CR (legal
+// in JSON input) is folded into the newline escape, and any remaining C0/DEL
+// control characters are dropped — they are illegal in TEXT values, and a
+// lenient parser splitting lines on a stray CR could otherwise read injected
+// property lines out of user-controlled content.
+func escapeText(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, ";", `\;`)
+	s = strings.ReplaceAll(s, ",", `\,`)
+	s = strings.ReplaceAll(s, "\r\n", `\n`)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	s = strings.ReplaceAll(s, "\r", `\n`)
+	return strings.Map(func(r rune) rune {
+		// HTAB is the one control character TEXT permits.
+		if (r < 0x20 && r != '\t') || r == 0x7F {
+			return -1
+		}
+		return r
+	}, s)
+}
+````
+
 ## File: packages/api/internal/importer/importer.go
 ````go
 // Package importer parses CSV/xlsx uploads into validated, resolved activity
@@ -56502,6 +57298,143 @@ import "embed"
 //
 //go:embed all:static
 var FS embed.FS
+````
+
+## File: packages/web/src/components/calendar/CalendarToolbar.tsx
+````typescript
+/**
+ * CalendarToolbar — sub-toolbar for the Calendar view.
+ *
+ * Provides: Month / Week layout toggle, today / prev / next navigation,
+ * a jump-to-date picker, color-by, an export stub, and Share (opens the
+ * ICS feed modal — CalendarShareModal, not the view-share modal).
+ */
+
+import { ChevronLeft, ChevronRight, Download, Share2 } from 'lucide-react';
+import type { ColorBy } from '@/components/gantt/GanttToolbar';
+
+export type CalendarLayout = 'month' | 'week';
+
+interface Props {
+  layout: CalendarLayout;
+  onLayoutChange: (l: CalendarLayout) => void;
+  /** The month/week currently in view. */
+  anchorDate: Date;
+  onPrev: () => void;
+  onNext: () => void;
+  onToday: () => void;
+  colorBy: ColorBy;
+  onColorByChange: (c: ColorBy) => void;
+  onExport?: () => void;
+  onShare?: () => void;
+}
+
+const btn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0 hover:bg-muted transition-colors';
+const iconBtn = 'flex items-center justify-center h-[26px] w-[26px] border border-border rounded-md bg-card text-foreground cursor-pointer shrink-0 hover:bg-muted transition-colors';
+const divider = 'w-px h-4 bg-border shrink-0';
+const label   = 'text-[11px] text-muted-foreground shrink-0';
+const select  = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
+
+/**
+ * Formats the in-view period as a human label: "June 2026" for month layout,
+ * "Jun 1 – 7, 2026" for week. Exported so the PNG export header can show the
+ * same period text the toolbar does (the toolbar itself is excluded from the
+ * capture, which otherwise leaves the image with no month/week indication).
+ */
+export function formatAnchorLabel(date: Date, layout: CalendarLayout): string {
+  if (layout === 'month') {
+    return date.toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  }
+  // Week: show the range "Jun 1 – 7, 2026"
+  const end = new Date(date);
+  end.setUTCDate(date.getUTCDate() + 6);
+  const startStr = date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+  const endStr   = end.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+  return `${startStr} – ${endStr}`;
+}
+
+export default function CalendarToolbar({
+  layout,
+  onLayoutChange,
+  anchorDate,
+  onPrev,
+  onNext,
+  onToday,
+  colorBy,
+  onColorByChange,
+  onExport,
+  onShare,
+}: Props) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '0 12px', height: 36, background: 'var(--card)', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+      {/* Layout toggle */}
+      <div style={{ display: 'flex', border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden', height: 26 }}>
+        {(['month', 'week'] as CalendarLayout[]).map(l => (
+          <button
+            key={l}
+            onClick={() => onLayoutChange(l)}
+            style={{
+              padding: '0 10px',
+              fontSize: 12,
+              fontWeight: 500,
+              border: 'none',
+              borderRight: l === 'month' ? '1px solid var(--border)' : 'none',
+              background: layout === l ? 'var(--muted)' : 'var(--card)',
+              color: 'var(--foreground)',
+              cursor: 'pointer',
+              height: '100%',
+            }}
+          >
+            {l === 'month' ? 'Month' : 'Week'}
+          </button>
+        ))}
+      </div>
+
+      <div className={divider} />
+
+      {/* Navigation */}
+      <button className={iconBtn} onClick={onPrev} title="Previous">
+        <ChevronLeft size={13} strokeWidth={2} />
+      </button>
+      <button className={btn} onClick={onToday}>Today</button>
+      <button className={iconBtn} onClick={onNext} title="Next">
+        <ChevronRight size={13} strokeWidth={2} />
+      </button>
+
+      {/* Current range label */}
+      <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)', minWidth: 160, textAlign: 'center' }}>
+        {formatAnchorLabel(anchorDate, layout)}
+      </span>
+
+      <div className={divider} />
+
+      {/* Color by */}
+      <span className={label}>Color by</span>
+      <select
+        className={select}
+        value={colorBy}
+        onChange={e => onColorByChange(e.target.value as ColorBy)}
+      >
+        <option value="activity">Activity</option>
+        <option value="member">Member</option>
+        <option value="status">Status</option>
+      </select>
+
+      {/* Export + share — pushed to the right edge */}
+      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div className={divider} />
+        <button className={btn} onClick={onExport} title="Export activities">
+          <Download size={12} strokeWidth={1.8} />
+          Export
+        </button>
+        <button className={btn} onClick={onShare} title="Share this calendar">
+          <Share2 size={12} strokeWidth={1.8} />
+          Share
+        </button>
+      </div>
+    </div>
+  );
+}
 ````
 
 ## File: packages/web/src/components/export/CleanSnapshot.tsx
@@ -58238,6 +59171,830 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImpo
 }
 ````
 
+## File: packages/web/src/components/CalendarShareModal.tsx
+````typescript
+/**
+ * CalendarShareModal — manage the ICS calendar feeds for a timeline.
+ *
+ * Deliberately a different surface from ShareModal (Phase 13.4): a Calendar
+ * share is not a frozen view snapshot but a live subscribable ICS feed. The
+ * modal is a flat list of every feed the timeline can publish — the whole
+ * timeline first, then one row per team member — each with an on/off toggle.
+ * Toggling a row on creates that feed and reveals its URL (copy, one-click
+ * subscribe links, regenerate); toggling off deletes it, killing the URL
+ * immediately.
+ *
+ * All feeds are public read-only. There is no password option: calendar
+ * clients cannot unlock a subscription URL interactively, so the unguessable
+ * token is the secret and revocation is regenerate-or-toggle-off.
+ */
+
+import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
+import {
+  CalendarDays, Link2, Copy, Check, RefreshCw, X, Users,
+} from 'lucide-react'
+import { useListShares, useCreateShare, useDeleteShare, useRegenerateShare } from '@/hooks/useShares'
+import { useTeamMembers } from '@/hooks/useTeamActivities'
+import { Badge } from '@/components/identity/Badge'
+import { resolveColorHex } from '@/components/identity/identity-constants'
+import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
+import { MEMBER_COLORS } from '@/types'
+import type { components } from '@draba/shared'
+
+type Share = components['schemas']['Share']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+
+interface Props {
+  teamId: string
+  timelineId: string
+  /** Display name of the timeline, shown in the header subtitle and feed names. */
+  timelineName?: string
+  onClose: () => void
+}
+
+const TILE_TEAL = 'bg-[hsl(188_59%_38%/0.12)] text-primary'
+
+/**
+ * URL-safe slug for the feed filename. Calendar clients (Thunderbird
+ * included) default the new calendar's name from the URL's filename, so the
+ * link ends in a readable `<name>.ics` rather than the bare token hash. The
+ * server treats the filename as cosmetic — the token is the key.
+ */
+function slugify(name: string): string {
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+  return slug || 'calendar'
+}
+
+/** Builds the absolute https feed URL for a share token. */
+function feedURL(token: string, name: string): string {
+  return `${window.location.origin}/shares/${token}/${slugify(name)}.ics`
+}
+
+/** The webcal:// variant most calendar apps treat as "subscribe". */
+function webcalURL(token: string, name: string): string {
+  return feedURL(token, name).replace(/^https?:\/\//, 'webcal://')
+}
+
+// ── One feed row: label + toggle, expanding to the link when on ───────────────
+
+function FeedRow({
+  label,
+  member,
+  share,
+  busy,
+  onToggle,
+  onRegenerate,
+}: {
+  label: string
+  /** Set for member rows — renders the identity badge next to the label. */
+  member?: TeamMemberWithUser
+  /** The existing ICS share for this row, when the feed is on. */
+  share?: Share
+  busy: boolean
+  onToggle: () => void
+  onRegenerate: (shareId: string) => void
+}) {
+  const [copied, setCopied] = useState(false)
+  const on = Boolean(share)
+  const url = share ? feedURL(share.token, share.name ?? label) : null
+  const webcal = share ? webcalURL(share.token, share.name ?? label) : null
+
+  const copy = () => {
+    if (!url) return
+    void navigator.clipboard.writeText(url).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1600)
+    })
+  }
+
+  return (
+    <div className="overflow-hidden rounded-[var(--radius-md)] border border-border">
+      <div className="flex items-center gap-2.5 px-3 py-2.5">
+        {member ? (
+          <Badge
+            identity={{ color: resolveColorHex(member.color) || MEMBER_COLORS[0], icon: member.icon ?? '__name_1__' }}
+            name={member.displayName || 'Team member'}
+            size={26}
+            shape="circle"
+          />
+        ) : (
+          <div className={cn('flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
+            <CalendarDays size={14} strokeWidth={2.2} />
+          </div>
+        )}
+        <div className="flex-1 text-[13px] font-semibold text-foreground">{label}</div>
+        <button
+          onClick={onToggle}
+          role="switch"
+          aria-checked={on}
+          aria-label={`${label} feed`}
+          disabled={busy}
+          className={cn(
+            'relative h-[22px] w-10 shrink-0 cursor-pointer rounded-[var(--radius-full)] border-none p-0 transition-colors',
+            on ? 'bg-primary' : 'bg-border',
+          )}
+        >
+          <span className={cn(
+            'absolute top-[2px] h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-[left] duration-150',
+            on ? 'left-5' : 'left-[2px]',
+          )} />
+        </button>
+      </div>
+
+      {share && url && webcal && (
+        <div className="flex flex-col gap-2 border-t border-border bg-muted/40 px-3 py-2.5">
+          <div className="flex items-center gap-2">
+            <div className="flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12px] text-foreground">
+              <Link2 size={13} className="shrink-0 text-muted-foreground" strokeWidth={2} />
+              <span className="overflow-hidden text-ellipsis whitespace-nowrap">{url}</span>
+            </div>
+            <button
+              onClick={copy}
+              className={cn(
+                'flex shrink-0 items-center gap-[5px] rounded-[var(--radius-md)] border px-3 py-[7px] text-[12.5px] font-semibold transition-colors',
+                copied ? 'border-success bg-[hsl(145_63%_42%/0.12)] text-success' : 'border-border bg-card text-foreground',
+              )}
+            >
+              {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={2.2} />}
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
+            <span className="text-muted-foreground">Add to:</span>
+            <a
+              href={`https://calendar.google.com/calendar/render?cid=${encodeURIComponent(webcal)}`}
+              target="_blank"
+              rel="noreferrer"
+              className="font-semibold text-primary hover:underline"
+            >
+              Google
+            </a>
+            <a href={webcal} className="font-semibold text-primary hover:underline">
+              Apple
+            </a>
+            <a
+              href={`https://outlook.live.com/calendar/0/addfromweb?url=${encodeURIComponent(webcal)}&name=${encodeURIComponent(share.name ?? label)}`}
+              target="_blank"
+              rel="noreferrer"
+              className="font-semibold text-primary hover:underline"
+            >
+              Outlook
+            </a>
+            <button
+              onClick={() => onRegenerate(share.id)}
+              disabled={busy}
+              title="Replace the link — the old URL stops working immediately"
+              className="ml-auto flex cursor-pointer items-center gap-[5px] border-none bg-transparent p-0 text-[12px] font-semibold text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <RefreshCw size={12} strokeWidth={2} />
+              Regenerate link
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── The modal shell ────────────────────────────────────────────────────────────
+
+export default function CalendarShareModal({ teamId, timelineId, timelineName, onClose }: Props) {
+  const { data: allShares = [], isLoading } = useListShares(teamId, timelineId)
+  const { data: members = [] } = useTeamMembers(teamId)
+  const createShare = useCreateShare(teamId, timelineId)
+  const deleteShare = useDeleteShare(teamId, timelineId)
+  const regenerateShare = useRegenerateShare(teamId, timelineId)
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const icsShares = allShares.filter(s => s.kind === 'ics')
+  const timelineShare = icsShares.find(s => s.scope === 'timeline')
+  const memberShare = (memberId: string) =>
+    icsShares.find(s => s.scope === 'member' && s.memberId === memberId)
+
+  const busy = isLoading || createShare.isPending || deleteShare.isPending || regenerateShare.isPending
+
+  const toggleTimeline = () => {
+    if (busy) return
+    if (timelineShare) {
+      deleteShare.mutate(timelineShare.id)
+    } else {
+      createShare.mutate({ kind: 'ics', scope: 'timeline', name: `${timelineName ?? 'Timeline'} calendar feed` })
+    }
+  }
+
+  const toggleMember = (m: TeamMemberWithUser) => {
+    if (busy) return
+    const existing = memberShare(m.id)
+    if (existing) {
+      deleteShare.mutate(existing.id)
+    } else {
+      createShare.mutate({
+        kind: 'ics',
+        scope: 'member',
+        memberId: m.id,
+        name: `${m.displayName || 'Member'} calendar feed`,
+      })
+    }
+  }
+
+  return createPortal(
+    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]">
+      <div className="flex max-h-[88vh] w-[min(560px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]">
+        {/* Header */}
+        <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-[18px]">
+          <div className={cn('flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
+            <CalendarDays size={19} strokeWidth={2.2} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Share calendar</h2>
+            <div className="mt-0.5 text-[12.5px] text-muted-foreground">
+              {timelineName ? `${timelineName} · ` : ''}live read-only feeds — subscribe from Google, Apple, or Outlook
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
+          >
+            <X size={16} strokeWidth={2.2} />
+          </button>
+        </div>
+
+        {/* Body — one row per publishable feed */}
+        <div className="flex flex-1 flex-col gap-2 overflow-y-auto px-5 py-4">
+          <FeedRow
+            label="Whole timeline"
+            share={timelineShare}
+            busy={busy}
+            onToggle={toggleTimeline}
+            onRegenerate={id => regenerateShare.mutate(id)}
+          />
+
+          {members.length > 0 && (
+            <div className="mt-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Per member</div>
+          )}
+          {members.map(m => (
+            <FeedRow
+              key={m.id}
+              label={m.displayName || 'Team member'}
+              member={m}
+              share={memberShare(m.id)}
+              busy={busy}
+              onToggle={() => toggleMember(m)}
+              onRegenerate={id => regenerateShare.mutate(id)}
+            />
+          ))}
+
+          {(createShare.isError || deleteShare.isError || regenerateShare.isError) && (
+            <p className="text-[11px] text-destructive">Something went wrong. Please try again.</p>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="flex shrink-0 items-center gap-2.5 border-t border-border px-5 py-[13px]">
+          <div className="flex items-center gap-[7px] text-xs text-muted-foreground">
+            <Users size={14} strokeWidth={2} />
+            Public read-only · the link itself is the secret
+          </div>
+          <Button variant="outline" className="ml-auto" onClick={onClose}>Done</Button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+````
+
+## File: packages/web/src/components/ShareModal.tsx
+````typescript
+/**
+ * ShareModal — manage the share links for the current timeline view.
+ *
+ * Rebuilt to the "Share this view" design handoff (docs/design/handoffs/share-modal):
+ * an active-links list with per-row creator/date/view-count meta and an inline
+ * delete-confirm, plus an inline create form with optional password protection.
+ * One timeline can host many named shares; each is a frozen view snapshot.
+ *
+ * Styled with Tailwind utility classes against the project's design tokens
+ * (see index.css `@theme`) and shadcn/ui primitives — the handoff is a visual
+ * reference, not production code, so its inline styles were not ported.
+ *
+ * Delete is intentionally not permission-gated — a share is a read-only
+ * projection that cannot mutate app data, so any team member may manage any
+ * link (Phase 13.2 decision).
+ */
+
+import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import {
+  Link as LinkIcon, Link2, Lock, KeyRound, Copy, Check, Eye, EyeOff,
+  Trash2, Plus, PlusCircle, X, Users,
+} from 'lucide-react'
+import { useCreateShare, useListShares, useDeleteShare } from '@/hooks/useShares'
+import { useTeamMembers } from '@/hooks/useTeamActivities'
+import { useAuth } from '@/contexts/AuthContext'
+import { Badge } from '@/components/identity/Badge'
+import { resolveColorHex } from '@/components/identity/identity-constants'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { cn } from '@/lib/utils'
+import { MEMBER_COLORS } from '@/types'
+import type { FilterDefinition } from '@/lib/filterTypes'
+import type { components } from '@draba/shared'
+
+type Share = components['schemas']['Share']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+
+export interface ShareViewConfig {
+  groupBy: string
+  sortBy: string
+  colorBy: string
+  granularity: string
+  filter: FilterDefinition | null
+  /** List shares only — column visibility snapshot; drives the "notes" projection nuance. */
+  columns?: { id: string; visible: boolean }[]
+  /** Kanban shares only — which fields render on each card. */
+  cardFields?: string[]
+  /** Kanban shares only — whether child activities nest under their parent. */
+  showHierarchy?: boolean
+  /** Kanban shares only — column IDs collapsed at share-creation time. */
+  collapsedColumns?: string[]
+}
+
+interface Props {
+  teamId: string
+  timelineId: string
+  viewType: 'gantt' | 'list' | 'calendar' | 'kanban'
+  viewConfig: ShareViewConfig
+  /** Display name of the timeline, shown in the header subtitle. */
+  timelineName?: string
+  onClose: () => void
+}
+
+interface CreatePayload {
+  title: string
+  description: string
+  password: string | null
+}
+
+// ── Shared token-styled bits ──────────────────────────────────────────────────
+//
+// The handoff colors a share's "type tile" teal (open link) or amber
+// (password-protected). Those tints aren't semantic tokens on their own, so
+// they're expressed as arbitrary-value Tailwind classes derived from the
+// existing `--primary` / `--secondary` HSL values rather than ported hex.
+
+const TILE_TEAL = 'bg-[hsl(188_59%_38%/0.12)] text-primary'
+const TILE_AMBER = 'bg-[hsl(30_87%_62%/0.16)] text-secondary'
+const BADGE_AMBER = 'bg-[hsl(30_87%_62%/0.22)] text-secondary-foreground'
+
+function MiniAvatar({ member, size = 20 }: { member: TeamMemberWithUser | undefined; size?: number }) {
+  if (!member) return null
+  const name = member.displayName || 'Team member'
+  const color = resolveColorHex(member.color) || MEMBER_COLORS[0]
+  return (
+    <Badge identity={{ color, icon: member.icon ?? '__name_1__' }} name={name} size={size} shape="circle" />
+  )
+}
+
+function formatCreated(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+/**
+ * Short "last viewed" label for a share row: time of day when the last view
+ * was today, otherwise the same short date format as the created date.
+ */
+function formatLastViewed(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const now = new Date()
+  if (d.toDateString() === now.toDateString()) {
+    return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+  }
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+// ── A single share row ─────────────────────────────────────────────────────────
+
+function ShareRow({
+  share,
+  creator,
+  isOwn,
+  onDelete,
+}: {
+  share: Share
+  creator: TeamMemberWithUser | undefined
+  isOwn: boolean
+  onDelete: (id: string) => void
+}) {
+  const url = `${window.location.host}/s/${share.token}`
+  const [copied, setCopied] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const protectedShare = Boolean(share.protected)
+
+  const copy = () => {
+    void navigator.clipboard.writeText(`${window.location.origin}/s/${share.token}`).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1600)
+    })
+  }
+
+  return (
+    <div className="relative rounded-[var(--radius-lg)] border border-border bg-card p-3.5 shadow-sm">
+      {/* Top: type tile + title + delete */}
+      <div className="flex items-start gap-2.5">
+        <div className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-md)]', protectedShare ? TILE_AMBER : TILE_TEAL)}>
+          {protectedShare ? <Lock size={16} strokeWidth={2.2} /> : <LinkIcon size={16} strokeWidth={2.2} />}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-semibold text-foreground">{share.name || 'Untitled link'}</span>
+            {protectedShare && (
+              <span className={cn('inline-flex items-center gap-1 rounded-[var(--radius-full)] px-2 py-px text-[11px] font-semibold', BADGE_AMBER)}>
+                <Lock size={10} strokeWidth={2.4} /> password
+              </span>
+            )}
+          </div>
+          {share.description && (
+            <p className="mt-[3px] text-[12.5px] leading-[1.45] text-muted-foreground">{share.description}</p>
+          )}
+        </div>
+        <button
+          onClick={() => setConfirming(true)}
+          title="Delete share"
+          className="flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-transparent text-muted-foreground transition-colors hover:bg-[hsl(0_72%_51%/0.1)] hover:text-destructive"
+        >
+          <Trash2 size={15} strokeWidth={2} />
+        </button>
+      </div>
+
+      {/* URL row */}
+      <div className="mt-[11px] flex items-center gap-2">
+        <div className="flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12.5px] text-foreground">
+          <Link2 size={13} className="shrink-0 text-muted-foreground" strokeWidth={2} />
+          <span className="overflow-hidden text-ellipsis whitespace-nowrap">{url}</span>
+        </div>
+        <button
+          onClick={copy}
+          className={cn(
+            'flex shrink-0 items-center gap-[5px] rounded-[var(--radius-md)] border px-3 py-[7px] text-[12.5px] font-semibold transition-colors',
+            copied ? 'border-success bg-[hsl(145_63%_42%/0.12)] text-success' : 'border-border bg-card text-foreground',
+          )}
+        >
+          {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={2.2} />}
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+
+      {/* Footer meta — labeled columns so each value carries its own context */}
+      <div className="mt-[11px] grid grid-cols-3 gap-2 border-t border-border pt-2.5">
+        <div title={`Created ${formatCreated(share.createdAt)}`}>
+          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">Created by</div>
+          <div className="mt-1 flex min-w-0 items-center gap-1.5 text-xs">
+            <MiniAvatar member={creator} size={16} />
+            <span className="truncate font-semibold text-foreground">
+              {creator?.displayName ?? 'Team member'}
+              {isOwn && <span className="font-normal text-muted-foreground"> · you</span>}
+            </span>
+          </div>
+        </div>
+        <div title={share.lastViewedAt ? new Date(share.lastViewedAt).toLocaleString() : undefined}>
+          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">Last viewed</div>
+          <div className="mt-1 text-xs text-foreground">
+            {share.lastViewedAt ? formatLastViewed(share.lastViewedAt) : 'Never'}
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">View total</div>
+          <div className="mt-1 inline-flex items-center gap-1 text-xs text-foreground">
+            <Eye size={12} strokeWidth={2} className="text-muted-foreground" />
+            {share.viewCount}
+          </div>
+        </div>
+      </div>
+
+      {/* Inline delete confirm */}
+      {confirming && (
+        <div className="absolute inset-0 flex flex-col justify-center gap-2.5 rounded-[var(--radius-lg)] border border-destructive bg-card px-4 py-3.5">
+          <div className="flex items-start gap-2.5">
+            <div className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[hsl(0_72%_51%/0.1)] text-destructive">
+              <Trash2 size={15} strokeWidth={2.2} />
+            </div>
+            <div>
+              <div className="text-[13.5px] font-semibold text-foreground">Delete this share?</div>
+              <div className="mt-0.5 text-xs text-muted-foreground">Anyone with the link will immediately lose access. This can&apos;t be undone.</div>
+            </div>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" size="sm" onClick={() => setConfirming(false)}>Cancel</Button>
+            <Button variant="destructive" size="sm" onClick={() => { onDelete(share.id); setConfirming(false) }}>Delete link</Button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── The add-share inline form ───────────────────────────────────────────────────
+
+/**
+ * No shadcn Textarea exists yet, so this mirrors Input's class string —
+ * keeps the field visually consistent without inline styles.
+ */
+const TEXTAREA_CLASSES = 'flex w-full resize-y rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] shadow-sm transition-colors placeholder:text-[var(--muted-foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]'
+
+function AddShareForm({
+  currentMember,
+  onCreate,
+  onCancel,
+  isPending,
+  isError,
+}: {
+  currentMember: TeamMemberWithUser | undefined
+  onCreate: (payload: CreatePayload) => void
+  onCancel: () => void
+  isPending: boolean
+  isError: boolean
+}) {
+  const [title, setTitle] = useState('')
+  const [desc, setDesc] = useState('')
+  const [pwOn, setPwOn] = useState(false)
+  const [pw, setPw] = useState('')
+  const [showPw, setShowPw] = useState(false)
+  const titleRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => { titleRef.current?.focus() }, [])
+
+  const valid = title.trim().length > 0 && (!pwOn || pw.trim().length > 0)
+
+  const submit = () => {
+    if (!valid || isPending) return
+    onCreate({ title: title.trim(), description: desc.trim(), password: pwOn ? pw : null })
+  }
+
+  return (
+    <div className="rounded-[var(--radius-lg)] border-[1.5px] border-primary bg-card p-4 shadow-[0_0_0_3px_hsl(188_59%_38%/0.08)]">
+      <div className="mb-3.5 flex items-center gap-2">
+        <PlusCircle size={16} className="text-primary" strokeWidth={2.2} />
+        <span className="text-[13.5px] font-bold text-foreground">New share link</span>
+      </div>
+
+      <div className="mb-3 flex flex-col gap-1.5">
+        <Label htmlFor="share-title">Title</Label>
+        <Input
+          id="share-title"
+          ref={titleRef}
+          value={title}
+          onChange={e => setTitle(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') submit() }}
+          placeholder="e.g. Acme stakeholder view"
+        />
+      </div>
+
+      <div className="mb-3 flex flex-col gap-1.5">
+        <Label htmlFor="share-description">
+          Description <span className="lowercase font-normal">· optional</span>
+        </Label>
+        <textarea
+          id="share-description"
+          value={desc}
+          onChange={e => setDesc(e.target.value)}
+          rows={2}
+          placeholder="What's this link for, and who is it shared with?"
+          className={TEXTAREA_CLASSES}
+        />
+      </div>
+
+      {/* Password protect */}
+      <div className="overflow-hidden rounded-[var(--radius-md)] border border-border">
+        <div className="flex items-center gap-2.5 px-3 py-2.5">
+          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-muted text-muted-foreground">
+            <Lock size={14} strokeWidth={2} />
+          </div>
+          <div className="flex-1">
+            <div className="text-[13px] font-semibold text-foreground">Password protect</div>
+            <div className="text-[11.5px] text-muted-foreground">Require a password to open the link</div>
+          </div>
+          <button
+            onClick={() => setPwOn(v => !v)}
+            role="switch"
+            aria-checked={pwOn}
+            aria-label="Password protect"
+            className={cn(
+              'relative h-[22px] w-10 shrink-0 cursor-pointer rounded-[var(--radius-full)] border-none p-0 transition-colors',
+              pwOn ? 'bg-primary' : 'bg-border',
+            )}
+          >
+            <span className={cn(
+              'absolute top-[2px] h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-[left] duration-150',
+              pwOn ? 'left-5' : 'left-[2px]',
+            )} />
+          </button>
+        </div>
+        {pwOn && (
+          <div className="border-t border-border px-3 py-3">
+            <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-input bg-card px-2.5">
+              <KeyRound size={14} className="text-muted-foreground" strokeWidth={2} />
+              <input
+                value={pw}
+                onChange={e => setPw(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') submit() }}
+                type={showPw ? 'text' : 'password'}
+                placeholder="Set a password"
+                className="flex-1 border-none bg-transparent py-2 text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
+              />
+              <button
+                onClick={() => setShowPw(v => !v)}
+                aria-label={showPw ? 'Hide password' : 'Show password'}
+                className="flex cursor-pointer border-none bg-transparent p-1 text-muted-foreground"
+              >
+                {showPw ? <EyeOff size={14} strokeWidth={2} /> : <Eye size={14} strokeWidth={2} />}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {isError && (
+        <p className="mt-2.5 text-[11px] text-destructive">Failed to create share. Please try again.</p>
+      )}
+
+      {/* Actions */}
+      <div className="mt-4 flex items-center gap-2.5">
+        <div className="mr-auto flex items-center gap-[7px] text-xs text-muted-foreground">
+          <MiniAvatar member={currentMember} size={20} />
+          <span>Sharing as {currentMember?.displayName ?? 'you'}</span>
+        </div>
+        <Button variant="outline" onClick={onCancel}>Cancel</Button>
+        <Button onClick={submit} disabled={!valid || isPending}>
+          <LinkIcon size={14} strokeWidth={2.2} /> {isPending ? 'Creating…' : 'Create link'}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+// ── The modal shell ──────────────────────────────────────────────────────────
+
+export default function ShareModal({ teamId, timelineId, viewType, viewConfig, timelineName, onClose }: Props) {
+  const { user } = useAuth()
+  const { data: allShares = [], isLoading } = useListShares(teamId, timelineId)
+  // Scoped to this exact view — a share is a frozen snapshot of one view's
+  // config, so a Gantt link can't usefully stand in for a List or Kanban one.
+  // Showing only same-type links keeps "active links" literal and leaves room
+  // to tailor the modal per view type (e.g. Calendar/ICS in 13.4) without
+  // having to reconcile it against unrelated shares.
+  // kind === 'view' also keeps ICS calendar feeds (13.4) out of this list —
+  // they live in CalendarShareModal, a different surface entirely.
+  const shares = allShares.filter(s => s.kind === 'view' && s.viewType === viewType)
+  const { data: members = [] } = useTeamMembers(teamId)
+  const createShare = useCreateShare(teamId, timelineId)
+  const deleteShare = useDeleteShare(teamId, timelineId)
+  const [adding, setAdding] = useState(false)
+  const bodyRef = useRef<HTMLDivElement>(null)
+
+  const memberByID = new Map(members.map(m => [m.id, m]))
+  const currentMember = members.find(m => m.userId && m.userId === user?.id)
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const configString = JSON.stringify({
+    groupBy: viewConfig.groupBy,
+    sortBy: viewConfig.sortBy,
+    colorBy: viewConfig.colorBy,
+    granularity: viewConfig.granularity,
+    filter: viewConfig.filter ?? { logic: 'and', conditions: [] },
+    ...(viewConfig.columns ? { columns: viewConfig.columns } : {}),
+    ...(viewConfig.cardFields ? { cardFields: viewConfig.cardFields } : {}),
+    ...(viewConfig.showHierarchy !== undefined ? { showHierarchy: viewConfig.showHierarchy } : {}),
+    ...(viewConfig.collapsedColumns ? { collapsedColumns: viewConfig.collapsedColumns } : {}),
+  })
+
+  const handleCreate = (payload: CreatePayload) => {
+    createShare.mutate(
+      {
+        name: payload.title,
+        description: payload.description || null,
+        viewType,
+        viewConfig: configString,
+        password: payload.password ?? undefined,
+      },
+      {
+        onSuccess: () => {
+          setAdding(false)
+          setTimeout(() => { if (bodyRef.current) bodyRef.current.scrollTop = 0 }, 0)
+        },
+      },
+    )
+  }
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]"
+    >
+      <div
+        className="flex max-h-[88vh] w-[min(580px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]"
+      >
+        {/* Header */}
+        <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-[18px]">
+          <div className={cn('flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
+            <LinkIcon size={19} strokeWidth={2.2} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Share this view</h2>
+            <div className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
+              <span className="inline-block h-2 w-2 shrink-0 rounded-sm bg-secondary" />
+              {timelineName ? `${timelineName} · ` : ''}anyone with a link can view
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
+          >
+            <X size={16} strokeWidth={2.2} />
+          </button>
+        </div>
+
+        {/* Section bar */}
+        <div className="flex shrink-0 items-center gap-2 px-5 pb-[11px] pt-[13px]">
+          <span className="text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Active links</span>
+          <span className="min-w-[20px] rounded-[var(--radius-full)] bg-muted px-2 py-px text-center text-[11px] font-bold text-muted-foreground">{shares.length}</span>
+          <div className="ml-auto">
+            {!adding && (
+              <Button size="sm" onClick={() => setAdding(true)}>
+                <Plus size={14} strokeWidth={2.4} /> New share
+              </Button>
+            )}
+          </div>
+        </div>
+
+        {/* Body */}
+        <div ref={bodyRef} className="flex min-h-[120px] flex-1 flex-col gap-3 overflow-y-auto px-5 pb-5">
+          {adding && (
+            <AddShareForm
+              currentMember={currentMember}
+              onCreate={handleCreate}
+              onCancel={() => setAdding(false)}
+              isPending={createShare.isPending}
+              isError={createShare.isError}
+            />
+          )}
+
+          {!isLoading && shares.length === 0 && !adding && (
+            <div className="flex flex-1 flex-col items-center justify-center rounded-[var(--radius-lg)] border border-dashed border-border px-5 py-9 text-center">
+              <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-[var(--radius-lg)] bg-muted text-muted-foreground">
+                <LinkIcon size={22} strokeWidth={1.8} />
+              </div>
+              <div className="text-sm font-semibold text-foreground">No share links yet</div>
+              <div className="mt-1 max-w-[280px] text-[12.5px] text-muted-foreground">Create a link to let people outside your team view this timeline.</div>
+              <Button size="sm" className="mt-4" onClick={() => setAdding(true)}>
+                <Plus size={14} strokeWidth={2.4} /> Create share link
+              </Button>
+            </div>
+          )}
+
+          {shares.map(s => (
+            <ShareRow
+              key={s.id}
+              share={s}
+              creator={s.createdBy ? memberByID.get(s.createdBy) : undefined}
+              isOwn={Boolean(currentMember && s.createdBy === currentMember.id)}
+              onDelete={(id) => deleteShare.mutate(id)}
+            />
+          ))}
+        </div>
+
+        {/* Footer */}
+        <div className="flex shrink-0 items-center gap-2.5 border-t border-border px-5 py-[13px]">
+          <div className="flex items-center gap-[7px] text-xs text-muted-foreground">
+            <Users size={14} strokeWidth={2} />
+            Read-only links · anyone on your team can manage them
+          </div>
+          <Button variant="outline" className="ml-auto" onClick={onClose}>Done</Button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+````
+
 ## File: packages/web/src/hooks/useExport.ts
 ````typescript
 /**
@@ -58307,526 +60064,6 @@ export function useExport(timelineId: string, timelineName: string) {
   }
 
   return { download, isPending, error }
-}
-````
-
-## File: packages/web/src/hooks/useShares.test.ts
-````typescript
-/**
- * useShares hooks — unit tests verifying query keys, mutation endpoints,
- * cache invalidation, and the public share projection fetch.
- * Uses a real QueryClient with fetch mocked globally.
- */
-
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { renderHook, waitFor } from '@testing-library/react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { createElement } from 'react'
-import {
-  useListShares,
-  useCreateShare,
-  useDeleteShare,
-  useRegenerateShare,
-  useShareProjection,
-  useUnlockShare,
-} from './useShares'
-
-// ── Auth mock ─────────────────────────────────────────────────────────────────
-
-vi.mock('@/contexts/AuthContext', () => ({
-  useAuth: () => ({ getAccessToken: async () => 'test-token' }),
-}))
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function makeWrapper() {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return {
-    qc,
-    wrapper: ({ children }: { children: React.ReactNode }) =>
-      createElement(QueryClientProvider, { client: qc }, children),
-  }
-}
-
-const SHARE_FIXTURE = {
-  id: 'share-1',
-  timelineId: 'tl-1',
-  token: 'abc123',
-  viewType: 'gantt',
-  viewConfig: '{}',
-  createdBy: 'member-1',
-  createdAt: '2026-01-01T00:00:00Z',
-  viewCount: 0,
-}
-
-// ── useListShares ─────────────────────────────────────────────────────────────
-
-describe('useListShares', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('fetches shares from the correct URL', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify([SHARE_FIXTURE]), { status: 200 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useListShares('team-1', 'tl-1'), { wrapper })
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      expect.stringContaining('/teams/team-1/timelines/tl-1/shares'),
-      expect.any(Object),
-    )
-    expect(result.current.data).toHaveLength(1)
-  })
-
-  it('refetches on every mount despite a non-zero app-wide staleTime', async () => {
-    // Fresh Response per call — a Response body can only be consumed once.
-    vi.mocked(fetch).mockImplementation(() =>
-      Promise.resolve(new Response(JSON.stringify([SHARE_FIXTURE]), { status: 200 })),
-    )
-
-    // Mirror the app QueryClient's 30s default staleTime: the hook must
-    // override it (staleTime: 0 + refetchOnMount: 'always') so the view
-    // telemetry it renders (viewCount / lastViewedAt) is current every time
-    // a share modal opens.
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false, staleTime: 30_000 } },
-    })
-    const wrapper = ({ children }: { children: React.ReactNode }) =>
-      createElement(QueryClientProvider, { client: qc }, children)
-
-    const first = renderHook(() => useListShares('team-1', 'tl-1'), { wrapper })
-    await waitFor(() => expect(first.result.current.isSuccess).toBe(true))
-    first.unmount()
-
-    renderHook(() => useListShares('team-1', 'tl-1'), { wrapper })
-    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2))
-  })
-
-  it('does not fetch when teamId is empty', () => {
-    const { wrapper } = makeWrapper()
-    renderHook(() => useListShares('', 'tl-1'), { wrapper })
-    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
-  })
-
-  it('does not fetch when timelineId is empty', () => {
-    const { wrapper } = makeWrapper()
-    renderHook(() => useListShares('team-1', ''), { wrapper })
-    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
-  })
-})
-
-// ── useCreateShare ────────────────────────────────────────────────────────────
-
-describe('useCreateShare', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('POSTs to the correct URL and invalidates the share list', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify(SHARE_FIXTURE), { status: 201 }),
-    )
-
-    const { wrapper, qc } = makeWrapper()
-    const invalidate = vi.spyOn(qc, 'invalidateQueries')
-
-    const { result } = renderHook(() => useCreateShare('team-1', 'tl-1'), { wrapper })
-    result.current.mutate({ viewType: 'gantt', viewConfig: '{}' })
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      expect.stringContaining('/timelines/tl-1/shares'),
-      expect.objectContaining({ method: 'POST' }),
-    )
-    expect(invalidate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        queryKey: ['teams', 'team-1', 'timelines', 'tl-1', 'shares'],
-      }),
-    )
-  })
-})
-
-describe('useCreateShare (ICS feeds)', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('sends kind/scope/memberId for a member-scoped ICS feed', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify({ ...SHARE_FIXTURE, kind: 'ics', scope: 'member', memberId: 'm-1' }), { status: 201 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useCreateShare('team-1', 'tl-1'), { wrapper })
-    result.current.mutate({ kind: 'ics', scope: 'member', memberId: 'm-1', name: 'Feed' })
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    const opts = vi.mocked(fetch).mock.calls[0][1] as RequestInit
-    expect(JSON.parse(String(opts.body))).toMatchObject({
-      kind: 'ics',
-      scope: 'member',
-      memberId: 'm-1',
-    })
-  })
-})
-
-// ── useRegenerateShare ────────────────────────────────────────────────────────
-
-describe('useRegenerateShare', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('POSTs to the regenerate endpoint and invalidates the share list', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify({ ...SHARE_FIXTURE, token: 'rotated' }), { status: 200 }),
-    )
-
-    const { wrapper, qc } = makeWrapper()
-    const invalidate = vi.spyOn(qc, 'invalidateQueries')
-
-    const { result } = renderHook(() => useRegenerateShare('team-1', 'tl-1'), { wrapper })
-    result.current.mutate('share-1')
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      expect.stringContaining('/shares/share-1/regenerate'),
-      expect.objectContaining({ method: 'POST' }),
-    )
-    expect(result.current.data?.token).toBe('rotated')
-    expect(invalidate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        queryKey: ['teams', 'team-1', 'timelines', 'tl-1', 'shares'],
-      }),
-    )
-  })
-})
-
-// ── useDeleteShare ────────────────────────────────────────────────────────────
-
-describe('useDeleteShare', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('DELETEs the correct URL and invalidates the share list', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 204 }))
-
-    const { wrapper, qc } = makeWrapper()
-    const invalidate = vi.spyOn(qc, 'invalidateQueries')
-
-    const { result } = renderHook(() => useDeleteShare('team-1', 'tl-1'), { wrapper })
-    result.current.mutate('share-1')
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      expect.stringContaining('/shares/share-1'),
-      expect.objectContaining({ method: 'DELETE' }),
-    )
-    expect(invalidate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        queryKey: ['teams', 'team-1', 'timelines', 'tl-1', 'shares'],
-      }),
-    )
-  })
-})
-
-// ── useShareProjection ────────────────────────────────────────────────────────
-
-const PROJECTION_FIXTURE = {
-  share: {
-    id: 'share-1',
-    timelineId: 'tl-1',
-    token: 'abc123',
-    viewType: 'gantt',
-    viewConfig: '{}',
-    createdAt: '2026-01-01T00:00:00Z',
-  },
-  teamName: 'Test Team',
-  timeline: { id: 'tl-1', name: 'Q1 Plan', startDate: '2026-01-01', endDate: '2026-12-31' },
-  members: [],
-  statuses: [],
-  tags: [],
-  activities: [],
-}
-
-describe('useShareProjection', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('fetches the public projection without an auth header', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify(PROJECTION_FIXTURE), { status: 200 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useShareProjection('abc123'), { wrapper })
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      expect.stringContaining('/shares/abc123'),
-      expect.anything(),
-    )
-    // No Authorization header — this is a public endpoint (no view token passed).
-    const callArgs = vi.mocked(fetch).mock.calls[0]
-    const opts = callArgs[1] as RequestInit | undefined
-    const headers = (opts?.headers ?? {}) as Record<string, string>
-    expect(headers.Authorization).toBeUndefined()
-    expect(result.current.data?.teamName).toBe('Test Team')
-  })
-
-  it('does not fetch when token is undefined', () => {
-    const { wrapper } = makeWrapper()
-    renderHook(() => useShareProjection(undefined), { wrapper })
-    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
-  })
-
-  it('throws an ApiError with the response status on non-200', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({ error: { code: 'NOT_FOUND', message: 'share not found' } }),
-        { status: 404 },
-      ),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useShareProjection('bad-token'), { wrapper })
-
-    await waitFor(() => expect(result.current.isError).toBe(true))
-
-    const err = result.current.error as { status?: number; code?: string }
-    expect(err.status).toBe(404)
-    expect(err.code).toBe('NOT_FOUND')
-  })
-
-  it('sends the view token as a Bearer header when provided', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify(PROJECTION_FIXTURE), { status: 200 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useShareProjection('abc123', 'view-jwt'), { wrapper })
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    const opts = vi.mocked(fetch).mock.calls[0][1] as RequestInit | undefined
-    const headers = (opts?.headers ?? {}) as Record<string, string>
-    expect(headers.Authorization).toBe('Bearer view-jwt')
-  })
-
-  it('maps a 401 { passwordRequired } response to a PASSWORD_REQUIRED error', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify({ passwordRequired: true }), { status: 401 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useShareProjection('locked-token'), { wrapper })
-
-    await waitFor(() => expect(result.current.isError).toBe(true))
-
-    const err = result.current.error as { status?: number; code?: string }
-    expect(err.status).toBe(401)
-    expect(err.code).toBe('PASSWORD_REQUIRED')
-  })
-})
-
-// ── useUnlockShare ──────────────────────────────────────────────────────────────
-
-describe('useUnlockShare', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('POSTs the password to the unlock endpoint and returns the view token', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify({ token: 'view-jwt' }), { status: 200 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useUnlockShare('abc123'), { wrapper })
-
-    let token = ''
-    await waitFor(async () => { token = await result.current.mutateAsync('hunter2') })
-
-    expect(token).toBe('view-jwt')
-    const [url, opts] = vi.mocked(fetch).mock.calls[0]
-    expect(String(url)).toContain('/shares/abc123/unlock')
-    expect(opts?.method).toBe('POST')
-    expect(JSON.parse(String(opts?.body))).toEqual({ password: 'hunter2' })
-  })
-
-  it('throws an ApiError on a wrong password (401)', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify({ error: { code: 'INVALID_PASSWORD', message: 'incorrect password' } }), { status: 401 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useUnlockShare('abc123'), { wrapper })
-
-    await expect(result.current.mutateAsync('wrong')).rejects.toMatchObject({ status: 401 })
-  })
-})
-````
-
-## File: packages/web/src/hooks/useShares.ts
-````typescript
-/**
- * TanStack Query hooks for Share CRUD and the public share projection.
- *
- * Authenticated hooks (useCreateShare, useListShares, useDeleteShare) require
- * an auth token. useShareProjection is public and uses a plain fetch.
- */
-
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { components } from '@draba/shared'
-import { createAuthFetch, API_BASE, ApiError } from '@/lib/api'
-import { useAuth } from '@/contexts/AuthContext'
-
-type Share = components['schemas']['Share']
-type ShareProjection = components['schemas']['ShareProjection']
-
-const sharesKey = (teamId: string, timelineId: string) =>
-  ['teams', teamId, 'timelines', timelineId, 'shares'] as const
-
-// ── Authenticated hooks ───────────────────────────────────────────────────────
-
-/** Lists all shares for a timeline. */
-export function useListShares(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  return useQuery({
-    queryKey: sharesKey(teamId, timelineId),
-    queryFn: () =>
-      authFetch<Share[]>(`/teams/${teamId}/timelines/${timelineId}/shares`),
-    enabled: Boolean(teamId) && Boolean(timelineId),
-    // The share modals are this query's only consumers and mount on demand —
-    // override the app-wide 30s staleTime so the view telemetry they render
-    // (viewCount / lastViewedAt) is current every time a modal opens.
-    staleTime: 0,
-    refetchOnMount: 'always',
-  })
-}
-
-interface CreateShareInput {
-  /** "view" (default) or "ics" — ICS shares are live calendar feeds. */
-  kind?: 'view' | 'ics'
-  /** ICS shares only: "timeline" (every activity) or "member" (one member's). */
-  scope?: 'timeline' | 'member'
-  /** ICS shares with scope "member" only. */
-  memberId?: string
-  name?: string | null
-  description?: string | null
-  viewType?: string
-  viewConfig?: string
-  /** When set, the share is locked and requires unlocking to view. View shares only. */
-  password?: string
-}
-
-/** Creates a share and invalidates the list. */
-export function useCreateShare(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (input: CreateShareInput) =>
-      authFetch<Share>(`/timelines/${timelineId}/shares`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
-  })
-}
-
-/**
- * Rotates a share's token, immediately invalidating the old URL — the
- * revocation story for ICS feeds, which have no password gate.
- */
-export function useRegenerateShare(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (shareId: string) =>
-      authFetch<Share>(`/shares/${shareId}/regenerate`, { method: 'POST' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
-  })
-}
-
-/** Deletes a share and invalidates the list. */
-export function useDeleteShare(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (shareId: string) =>
-      authFetch<void>(`/shares/${shareId}`, { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
-  })
-}
-
-// ── Public hooks (no auth) ────────────────────────────────────────────────────
-
-/**
- * Fetches a public share projection. No authentication required.
- *
- * For password-protected shares, pass the `viewToken` obtained from
- * {@link useUnlockShare}; it is sent as a Bearer credential. Without a valid
- * token a locked share responds 401 — surfaced here as an ApiError with code
- * `PASSWORD_REQUIRED` so the viewer can render an unlock prompt.
- */
-export function useShareProjection(token: string | undefined, viewToken?: string | null) {
-  return useQuery({
-    queryKey: ['shares', token, viewToken ?? null] as const,
-    queryFn: async () => {
-      const headers: HeadersInit = viewToken ? { Authorization: `Bearer ${viewToken}` } : {}
-      const res = await fetch(`${API_BASE}/shares/${token}`, { headers })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}))
-        // A locked share returns { passwordRequired: true } (no error envelope).
-        if (res.status === 401 && body?.passwordRequired) {
-          throw new ApiError(401, 'PASSWORD_REQUIRED', 'password required')
-        }
-        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
-      }
-      return res.json() as Promise<ShareProjection>
-    },
-    enabled: Boolean(token),
-    staleTime: 60_000,
-    retry: false,
-  })
-}
-
-/**
- * Exchanges a share password for a short-lived view token. No authentication
- * required. The returned token is scoped to this share and expires server-side.
- */
-export function useUnlockShare(token: string | undefined) {
-  return useMutation({
-    mutationFn: async (password: string): Promise<string> => {
-      const res = await fetch(`${API_BASE}/shares/${token}/unlock`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password }),
-      })
-      const body = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
-      }
-      return (body as { token: string }).token
-    },
-  })
 }
 ````
 
@@ -60689,2227 +61926,6 @@ func buildTimelineExportICS(timeline *models.Timeline, acts []*models.Activity, 
 }
 ````
 
-## File: packages/api/internal/ics/ics.go
-````go
-// Package ics serializes activities into RFC 5545 iCalendar feeds for the
-// Phase 13.4 calendar share endpoint (GET /shares/{token}.ics). It implements
-// only the slice of the spec draba needs — all-day VEVENTs in a PUBLISH
-// calendar — rather than wrapping a general-purpose library.
-package ics
-
-import (
-	"strings"
-	"time"
-)
-
-// Event is one all-day calendar entry. Start and End are inclusive calendar
-// dates (draba's activity model, Phase 11.1.1); End is converted to the
-// RFC 5545 exclusive DTEND during serialization.
-type Event struct {
-	UID         string
-	Summary     string
-	Description string
-	// Categories become the CATEGORIES property (draba tags); clients that
-	// support it (Thunderbird, Apple Calendar) render them as event tags.
-	Categories []string
-	Start      time.Time
-	End        time.Time
-	// Stamp becomes DTSTAMP — the activity's last-modified time, which lets
-	// calendar clients detect changed events between polls.
-	Stamp time.Time
-}
-
-// Calendar renders a complete VCALENDAR document with CRLF line endings.
-// name becomes X-WR-CALNAME, the display name most clients adopt when the
-// user subscribes.
-func Calendar(name string, events []Event) string {
-	var b strings.Builder
-	writeLine(&b, "BEGIN:VCALENDAR")
-	writeLine(&b, "VERSION:2.0")
-	writeLine(&b, "PRODID:-//draba//draba//EN")
-	writeLine(&b, "CALSCALE:GREGORIAN")
-	writeLine(&b, "METHOD:PUBLISH")
-	// X-WR-CALNAME is the de-facto property older clients read; NAME is its
-	// standardized RFC 7986 successor. Emit both so every client that names
-	// the calendar from feed content gets the right answer.
-	writeLine(&b, "X-WR-CALNAME:"+escapeText(name))
-	writeLine(&b, "NAME:"+escapeText(name))
-	// Suggest an hourly poll to clients that honor a published refresh
-	// cadence (RFC 7986 REFRESH-INTERVAL; X-PUBLISHED-TTL for older ones).
-	writeLine(&b, "REFRESH-INTERVAL;VALUE=DURATION:PT1H")
-	writeLine(&b, "X-PUBLISHED-TTL:PT1H")
-	for i := range events {
-		writeEvent(&b, &events[i])
-	}
-	writeLine(&b, "END:VCALENDAR")
-	return b.String()
-}
-
-func writeEvent(b *strings.Builder, e *Event) {
-	writeLine(b, "BEGIN:VEVENT")
-	writeLine(b, "UID:"+escapeText(e.UID))
-	writeLine(b, "DTSTAMP:"+e.Stamp.UTC().Format("20060102T150405Z"))
-	writeLine(b, "DTSTART;VALUE=DATE:"+e.Start.UTC().Format("20060102"))
-	// RFC 5545 DTEND is exclusive: an event covering its inclusive end date
-	// must end at midnight of the following day.
-	writeLine(b, "DTEND;VALUE=DATE:"+e.End.UTC().AddDate(0, 0, 1).Format("20060102"))
-	writeLine(b, "SUMMARY:"+escapeText(e.Summary))
-	if e.Description != "" {
-		writeLine(b, "DESCRIPTION:"+escapeText(e.Description))
-	}
-	if len(e.Categories) > 0 {
-		// Commas separate list items here, so each value is escaped
-		// individually and joined with bare (unescaped) commas.
-		escaped := make([]string, len(e.Categories))
-		for i, c := range e.Categories {
-			escaped[i] = escapeText(c)
-		}
-		writeLine(b, "CATEGORIES:"+strings.Join(escaped, ","))
-	}
-	writeLine(b, "END:VEVENT")
-}
-
-// writeLine emits one content line, folded per RFC 5545 §3.1: lines longer
-// than 75 octets continue on the next line after a CRLF + single space.
-// Folding happens on rune boundaries so multi-byte UTF-8 sequences are never
-// split mid-character.
-func writeLine(b *strings.Builder, line string) {
-	const limit = 75
-	octets := 0
-	for _, r := range line {
-		rl := len(string(r))
-		if octets+rl > limit {
-			b.WriteString("\r\n ")
-			// The leading fold space counts against the next line's budget.
-			octets = 1
-		}
-		b.WriteRune(r)
-		octets += rl
-	}
-	b.WriteString("\r\n")
-}
-
-// escapeText escapes a value per RFC 5545 §3.3.11: backslash, semicolon, and
-// comma are backslash-escaped; newlines become literal "\n". A bare CR (legal
-// in JSON input) is folded into the newline escape, and any remaining C0/DEL
-// control characters are dropped — they are illegal in TEXT values, and a
-// lenient parser splitting lines on a stray CR could otherwise read injected
-// property lines out of user-controlled content.
-func escapeText(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, ";", `\;`)
-	s = strings.ReplaceAll(s, ",", `\,`)
-	s = strings.ReplaceAll(s, "\r\n", `\n`)
-	s = strings.ReplaceAll(s, "\n", `\n`)
-	s = strings.ReplaceAll(s, "\r", `\n`)
-	return strings.Map(func(r rune) rune {
-		// HTAB is the one control character TEXT permits.
-		if (r < 0x20 && r != '\t') || r == 0x7F {
-			return -1
-		}
-		return r
-	}, s)
-}
-````
-
-## File: packages/api/go.mod
-````
-module github.com/I0-1O/draba/packages/api
-
-go 1.25.0
-
-require (
-	github.com/coreos/go-oidc/v3 v3.18.0
-	github.com/golang-jwt/jwt/v5 v5.3.1
-	github.com/gorilla/websocket v1.5.3
-	github.com/jmoiron/sqlx v1.4.0
-	github.com/oapi-codegen/runtime v1.4.0
-	github.com/stretchr/testify v1.11.1
-	github.com/xuri/excelize/v2 v2.10.1
-	golang.org/x/crypto v0.48.0
-	golang.org/x/oauth2 v0.36.0
-	modernc.org/sqlite v1.34.5
-)
-
-require (
-	github.com/davecgh/go-spew v1.1.1 // indirect
-	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
-	github.com/google/uuid v1.6.0 // indirect
-	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/ncruces/go-strftime v1.0.0 // indirect
-	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/richardlehane/mscfb v1.0.6 // indirect
-	github.com/richardlehane/msoleps v1.0.6 // indirect
-	github.com/tiendc/go-deepcopy v1.7.2 // indirect
-	github.com/xuri/efp v0.0.1 // indirect
-	github.com/xuri/nfp v0.0.2-0.20250530014748-2ddeb826f9a9 // indirect
-	golang.org/x/exp v0.0.0-20230315142452-642cacee5cc0 // indirect
-	golang.org/x/net v0.50.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
-	golang.org/x/text v0.34.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
-	modernc.org/libc v1.61.6 // indirect
-	modernc.org/mathutil v1.7.1 // indirect
-	modernc.org/memory v1.8.0 // indirect
-)
-````
-
-## File: packages/web/src/components/calendar/CalendarToolbar.tsx
-````typescript
-/**
- * CalendarToolbar — sub-toolbar for the Calendar view.
- *
- * Provides: Month / Week layout toggle, today / prev / next navigation,
- * a jump-to-date picker, color-by, an export stub, and Share (opens the
- * ICS feed modal — CalendarShareModal, not the view-share modal).
- */
-
-import { ChevronLeft, ChevronRight, Download, Share2 } from 'lucide-react';
-import type { ColorBy } from '@/components/gantt/GanttToolbar';
-
-export type CalendarLayout = 'month' | 'week';
-
-interface Props {
-  layout: CalendarLayout;
-  onLayoutChange: (l: CalendarLayout) => void;
-  /** The month/week currently in view. */
-  anchorDate: Date;
-  onPrev: () => void;
-  onNext: () => void;
-  onToday: () => void;
-  colorBy: ColorBy;
-  onColorByChange: (c: ColorBy) => void;
-  onExport?: () => void;
-  onShare?: () => void;
-}
-
-const btn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0 hover:bg-muted transition-colors';
-const iconBtn = 'flex items-center justify-center h-[26px] w-[26px] border border-border rounded-md bg-card text-foreground cursor-pointer shrink-0 hover:bg-muted transition-colors';
-const divider = 'w-px h-4 bg-border shrink-0';
-const label   = 'text-[11px] text-muted-foreground shrink-0';
-const select  = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
-
-/**
- * Formats the in-view period as a human label: "June 2026" for month layout,
- * "Jun 1 – 7, 2026" for week. Exported so the PNG export header can show the
- * same period text the toolbar does (the toolbar itself is excluded from the
- * capture, which otherwise leaves the image with no month/week indication).
- */
-export function formatAnchorLabel(date: Date, layout: CalendarLayout): string {
-  if (layout === 'month') {
-    return date.toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' });
-  }
-  // Week: show the range "Jun 1 – 7, 2026"
-  const end = new Date(date);
-  end.setUTCDate(date.getUTCDate() + 6);
-  const startStr = date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
-  const endStr   = end.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
-  return `${startStr} – ${endStr}`;
-}
-
-export default function CalendarToolbar({
-  layout,
-  onLayoutChange,
-  anchorDate,
-  onPrev,
-  onNext,
-  onToday,
-  colorBy,
-  onColorByChange,
-  onExport,
-  onShare,
-}: Props) {
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '0 12px', height: 36, background: 'var(--card)', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
-      {/* Layout toggle */}
-      <div style={{ display: 'flex', border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden', height: 26 }}>
-        {(['month', 'week'] as CalendarLayout[]).map(l => (
-          <button
-            key={l}
-            onClick={() => onLayoutChange(l)}
-            style={{
-              padding: '0 10px',
-              fontSize: 12,
-              fontWeight: 500,
-              border: 'none',
-              borderRight: l === 'month' ? '1px solid var(--border)' : 'none',
-              background: layout === l ? 'var(--muted)' : 'var(--card)',
-              color: 'var(--foreground)',
-              cursor: 'pointer',
-              height: '100%',
-            }}
-          >
-            {l === 'month' ? 'Month' : 'Week'}
-          </button>
-        ))}
-      </div>
-
-      <div className={divider} />
-
-      {/* Navigation */}
-      <button className={iconBtn} onClick={onPrev} title="Previous">
-        <ChevronLeft size={13} strokeWidth={2} />
-      </button>
-      <button className={btn} onClick={onToday}>Today</button>
-      <button className={iconBtn} onClick={onNext} title="Next">
-        <ChevronRight size={13} strokeWidth={2} />
-      </button>
-
-      {/* Current range label */}
-      <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)', minWidth: 160, textAlign: 'center' }}>
-        {formatAnchorLabel(anchorDate, layout)}
-      </span>
-
-      <div className={divider} />
-
-      {/* Color by */}
-      <span className={label}>Color by</span>
-      <select
-        className={select}
-        value={colorBy}
-        onChange={e => onColorByChange(e.target.value as ColorBy)}
-      >
-        <option value="activity">Activity</option>
-        <option value="member">Member</option>
-        <option value="status">Status</option>
-      </select>
-
-      {/* Export + share — pushed to the right edge */}
-      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
-        <div className={divider} />
-        <button className={btn} onClick={onExport} title="Export activities">
-          <Download size={12} strokeWidth={1.8} />
-          Export
-        </button>
-        <button className={btn} onClick={onShare} title="Share this calendar">
-          <Share2 size={12} strokeWidth={1.8} />
-          Share
-        </button>
-      </div>
-    </div>
-  );
-}
-````
-
-## File: packages/web/src/components/CalendarShareModal.tsx
-````typescript
-/**
- * CalendarShareModal — manage the ICS calendar feeds for a timeline.
- *
- * Deliberately a different surface from ShareModal (Phase 13.4): a Calendar
- * share is not a frozen view snapshot but a live subscribable ICS feed. The
- * modal is a flat list of every feed the timeline can publish — the whole
- * timeline first, then one row per team member — each with an on/off toggle.
- * Toggling a row on creates that feed and reveals its URL (copy, one-click
- * subscribe links, regenerate); toggling off deletes it, killing the URL
- * immediately.
- *
- * All feeds are public read-only. There is no password option: calendar
- * clients cannot unlock a subscription URL interactively, so the unguessable
- * token is the secret and revocation is regenerate-or-toggle-off.
- */
-
-import { useEffect, useState } from 'react'
-import { createPortal } from 'react-dom'
-import {
-  CalendarDays, Link2, Copy, Check, RefreshCw, X, Users,
-} from 'lucide-react'
-import { useListShares, useCreateShare, useDeleteShare, useRegenerateShare } from '@/hooks/useShares'
-import { useTeamMembers } from '@/hooks/useTeamActivities'
-import { Badge } from '@/components/identity/Badge'
-import { resolveColorHex } from '@/components/identity/identity-constants'
-import { Button } from '@/components/ui/button'
-import { cn } from '@/lib/utils'
-import { MEMBER_COLORS } from '@/types'
-import type { components } from '@draba/shared'
-
-type Share = components['schemas']['Share']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-
-interface Props {
-  teamId: string
-  timelineId: string
-  /** Display name of the timeline, shown in the header subtitle and feed names. */
-  timelineName?: string
-  onClose: () => void
-}
-
-const TILE_TEAL = 'bg-[hsl(188_59%_38%/0.12)] text-primary'
-
-/**
- * URL-safe slug for the feed filename. Calendar clients (Thunderbird
- * included) default the new calendar's name from the URL's filename, so the
- * link ends in a readable `<name>.ics` rather than the bare token hash. The
- * server treats the filename as cosmetic — the token is the key.
- */
-function slugify(name: string): string {
-  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
-  return slug || 'calendar'
-}
-
-/** Builds the absolute https feed URL for a share token. */
-function feedURL(token: string, name: string): string {
-  return `${window.location.origin}/shares/${token}/${slugify(name)}.ics`
-}
-
-/** The webcal:// variant most calendar apps treat as "subscribe". */
-function webcalURL(token: string, name: string): string {
-  return feedURL(token, name).replace(/^https?:\/\//, 'webcal://')
-}
-
-// ── One feed row: label + toggle, expanding to the link when on ───────────────
-
-function FeedRow({
-  label,
-  member,
-  share,
-  busy,
-  onToggle,
-  onRegenerate,
-}: {
-  label: string
-  /** Set for member rows — renders the identity badge next to the label. */
-  member?: TeamMemberWithUser
-  /** The existing ICS share for this row, when the feed is on. */
-  share?: Share
-  busy: boolean
-  onToggle: () => void
-  onRegenerate: (shareId: string) => void
-}) {
-  const [copied, setCopied] = useState(false)
-  const on = Boolean(share)
-  const url = share ? feedURL(share.token, share.name ?? label) : null
-  const webcal = share ? webcalURL(share.token, share.name ?? label) : null
-
-  const copy = () => {
-    if (!url) return
-    void navigator.clipboard.writeText(url).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1600)
-    })
-  }
-
-  return (
-    <div className="overflow-hidden rounded-[var(--radius-md)] border border-border">
-      <div className="flex items-center gap-2.5 px-3 py-2.5">
-        {member ? (
-          <Badge
-            identity={{ color: resolveColorHex(member.color) || MEMBER_COLORS[0], icon: member.icon ?? '__name_1__' }}
-            name={member.displayName || 'Team member'}
-            size={26}
-            shape="circle"
-          />
-        ) : (
-          <div className={cn('flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
-            <CalendarDays size={14} strokeWidth={2.2} />
-          </div>
-        )}
-        <div className="flex-1 text-[13px] font-semibold text-foreground">{label}</div>
-        <button
-          onClick={onToggle}
-          role="switch"
-          aria-checked={on}
-          aria-label={`${label} feed`}
-          disabled={busy}
-          className={cn(
-            'relative h-[22px] w-10 shrink-0 cursor-pointer rounded-[var(--radius-full)] border-none p-0 transition-colors',
-            on ? 'bg-primary' : 'bg-border',
-          )}
-        >
-          <span className={cn(
-            'absolute top-[2px] h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-[left] duration-150',
-            on ? 'left-5' : 'left-[2px]',
-          )} />
-        </button>
-      </div>
-
-      {share && url && webcal && (
-        <div className="flex flex-col gap-2 border-t border-border bg-muted/40 px-3 py-2.5">
-          <div className="flex items-center gap-2">
-            <div className="flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12px] text-foreground">
-              <Link2 size={13} className="shrink-0 text-muted-foreground" strokeWidth={2} />
-              <span className="overflow-hidden text-ellipsis whitespace-nowrap">{url}</span>
-            </div>
-            <button
-              onClick={copy}
-              className={cn(
-                'flex shrink-0 items-center gap-[5px] rounded-[var(--radius-md)] border px-3 py-[7px] text-[12.5px] font-semibold transition-colors',
-                copied ? 'border-success bg-[hsl(145_63%_42%/0.12)] text-success' : 'border-border bg-card text-foreground',
-              )}
-            >
-              {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={2.2} />}
-              {copied ? 'Copied' : 'Copy'}
-            </button>
-          </div>
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
-            <span className="text-muted-foreground">Add to:</span>
-            <a
-              href={`https://calendar.google.com/calendar/render?cid=${encodeURIComponent(webcal)}`}
-              target="_blank"
-              rel="noreferrer"
-              className="font-semibold text-primary hover:underline"
-            >
-              Google
-            </a>
-            <a href={webcal} className="font-semibold text-primary hover:underline">
-              Apple
-            </a>
-            <a
-              href={`https://outlook.live.com/calendar/0/addfromweb?url=${encodeURIComponent(webcal)}&name=${encodeURIComponent(share.name ?? label)}`}
-              target="_blank"
-              rel="noreferrer"
-              className="font-semibold text-primary hover:underline"
-            >
-              Outlook
-            </a>
-            <button
-              onClick={() => onRegenerate(share.id)}
-              disabled={busy}
-              title="Replace the link — the old URL stops working immediately"
-              className="ml-auto flex cursor-pointer items-center gap-[5px] border-none bg-transparent p-0 text-[12px] font-semibold text-muted-foreground transition-colors hover:text-foreground"
-            >
-              <RefreshCw size={12} strokeWidth={2} />
-              Regenerate link
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── The modal shell ────────────────────────────────────────────────────────────
-
-export default function CalendarShareModal({ teamId, timelineId, timelineName, onClose }: Props) {
-  const { data: allShares = [], isLoading } = useListShares(teamId, timelineId)
-  const { data: members = [] } = useTeamMembers(teamId)
-  const createShare = useCreateShare(teamId, timelineId)
-  const deleteShare = useDeleteShare(teamId, timelineId)
-  const regenerateShare = useRegenerateShare(teamId, timelineId)
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-
-  const icsShares = allShares.filter(s => s.kind === 'ics')
-  const timelineShare = icsShares.find(s => s.scope === 'timeline')
-  const memberShare = (memberId: string) =>
-    icsShares.find(s => s.scope === 'member' && s.memberId === memberId)
-
-  const busy = isLoading || createShare.isPending || deleteShare.isPending || regenerateShare.isPending
-
-  const toggleTimeline = () => {
-    if (busy) return
-    if (timelineShare) {
-      deleteShare.mutate(timelineShare.id)
-    } else {
-      createShare.mutate({ kind: 'ics', scope: 'timeline', name: `${timelineName ?? 'Timeline'} calendar feed` })
-    }
-  }
-
-  const toggleMember = (m: TeamMemberWithUser) => {
-    if (busy) return
-    const existing = memberShare(m.id)
-    if (existing) {
-      deleteShare.mutate(existing.id)
-    } else {
-      createShare.mutate({
-        kind: 'ics',
-        scope: 'member',
-        memberId: m.id,
-        name: `${m.displayName || 'Member'} calendar feed`,
-      })
-    }
-  }
-
-  return createPortal(
-    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]">
-      <div className="flex max-h-[88vh] w-[min(560px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]">
-        {/* Header */}
-        <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-[18px]">
-          <div className={cn('flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
-            <CalendarDays size={19} strokeWidth={2.2} />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Share calendar</h2>
-            <div className="mt-0.5 text-[12.5px] text-muted-foreground">
-              {timelineName ? `${timelineName} · ` : ''}live read-only feeds — subscribe from Google, Apple, or Outlook
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
-          >
-            <X size={16} strokeWidth={2.2} />
-          </button>
-        </div>
-
-        {/* Body — one row per publishable feed */}
-        <div className="flex flex-1 flex-col gap-2 overflow-y-auto px-5 py-4">
-          <FeedRow
-            label="Whole timeline"
-            share={timelineShare}
-            busy={busy}
-            onToggle={toggleTimeline}
-            onRegenerate={id => regenerateShare.mutate(id)}
-          />
-
-          {members.length > 0 && (
-            <div className="mt-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Per member</div>
-          )}
-          {members.map(m => (
-            <FeedRow
-              key={m.id}
-              label={m.displayName || 'Team member'}
-              member={m}
-              share={memberShare(m.id)}
-              busy={busy}
-              onToggle={() => toggleMember(m)}
-              onRegenerate={id => regenerateShare.mutate(id)}
-            />
-          ))}
-
-          {(createShare.isError || deleteShare.isError || regenerateShare.isError) && (
-            <p className="text-[11px] text-destructive">Something went wrong. Please try again.</p>
-          )}
-        </div>
-
-        {/* Footer */}
-        <div className="flex shrink-0 items-center gap-2.5 border-t border-border px-5 py-[13px]">
-          <div className="flex items-center gap-[7px] text-xs text-muted-foreground">
-            <Users size={14} strokeWidth={2} />
-            Public read-only · the link itself is the secret
-          </div>
-          <Button variant="outline" className="ml-auto" onClick={onClose}>Done</Button>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  )
-}
-````
-
-## File: packages/web/src/components/ShareModal.tsx
-````typescript
-/**
- * ShareModal — manage the share links for the current timeline view.
- *
- * Rebuilt to the "Share this view" design handoff (docs/design/handoffs/share-modal):
- * an active-links list with per-row creator/date/view-count meta and an inline
- * delete-confirm, plus an inline create form with optional password protection.
- * One timeline can host many named shares; each is a frozen view snapshot.
- *
- * Styled with Tailwind utility classes against the project's design tokens
- * (see index.css `@theme`) and shadcn/ui primitives — the handoff is a visual
- * reference, not production code, so its inline styles were not ported.
- *
- * Delete is intentionally not permission-gated — a share is a read-only
- * projection that cannot mutate app data, so any team member may manage any
- * link (Phase 13.2 decision).
- */
-
-import { useEffect, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
-import {
-  Link as LinkIcon, Link2, Lock, KeyRound, Copy, Check, Eye, EyeOff,
-  Trash2, Plus, PlusCircle, X, Users,
-} from 'lucide-react'
-import { useCreateShare, useListShares, useDeleteShare } from '@/hooks/useShares'
-import { useTeamMembers } from '@/hooks/useTeamActivities'
-import { useAuth } from '@/contexts/AuthContext'
-import { Badge } from '@/components/identity/Badge'
-import { resolveColorHex } from '@/components/identity/identity-constants'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { cn } from '@/lib/utils'
-import { MEMBER_COLORS } from '@/types'
-import type { FilterDefinition } from '@/lib/filterTypes'
-import type { components } from '@draba/shared'
-
-type Share = components['schemas']['Share']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-
-export interface ShareViewConfig {
-  groupBy: string
-  sortBy: string
-  colorBy: string
-  granularity: string
-  filter: FilterDefinition | null
-  /** List shares only — column visibility snapshot; drives the "notes" projection nuance. */
-  columns?: { id: string; visible: boolean }[]
-  /** Kanban shares only — which fields render on each card. */
-  cardFields?: string[]
-  /** Kanban shares only — whether child activities nest under their parent. */
-  showHierarchy?: boolean
-  /** Kanban shares only — column IDs collapsed at share-creation time. */
-  collapsedColumns?: string[]
-}
-
-interface Props {
-  teamId: string
-  timelineId: string
-  viewType: 'gantt' | 'list' | 'calendar' | 'kanban'
-  viewConfig: ShareViewConfig
-  /** Display name of the timeline, shown in the header subtitle. */
-  timelineName?: string
-  onClose: () => void
-}
-
-interface CreatePayload {
-  title: string
-  description: string
-  password: string | null
-}
-
-// ── Shared token-styled bits ──────────────────────────────────────────────────
-//
-// The handoff colors a share's "type tile" teal (open link) or amber
-// (password-protected). Those tints aren't semantic tokens on their own, so
-// they're expressed as arbitrary-value Tailwind classes derived from the
-// existing `--primary` / `--secondary` HSL values rather than ported hex.
-
-const TILE_TEAL = 'bg-[hsl(188_59%_38%/0.12)] text-primary'
-const TILE_AMBER = 'bg-[hsl(30_87%_62%/0.16)] text-secondary'
-const BADGE_AMBER = 'bg-[hsl(30_87%_62%/0.22)] text-secondary-foreground'
-
-function MiniAvatar({ member, size = 20 }: { member: TeamMemberWithUser | undefined; size?: number }) {
-  if (!member) return null
-  const name = member.displayName || 'Team member'
-  const color = resolveColorHex(member.color) || MEMBER_COLORS[0]
-  return (
-    <Badge identity={{ color, icon: member.icon ?? '__name_1__' }} name={name} size={size} shape="circle" />
-  )
-}
-
-function formatCreated(iso: string): string {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return ''
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-}
-
-/**
- * Short "last viewed" label for a share row: time of day when the last view
- * was today, otherwise the same short date format as the created date.
- */
-function formatLastViewed(iso: string): string {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return ''
-  const now = new Date()
-  if (d.toDateString() === now.toDateString()) {
-    return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
-  }
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-}
-
-// ── A single share row ─────────────────────────────────────────────────────────
-
-function ShareRow({
-  share,
-  creator,
-  isOwn,
-  onDelete,
-}: {
-  share: Share
-  creator: TeamMemberWithUser | undefined
-  isOwn: boolean
-  onDelete: (id: string) => void
-}) {
-  const url = `${window.location.host}/s/${share.token}`
-  const [copied, setCopied] = useState(false)
-  const [confirming, setConfirming] = useState(false)
-  const protectedShare = Boolean(share.protected)
-
-  const copy = () => {
-    void navigator.clipboard.writeText(`${window.location.origin}/s/${share.token}`).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1600)
-    })
-  }
-
-  return (
-    <div className="relative rounded-[var(--radius-lg)] border border-border bg-card p-3.5 shadow-sm">
-      {/* Top: type tile + title + delete */}
-      <div className="flex items-start gap-2.5">
-        <div className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-md)]', protectedShare ? TILE_AMBER : TILE_TEAL)}>
-          {protectedShare ? <Lock size={16} strokeWidth={2.2} /> : <LinkIcon size={16} strokeWidth={2.2} />}
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-semibold text-foreground">{share.name || 'Untitled link'}</span>
-            {protectedShare && (
-              <span className={cn('inline-flex items-center gap-1 rounded-[var(--radius-full)] px-2 py-px text-[11px] font-semibold', BADGE_AMBER)}>
-                <Lock size={10} strokeWidth={2.4} /> password
-              </span>
-            )}
-          </div>
-          {share.description && (
-            <p className="mt-[3px] text-[12.5px] leading-[1.45] text-muted-foreground">{share.description}</p>
-          )}
-        </div>
-        <button
-          onClick={() => setConfirming(true)}
-          title="Delete share"
-          className="flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-transparent text-muted-foreground transition-colors hover:bg-[hsl(0_72%_51%/0.1)] hover:text-destructive"
-        >
-          <Trash2 size={15} strokeWidth={2} />
-        </button>
-      </div>
-
-      {/* URL row */}
-      <div className="mt-[11px] flex items-center gap-2">
-        <div className="flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12.5px] text-foreground">
-          <Link2 size={13} className="shrink-0 text-muted-foreground" strokeWidth={2} />
-          <span className="overflow-hidden text-ellipsis whitespace-nowrap">{url}</span>
-        </div>
-        <button
-          onClick={copy}
-          className={cn(
-            'flex shrink-0 items-center gap-[5px] rounded-[var(--radius-md)] border px-3 py-[7px] text-[12.5px] font-semibold transition-colors',
-            copied ? 'border-success bg-[hsl(145_63%_42%/0.12)] text-success' : 'border-border bg-card text-foreground',
-          )}
-        >
-          {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={2.2} />}
-          {copied ? 'Copied' : 'Copy'}
-        </button>
-      </div>
-
-      {/* Footer meta — labeled columns so each value carries its own context */}
-      <div className="mt-[11px] grid grid-cols-3 gap-2 border-t border-border pt-2.5">
-        <div title={`Created ${formatCreated(share.createdAt)}`}>
-          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">Created by</div>
-          <div className="mt-1 flex min-w-0 items-center gap-1.5 text-xs">
-            <MiniAvatar member={creator} size={16} />
-            <span className="truncate font-semibold text-foreground">
-              {creator?.displayName ?? 'Team member'}
-              {isOwn && <span className="font-normal text-muted-foreground"> · you</span>}
-            </span>
-          </div>
-        </div>
-        <div title={share.lastViewedAt ? new Date(share.lastViewedAt).toLocaleString() : undefined}>
-          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">Last viewed</div>
-          <div className="mt-1 text-xs text-foreground">
-            {share.lastViewedAt ? formatLastViewed(share.lastViewedAt) : 'Never'}
-          </div>
-        </div>
-        <div>
-          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">View total</div>
-          <div className="mt-1 inline-flex items-center gap-1 text-xs text-foreground">
-            <Eye size={12} strokeWidth={2} className="text-muted-foreground" />
-            {share.viewCount}
-          </div>
-        </div>
-      </div>
-
-      {/* Inline delete confirm */}
-      {confirming && (
-        <div className="absolute inset-0 flex flex-col justify-center gap-2.5 rounded-[var(--radius-lg)] border border-destructive bg-card px-4 py-3.5">
-          <div className="flex items-start gap-2.5">
-            <div className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[hsl(0_72%_51%/0.1)] text-destructive">
-              <Trash2 size={15} strokeWidth={2.2} />
-            </div>
-            <div>
-              <div className="text-[13.5px] font-semibold text-foreground">Delete this share?</div>
-              <div className="mt-0.5 text-xs text-muted-foreground">Anyone with the link will immediately lose access. This can&apos;t be undone.</div>
-            </div>
-          </div>
-          <div className="flex justify-end gap-2">
-            <Button variant="outline" size="sm" onClick={() => setConfirming(false)}>Cancel</Button>
-            <Button variant="destructive" size="sm" onClick={() => { onDelete(share.id); setConfirming(false) }}>Delete link</Button>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── The add-share inline form ───────────────────────────────────────────────────
-
-/**
- * No shadcn Textarea exists yet, so this mirrors Input's class string —
- * keeps the field visually consistent without inline styles.
- */
-const TEXTAREA_CLASSES = 'flex w-full resize-y rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] shadow-sm transition-colors placeholder:text-[var(--muted-foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]'
-
-function AddShareForm({
-  currentMember,
-  onCreate,
-  onCancel,
-  isPending,
-  isError,
-}: {
-  currentMember: TeamMemberWithUser | undefined
-  onCreate: (payload: CreatePayload) => void
-  onCancel: () => void
-  isPending: boolean
-  isError: boolean
-}) {
-  const [title, setTitle] = useState('')
-  const [desc, setDesc] = useState('')
-  const [pwOn, setPwOn] = useState(false)
-  const [pw, setPw] = useState('')
-  const [showPw, setShowPw] = useState(false)
-  const titleRef = useRef<HTMLInputElement>(null)
-
-  useEffect(() => { titleRef.current?.focus() }, [])
-
-  const valid = title.trim().length > 0 && (!pwOn || pw.trim().length > 0)
-
-  const submit = () => {
-    if (!valid || isPending) return
-    onCreate({ title: title.trim(), description: desc.trim(), password: pwOn ? pw : null })
-  }
-
-  return (
-    <div className="rounded-[var(--radius-lg)] border-[1.5px] border-primary bg-card p-4 shadow-[0_0_0_3px_hsl(188_59%_38%/0.08)]">
-      <div className="mb-3.5 flex items-center gap-2">
-        <PlusCircle size={16} className="text-primary" strokeWidth={2.2} />
-        <span className="text-[13.5px] font-bold text-foreground">New share link</span>
-      </div>
-
-      <div className="mb-3 flex flex-col gap-1.5">
-        <Label htmlFor="share-title">Title</Label>
-        <Input
-          id="share-title"
-          ref={titleRef}
-          value={title}
-          onChange={e => setTitle(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') submit() }}
-          placeholder="e.g. Acme stakeholder view"
-        />
-      </div>
-
-      <div className="mb-3 flex flex-col gap-1.5">
-        <Label htmlFor="share-description">
-          Description <span className="lowercase font-normal">· optional</span>
-        </Label>
-        <textarea
-          id="share-description"
-          value={desc}
-          onChange={e => setDesc(e.target.value)}
-          rows={2}
-          placeholder="What's this link for, and who is it shared with?"
-          className={TEXTAREA_CLASSES}
-        />
-      </div>
-
-      {/* Password protect */}
-      <div className="overflow-hidden rounded-[var(--radius-md)] border border-border">
-        <div className="flex items-center gap-2.5 px-3 py-2.5">
-          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-muted text-muted-foreground">
-            <Lock size={14} strokeWidth={2} />
-          </div>
-          <div className="flex-1">
-            <div className="text-[13px] font-semibold text-foreground">Password protect</div>
-            <div className="text-[11.5px] text-muted-foreground">Require a password to open the link</div>
-          </div>
-          <button
-            onClick={() => setPwOn(v => !v)}
-            role="switch"
-            aria-checked={pwOn}
-            aria-label="Password protect"
-            className={cn(
-              'relative h-[22px] w-10 shrink-0 cursor-pointer rounded-[var(--radius-full)] border-none p-0 transition-colors',
-              pwOn ? 'bg-primary' : 'bg-border',
-            )}
-          >
-            <span className={cn(
-              'absolute top-[2px] h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-[left] duration-150',
-              pwOn ? 'left-5' : 'left-[2px]',
-            )} />
-          </button>
-        </div>
-        {pwOn && (
-          <div className="border-t border-border px-3 py-3">
-            <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-input bg-card px-2.5">
-              <KeyRound size={14} className="text-muted-foreground" strokeWidth={2} />
-              <input
-                value={pw}
-                onChange={e => setPw(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') submit() }}
-                type={showPw ? 'text' : 'password'}
-                placeholder="Set a password"
-                className="flex-1 border-none bg-transparent py-2 text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
-              />
-              <button
-                onClick={() => setShowPw(v => !v)}
-                aria-label={showPw ? 'Hide password' : 'Show password'}
-                className="flex cursor-pointer border-none bg-transparent p-1 text-muted-foreground"
-              >
-                {showPw ? <EyeOff size={14} strokeWidth={2} /> : <Eye size={14} strokeWidth={2} />}
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {isError && (
-        <p className="mt-2.5 text-[11px] text-destructive">Failed to create share. Please try again.</p>
-      )}
-
-      {/* Actions */}
-      <div className="mt-4 flex items-center gap-2.5">
-        <div className="mr-auto flex items-center gap-[7px] text-xs text-muted-foreground">
-          <MiniAvatar member={currentMember} size={20} />
-          <span>Sharing as {currentMember?.displayName ?? 'you'}</span>
-        </div>
-        <Button variant="outline" onClick={onCancel}>Cancel</Button>
-        <Button onClick={submit} disabled={!valid || isPending}>
-          <LinkIcon size={14} strokeWidth={2.2} /> {isPending ? 'Creating…' : 'Create link'}
-        </Button>
-      </div>
-    </div>
-  )
-}
-
-// ── The modal shell ──────────────────────────────────────────────────────────
-
-export default function ShareModal({ teamId, timelineId, viewType, viewConfig, timelineName, onClose }: Props) {
-  const { user } = useAuth()
-  const { data: allShares = [], isLoading } = useListShares(teamId, timelineId)
-  // Scoped to this exact view — a share is a frozen snapshot of one view's
-  // config, so a Gantt link can't usefully stand in for a List or Kanban one.
-  // Showing only same-type links keeps "active links" literal and leaves room
-  // to tailor the modal per view type (e.g. Calendar/ICS in 13.4) without
-  // having to reconcile it against unrelated shares.
-  // kind === 'view' also keeps ICS calendar feeds (13.4) out of this list —
-  // they live in CalendarShareModal, a different surface entirely.
-  const shares = allShares.filter(s => s.kind === 'view' && s.viewType === viewType)
-  const { data: members = [] } = useTeamMembers(teamId)
-  const createShare = useCreateShare(teamId, timelineId)
-  const deleteShare = useDeleteShare(teamId, timelineId)
-  const [adding, setAdding] = useState(false)
-  const bodyRef = useRef<HTMLDivElement>(null)
-
-  const memberByID = new Map(members.map(m => [m.id, m]))
-  const currentMember = members.find(m => m.userId && m.userId === user?.id)
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-
-  const configString = JSON.stringify({
-    groupBy: viewConfig.groupBy,
-    sortBy: viewConfig.sortBy,
-    colorBy: viewConfig.colorBy,
-    granularity: viewConfig.granularity,
-    filter: viewConfig.filter ?? { logic: 'and', conditions: [] },
-    ...(viewConfig.columns ? { columns: viewConfig.columns } : {}),
-    ...(viewConfig.cardFields ? { cardFields: viewConfig.cardFields } : {}),
-    ...(viewConfig.showHierarchy !== undefined ? { showHierarchy: viewConfig.showHierarchy } : {}),
-    ...(viewConfig.collapsedColumns ? { collapsedColumns: viewConfig.collapsedColumns } : {}),
-  })
-
-  const handleCreate = (payload: CreatePayload) => {
-    createShare.mutate(
-      {
-        name: payload.title,
-        description: payload.description || null,
-        viewType,
-        viewConfig: configString,
-        password: payload.password ?? undefined,
-      },
-      {
-        onSuccess: () => {
-          setAdding(false)
-          setTimeout(() => { if (bodyRef.current) bodyRef.current.scrollTop = 0 }, 0)
-        },
-      },
-    )
-  }
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]"
-    >
-      <div
-        className="flex max-h-[88vh] w-[min(580px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]"
-      >
-        {/* Header */}
-        <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-[18px]">
-          <div className={cn('flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
-            <LinkIcon size={19} strokeWidth={2.2} />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Share this view</h2>
-            <div className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
-              <span className="inline-block h-2 w-2 shrink-0 rounded-sm bg-secondary" />
-              {timelineName ? `${timelineName} · ` : ''}anyone with a link can view
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
-          >
-            <X size={16} strokeWidth={2.2} />
-          </button>
-        </div>
-
-        {/* Section bar */}
-        <div className="flex shrink-0 items-center gap-2 px-5 pb-[11px] pt-[13px]">
-          <span className="text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Active links</span>
-          <span className="min-w-[20px] rounded-[var(--radius-full)] bg-muted px-2 py-px text-center text-[11px] font-bold text-muted-foreground">{shares.length}</span>
-          <div className="ml-auto">
-            {!adding && (
-              <Button size="sm" onClick={() => setAdding(true)}>
-                <Plus size={14} strokeWidth={2.4} /> New share
-              </Button>
-            )}
-          </div>
-        </div>
-
-        {/* Body */}
-        <div ref={bodyRef} className="flex min-h-[120px] flex-1 flex-col gap-3 overflow-y-auto px-5 pb-5">
-          {adding && (
-            <AddShareForm
-              currentMember={currentMember}
-              onCreate={handleCreate}
-              onCancel={() => setAdding(false)}
-              isPending={createShare.isPending}
-              isError={createShare.isError}
-            />
-          )}
-
-          {!isLoading && shares.length === 0 && !adding && (
-            <div className="flex flex-1 flex-col items-center justify-center rounded-[var(--radius-lg)] border border-dashed border-border px-5 py-9 text-center">
-              <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-[var(--radius-lg)] bg-muted text-muted-foreground">
-                <LinkIcon size={22} strokeWidth={1.8} />
-              </div>
-              <div className="text-sm font-semibold text-foreground">No share links yet</div>
-              <div className="mt-1 max-w-[280px] text-[12.5px] text-muted-foreground">Create a link to let people outside your team view this timeline.</div>
-              <Button size="sm" className="mt-4" onClick={() => setAdding(true)}>
-                <Plus size={14} strokeWidth={2.4} /> Create share link
-              </Button>
-            </div>
-          )}
-
-          {shares.map(s => (
-            <ShareRow
-              key={s.id}
-              share={s}
-              creator={s.createdBy ? memberByID.get(s.createdBy) : undefined}
-              isOwn={Boolean(currentMember && s.createdBy === currentMember.id)}
-              onDelete={(id) => deleteShare.mutate(id)}
-            />
-          ))}
-        </div>
-
-        {/* Footer */}
-        <div className="flex shrink-0 items-center gap-2.5 border-t border-border px-5 py-[13px]">
-          <div className="flex items-center gap-[7px] text-xs text-muted-foreground">
-            <Users size={14} strokeWidth={2} />
-            Read-only links · anyone on your team can manage them
-          </div>
-          <Button variant="outline" className="ml-auto" onClick={onClose}>Done</Button>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  )
-}
-````
-
-## File: packages/web/src/lib/api.ts
-````typescript
-/**
- * Thin fetch wrapper over the draba REST API.
- *
- * Token lifecycle:
- *   - Access token: kept in memory via the AuthContext; passed as Authorization header.
- *   - Refresh token: persisted in localStorage under REFRESH_TOKEN_KEY.
- *     On a 401, the client attempts one silent refresh then retries the original request.
- *     Concurrent 401s share a single refresh call (mutex via in-flight promise).
- *     If refresh also fails, the registered logout handler is called and the user
- *     is redirected to /login.
- *
- * All callers receive typed JSON or throw an ApiError.
- */
-
-import type { components } from '@draba/shared'
-
-export type ApiErrorBody = components['schemas']['ApiError']
-
-// Empty string = same-origin relative URLs, which is correct when the SPA is
-// embedded in the Go binary. Set VITE_API_URL for local dev against a
-// separate API server (e.g. VITE_API_URL=http://localhost:8080).
-export const API_BASE =
-  (import.meta.env.VITE_API_URL as string | undefined) ?? ''
-
-export const REFRESH_TOKEN_KEY = 'draba_refresh_token'
-
-/** Thrown for any non-2xx response. */
-export class ApiError extends Error {
-  constructor(
-    public readonly status: number,
-    public readonly code: string,
-    message: string,
-    /** Extra fields from the error response body (e.g. assignmentCount on 409). */
-    public readonly data?: Record<string, unknown>,
-  ) {
-    super(message)
-    this.name = 'ApiError'
-  }
-}
-
-/** Reads the stored refresh token from localStorage. */
-export function getStoredRefreshToken(): string | null {
-  return localStorage.getItem(REFRESH_TOKEN_KEY)
-}
-
-/** Persists the refresh token to localStorage. */
-export function storeRefreshToken(token: string): void {
-  localStorage.setItem(REFRESH_TOKEN_KEY, token)
-}
-
-/** Removes the refresh token from localStorage (on logout). */
-export function clearStoredRefreshToken(): void {
-  localStorage.removeItem(REFRESH_TOKEN_KEY)
-}
-
-async function parseError(res: Response): Promise<ApiError> {
-  try {
-    const body = (await res.json()) as ApiErrorBody & Record<string, unknown>
-    const { error, ...rest } = body
-    const data = Object.keys(rest).length > 0 ? (rest as Record<string, unknown>) : undefined
-    return new ApiError(res.status, error.code, error.message, data)
-  } catch {
-    return new ApiError(res.status, 'UNKNOWN', res.statusText)
-  }
-}
-
-/** Low-level fetch that injects the access token and throws ApiError on non-2xx. */
-export async function apiFetch<T>(
-  path: string,
-  init: RequestInit & { accessToken?: string } = {},
-): Promise<T> {
-  const { accessToken, ...rest } = init
-  const headers = new Headers(rest.headers)
-  // FormData bodies must let the browser set the multipart boundary itself.
-  if (!(rest.body instanceof FormData)) {
-    headers.set('Content-Type', 'application/json')
-  }
-  if (accessToken) {
-    headers.set('Authorization', `Bearer ${accessToken}`)
-  }
-
-  const res = await fetch(`${API_BASE}${path}`, { ...rest, headers })
-
-  if (!res.ok) {
-    throw await parseError(res)
-  }
-
-  // 204 No Content — return undefined cast as T
-  if (res.status === 204) {
-    return undefined as unknown as T
-  }
-
-  return res.json() as Promise<T>
-}
-
-/** Extracts the filename from a Content-Disposition header, if present. */
-function filenameFromContentDisposition(header: string | null): string | null {
-  if (!header) return null
-  const match = /filename="?([^";]+)"?/.exec(header)
-  return match ? match[1] : null
-}
-
-/** Low-level fetch for binary responses (file downloads). Throws ApiError on non-2xx. */
-export async function apiFetchBlob(
-  path: string,
-  init: RequestInit & { accessToken?: string } = {},
-): Promise<{ blob: Blob; filename: string | null }> {
-  const { accessToken, ...rest } = init
-  const headers = new Headers(rest.headers)
-  headers.set('Content-Type', 'application/json')
-  if (accessToken) {
-    headers.set('Authorization', `Bearer ${accessToken}`)
-  }
-
-  const res = await fetch(`${API_BASE}${path}`, { ...rest, headers })
-
-  if (!res.ok) {
-    throw await parseError(res)
-  }
-
-  // An HTML body here means the request never reached the API — it fell
-  // through to the SPA fallback (e.g. a dev-proxy route gap), and saving it
-  // would hand the user an HTML page named .csv/.xlsx. Fail loudly instead.
-  if ((res.headers.get('Content-Type') ?? '').includes('text/html')) {
-    throw new ApiError(res.status, 'NOT_A_FILE', `Expected a file download from ${path} but received an HTML page`)
-  }
-
-  return { blob: await res.blob(), filename: filenameFromContentDisposition(res.headers.get('Content-Disposition')) }
-}
-
-// ── Silent refresh ───────────────────────────────────────────────────────────
-
-/**
- * Registered by AuthProvider on mount. Returns the new access token, or null
- * if the refresh token is expired/invalid (AuthProvider also handles logout
- * and redirect in that case).
- */
-let _silentRefresh: (() => Promise<string | null>) | null = null
-
-/** Mutex: if a refresh is already in flight, share it instead of firing a new one. */
-let _refreshInFlight: Promise<string | null> | null = null
-
-/** Called by AuthProvider to register the silent-refresh callback. */
-export function configureSilentRefresh(fn: (() => Promise<string | null>) | null): void {
-  _silentRefresh = fn
-}
-
-async function doSilentRefresh(): Promise<string | null> {
-  if (!_silentRefresh) return null
-  // Reuse an in-flight refresh instead of firing multiple simultaneous calls.
-  if (!_refreshInFlight) {
-    _refreshInFlight = _silentRefresh().finally(() => {
-      _refreshInFlight = null
-    })
-  }
-  return _refreshInFlight
-}
-
-/**
- * Higher-level wrapper that supplies the access token from a getter function.
- * On a 401, attempts one silent refresh and retries. If the refresh also fails,
- * the registered silentRefresh callback handles logout and redirect.
- *
- * Used by TanStack Query hooks so they never capture a stale token closure.
- */
-export function createAuthFetch(getToken: () => string | null) {
-  return async function authFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
-    try {
-      return await apiFetch<T>(path, { ...init, accessToken: getToken() ?? undefined })
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401 && _silentRefresh) {
-        const newToken = await doSilentRefresh()
-        if (!newToken) throw err
-        // Retry with the freshly-issued token.
-        return apiFetch<T>(path, { ...init, accessToken: newToken })
-      }
-      throw err
-    }
-  }
-}
-
-/** Same silent-refresh behavior as createAuthFetch, for binary (blob) responses. */
-export function createAuthFetchBlob(getToken: () => string | null) {
-  return async function authFetchBlob(path: string, init: RequestInit = {}): Promise<{ blob: Blob; filename: string | null }> {
-    try {
-      return await apiFetchBlob(path, { ...init, accessToken: getToken() ?? undefined })
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401 && _silentRefresh) {
-        const newToken = await doSilentRefresh()
-        if (!newToken) throw err
-        return apiFetchBlob(path, { ...init, accessToken: newToken })
-      }
-      throw err
-    }
-  }
-}
-````
-
-## File: packages/web/src/lib/textExport.ts
-````typescript
-/**
- * textExport — client-side Markdown, plain-text, and HTML generation for the
- * Export dialog's Phase 14.2 textual formats.
- *
- * All generators are pure functions: they accept pre-resolved lookup maps
- * (produced in DashboardPage) and return plain strings. No DOM access, no
- * network calls — identical output to what the user sees on screen.
- *
- * View-specific generators:
- *   buildList*    — GFM table (Markdown) / space-padded table (plain) / HTML <table>
- *   buildKanban*  — one section per column
- *   buildCalendar* — agenda-style date-grouped list
- */
-
-import type { components } from '@draba/shared'
-
-type ApiActivity = components['schemas']['Activity']
-
-// ── Public types ───────────────────────────────────────────────────────────────
-
-/**
- * A pre-built list display row for export.
- * Group rows produce section headers; activity rows produce content.
- * Mirrors the subset of ListDisplayRow used outside the component.
- */
-export type ListExportRow =
-  | { kind: 'group'; label: string; count: number }
-  | { kind: 'activity'; activity: ApiActivity; depth: number }
-
-/** All data the text generators need — supplied by DashboardPage at export time. */
-export interface TextExportData {
-  /**
-   * Filtered activities.
-   * Calendar generators iterate this directly. List generators use listDisplayRows instead.
-   */
-  activities: ApiActivity[]
-  /** Member ID → display name. */
-  memberById: Map<string, string>
-  /** Status ID → status name. */
-  statusById: Map<string, string>
-  /** Tag ID → tag name. */
-  tagById: Map<string, string>
-  /** Activity ID → title (for parent-activity name lookups). */
-  activityTitleById: Map<string, string>
-  /**
-   * Kanban-only: pre-built columns produced by `buildColumns`.
-   * Null for List and Calendar views.
-   * When kanbanShowHierarchy=true, column items contain only root activities.
-   */
-  kanbanColumns: Array<{ label: string; activities: ApiActivity[] }> | null
-  /**
-   * List-only: pre-built display rows in sorted, group-by order.
-   * Group rows emit section headers; activity rows carry a depth for hierarchy.
-   * Null for non-List views.
-   */
-  listDisplayRows: ListExportRow[] | null
-  /**
-   * List-only: ordered visible column IDs (excluding visual-only colorBar/identity).
-   * Null means use the default set of export columns.
-   */
-  listVisibleColumns: string[] | null
-  /** Kanban-only: true when hierarchy nesting is active in the view. */
-  kanbanShowHierarchy: boolean
-  /** Kanban-only: parent ID → child activities (populated when kanbanShowHierarchy=true). */
-  kanbanChildrenByParentId: Map<string, ApiActivity[]>
-}
-
-// ── Date formatting ────────────────────────────────────────────────────────────
-
-function fmtDate(iso: string | null | undefined): string {
-  if (!iso) return '—'
-  const d = new Date(iso)
-  if (isNaN(d.getTime())) return '—'
-  return d.toLocaleDateString('en-US', {
-    month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC',
-  })
-}
-
-function fmtDateRange(startAt: string | null | undefined, endAt: string | null | undefined): string {
-  const s = fmtDate(startAt)
-  const e = fmtDate(endAt)
-  if (s === '—' && e === '—') return '—'
-  if (s === e) return s
-  return `${s} – ${e}`
-}
-
-// ── Shared helpers ─────────────────────────────────────────────────────────────
-
-function resolveAssignees(activity: ApiActivity, memberById: Map<string, string>): string {
-  if (!activity.assignedMemberIds?.length) return '—'
-  return activity.assignedMemberIds.map(id => memberById.get(id) ?? id).join(', ')
-}
-
-function resolveTags(activity: ApiActivity, tagById: Map<string, string>): string {
-  if (!activity.tagIds?.length) return ''
-  return activity.tagIds.map(id => `#${tagById.get(id) ?? id}`).join(' ')
-}
-
-function buildHeader(timelineName: string, filterLabel: string | null): string {
-  const today = new Date().toLocaleDateString('en-US', {
-    month: 'long', day: 'numeric', year: 'numeric',
-  })
-  const parts = [`# ${timelineName} — ${today}`]
-  if (filterLabel) parts.push(`_Filter: ${filterLabel}_`)
-  parts.push('')
-  return parts.join('\n')
-}
-
-function buildPlainHeader(timelineName: string, filterLabel: string | null): string {
-  const today = new Date().toLocaleDateString('en-US', {
-    month: 'long', day: 'numeric', year: 'numeric',
-  })
-  const parts = [`${timelineName} — ${today}`]
-  if (filterLabel) parts.push(`Filter: ${filterLabel}`)
-  parts.push('')
-  return parts.join('\n')
-}
-
-function escMd(s: string): string {
-  return s.replace(/\|/g, '\\|')
-}
-
-function htmlEsc(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-}
-
-// ── List column helpers ────────────────────────────────────────────────────────
-
-const COLUMN_LABELS: Record<string, string> = {
-  title: 'Title',
-  startAt: 'Start',
-  endAt: 'End',
-  duration: 'Duration',
-  status: 'Status',
-  assignees: 'Assigned To',
-  tags: 'Tags',
-  progress: 'Progress',
-  parent: 'Parent',
-  description: 'Description',
-  location: 'Location',
-  url: 'URL',
-  notes: 'Notes',
-  createdAt: 'Created',
-  updatedAt: 'Updated',
-}
-
-const SKIP_EXPORT_COLS = new Set(['colorBar', 'identity'])
-
-/** Default columns emitted when listVisibleColumns is null. */
-const DEFAULT_EXPORT_COL_IDS = [
-  'title', 'startAt', 'endAt', 'status', 'assignees', 'tags', 'progress', 'parent',
-]
-
-function resolveListColumns(ids: string[] | null): Array<{ id: string; label: string }> {
-  const use = ids ?? DEFAULT_EXPORT_COL_IDS
-  return use
-    .filter(id => !SKIP_EXPORT_COLS.has(id) && id in COLUMN_LABELS)
-    .map(id => ({ id, label: COLUMN_LABELS[id] }))
-}
-
-function getColValue(
-  colId: string,
-  activity: ApiActivity,
-  memberById: Map<string, string>,
-  statusById: Map<string, string>,
-  tagById: Map<string, string>,
-  activityTitleById: Map<string, string>,
-): string {
-  switch (colId) {
-    case 'title': return activity.title
-    case 'startAt': return fmtDate(activity.startAt)
-    case 'endAt': return fmtDate(activity.endAt)
-    case 'duration': {
-      if (!activity.startAt || !activity.endAt) return '—'
-      const days = Math.round(
-        (new Date(activity.endAt).getTime() - new Date(activity.startAt).getTime()) / 86400000,
-      )
-      if (days < 0) return '—'
-      return `${days + 1} day${days + 1 !== 1 ? 's' : ''}`
-    }
-    case 'status': return activity.statusId ? (statusById.get(activity.statusId) ?? '—') : '—'
-    case 'assignees': return resolveAssignees(activity, memberById)
-    case 'tags': return resolveTags(activity, tagById) || '—'
-    case 'progress': return activity.percentComplete != null ? `${activity.percentComplete}%` : '—'
-    case 'parent': return activity.parentActivityId
-      ? (activityTitleById.get(activity.parentActivityId) ?? '—')
-      : '—'
-    case 'description': return activity.description ?? '—'
-    case 'location': return activity.location ?? '—'
-    case 'url': return activity.url ?? '—'
-    // notes is in the DB schema but may be absent from the strict generated TS type
-    case 'notes': return (activity as ApiActivity & { notes?: string | null }).notes ?? '—'
-    case 'createdAt': return fmtDate(activity.createdAt)
-    case 'updatedAt': return fmtDate(activity.updatedAt)
-    default: return '—'
-  }
-}
-
-/** Returns the depth-prefix for a title cell: '' at depth 0, '↳ ' at depth 1, '  ↳ ' at depth 2, etc. */
-function depthPrefix(depth: number): string {
-  if (depth === 0) return ''
-  return `${'  '.repeat(depth - 1)}↳ `
-}
-
-// ── Markdown generators ────────────────────────────────────────────────────────
-
-/**
- * List view → Markdown outline (bullet list).
- * One bullet per activity; only non-empty fields are emitted as indented lines.
- * Children are nested bullets (depth × 2 spaces of leading indent).
- * Group-by produces ## sections.
- */
-export function buildListMarkdownOutline(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { listDisplayRows, memberById, statusById, tagById, activityTitleById } = data
-  const lines: string[] = [buildHeader(timelineName, filterLabel)]
-
-  if (!listDisplayRows || listDisplayRows.length === 0) {
-    lines.push('_No activities._')
-    return lines.join('\n')
-  }
-
-  const fmtActivity = (activity: ApiActivity, bulletIndent: string): string[] => {
-    const result: string[] = []
-    const datePart = fmtDateRange(activity.startAt, activity.endAt)
-    const assignees = resolveAssignees(activity, memberById)
-    let firstLine = `${bulletIndent}- **${escMd(activity.title)}**`
-    if (datePart !== '—') firstLine += ` (${datePart})`
-    if (assignees !== '—') firstLine += ` — ${assignees}`
-    result.push(firstLine)
-
-    const fi = `${bulletIndent}  `
-    if (activity.description) result.push(`${fi}${escMd(activity.description)}`)
-    const status = activity.statusId ? statusById.get(activity.statusId) : null
-    if (status) result.push(`${fi}Status: ${escMd(status)}`)
-    if (activity.percentComplete != null) result.push(`${fi}Progress: ${activity.percentComplete}%`)
-    const parent = activity.parentActivityId ? activityTitleById.get(activity.parentActivityId) : null
-    if (parent) result.push(`${fi}Parent: ${escMd(parent)}`)
-    const tags = resolveTags(activity, tagById)
-    if (tags) result.push(`${fi}Tags: ${tags}`)
-    if (activity.location) result.push(`${fi}Location: ${escMd(activity.location)}`)
-    if (activity.url) result.push(`${fi}URL: ${escMd(activity.url)}`)
-    return result
-  }
-
-  const hasGroups = listDisplayRows.some(r => r.kind === 'group')
-
-  if (hasGroups) {
-    let firstGroup = true
-    for (const row of listDisplayRows) {
-      if (row.kind === 'group') {
-        if (!firstGroup) lines.push('')
-        lines.push(`## ${row.label} (${row.count})`)
-        lines.push('')
-        firstGroup = false
-      } else {
-        lines.push(...fmtActivity(row.activity, '  '.repeat(row.depth)))
-        lines.push('')
-      }
-    }
-  } else {
-    for (const row of listDisplayRows) {
-      if (row.kind === 'activity') {
-        lines.push(...fmtActivity(row.activity, '  '.repeat(row.depth)))
-        lines.push('')
-      }
-    }
-  }
-
-  return lines.join('\n').trimEnd()
-}
-
-/** List view → GitHub-flavored Markdown table, respecting column visibility, sort, group-by, and hierarchy. */
-export function buildListMarkdown(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { listDisplayRows, listVisibleColumns, memberById, statusById, tagById, activityTitleById } = data
-  const lines: string[] = [buildHeader(timelineName, filterLabel)]
-
-  const cols = resolveListColumns(listVisibleColumns)
-  const thead = `| ${cols.map(c => c.label).join(' | ')} |`
-  const tsep = `| ${cols.map(() => '---').join(' | ')} |`
-
-  const getCells = (activity: ApiActivity, depth: number) =>
-    cols.map(c => {
-      const val = getColValue(c.id, activity, memberById, statusById, tagById, activityTitleById)
-      const pfx = c.id === 'title' ? depthPrefix(depth) : ''
-      return escMd(pfx + val)
-    })
-
-  if (!listDisplayRows || listDisplayRows.length === 0) {
-    lines.push(thead, tsep)
-    if (!listDisplayRows || listDisplayRows.length === 0) lines.push('_No activities._')
-    return lines.join('\n')
-  }
-
-  const hasGroups = listDisplayRows.some(r => r.kind === 'group')
-
-  if (hasGroups) {
-    // member or status group-by: one GFM table per section
-    let firstGroup = true
-    for (const row of listDisplayRows) {
-      if (row.kind === 'group') {
-        if (!firstGroup) lines.push('')
-        lines.push(`## ${row.label} (${row.count})`)
-        lines.push('')
-        lines.push(thead)
-        lines.push(tsep)
-        firstGroup = false
-      } else {
-        lines.push(`| ${getCells(row.activity, row.depth).join(' | ')} |`)
-      }
-    }
-  } else {
-    // flat (none) or parent-hierarchy mode: single table, depth prefix in title
-    lines.push(thead, tsep)
-    for (const row of listDisplayRows) {
-      if (row.kind === 'activity') {
-        lines.push(`| ${getCells(row.activity, row.depth).join(' | ')} |`)
-      }
-    }
-  }
-
-  return lines.join('\n')
-}
-
-/** Kanban view → one Markdown section per column, with optional hierarchy nesting. */
-export function buildKanbanMarkdown(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { kanbanColumns, activities, memberById, statusById, tagById, kanbanShowHierarchy, kanbanChildrenByParentId } = data
-  const lines: string[] = [buildHeader(timelineName, filterLabel)]
-  const cols = kanbanColumns ?? [{ label: 'Activities', activities }]
-
-  const fmtItem = (a: ApiActivity, indent: string): string => {
-    const parts: string[] = [a.title]
-    const assignees = resolveAssignees(a, memberById)
-    if (assignees !== '—') parts.push(assignees)
-    const range = fmtDateRange(a.startAt, a.endAt)
-    if (range !== '—') parts.push(range)
-    const status = a.statusId ? (statusById.get(a.statusId) ?? null) : null
-    if (status) parts.push(status)
-    const tags = resolveTags(a, tagById)
-    if (tags) parts.push(tags)
-    return `${indent}- ${parts.join(' · ')}`
-  }
-
-  for (const col of cols) {
-    if (col.activities.length === 0) continue
-    lines.push(`## ${col.label} (${col.activities.length})`)
-    for (const a of col.activities) {
-      lines.push(fmtItem(a, ''))
-      if (kanbanShowHierarchy) {
-        for (const child of kanbanChildrenByParentId.get(a.id) ?? []) {
-          lines.push(fmtItem(child, '  '))
-        }
-      }
-    }
-    lines.push('')
-  }
-
-  if (cols.every(c => c.activities.length === 0)) lines.push('_No activities._')
-  return lines.join('\n').trimEnd()
-}
-
-/** Calendar view → agenda-style date-grouped Markdown list. */
-export function buildCalendarMarkdown(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { activities, memberById, tagById } = data
-  const lines: string[] = [buildHeader(timelineName, filterLabel)]
-
-  if (activities.length === 0) {
-    lines.push('_No activities._')
-    return lines.join('\n')
-  }
-
-  const byDate = new Map<string, ApiActivity[]>()
-  for (const a of activities) {
-    const key = a.startAt?.slice(0, 10) ?? '__none__'
-    const bucket = byDate.get(key) ?? []
-    bucket.push(a)
-    byDate.set(key, bucket)
-  }
-
-  for (const key of [...byDate.keys()].sort()) {
-    const acts = byDate.get(key)!
-    const dateLabel = key === '__none__'
-      ? 'No date'
-      : new Date(`${key}T00:00:00Z`).toLocaleDateString('en-US', {
-          weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC',
-        })
-    lines.push(`## ${dateLabel}`)
-    for (const a of acts) {
-      const parts: string[] = [a.title]
-      if (a.endAt && a.endAt.slice(0, 10) !== key) parts.push(`→ ${fmtDate(a.endAt)}`)
-      const assignees = resolveAssignees(a, memberById)
-      if (assignees !== '—') parts.push(assignees)
-      const tags = resolveTags(a, tagById)
-      if (tags) parts.push(tags)
-      lines.push(`- ${parts.join(' · ')}`)
-    }
-    lines.push('')
-  }
-
-  return lines.join('\n').trimEnd()
-}
-
-// ── Plain-text generators ──────────────────────────────────────────────────────
-
-function pad(s: string, width: number): string {
-  return s.length >= width ? s : `${s}${' '.repeat(width - s.length)}`
-}
-
-/**
- * List view → plain-text outline (bullet list).
- * Mirrors buildListMarkdownOutline without Markdown syntax — fields (incl. URL)
- * are emitted raw since there's no Markdown table/pipe syntax to break here.
- * Root activities use •, children use ◦ (depth 1+).
- */
-export function buildListPlainTextOutline(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { listDisplayRows, memberById, statusById, tagById, activityTitleById } = data
-  const lines: string[] = [buildPlainHeader(timelineName, filterLabel)]
-
-  if (!listDisplayRows || listDisplayRows.length === 0) {
-    lines.push('No activities.')
-    return lines.join('\n')
-  }
-
-  const fmtActivity = (activity: ApiActivity, depth: number): string[] => {
-    const result: string[] = []
-    const bulletIndent = '  '.repeat(depth)
-    const bullet = depth === 0 ? '•' : '◦'
-    const datePart = fmtDateRange(activity.startAt, activity.endAt)
-    const assignees = resolveAssignees(activity, memberById)
-    let firstLine = `${bulletIndent}${bullet} ${activity.title}`
-    if (datePart !== '—') firstLine += ` (${datePart})`
-    if (assignees !== '—') firstLine += ` — ${assignees}`
-    result.push(firstLine)
-
-    const fi = `${bulletIndent}  `
-    if (activity.description) result.push(`${fi}${activity.description}`)
-    const status = activity.statusId ? statusById.get(activity.statusId) : null
-    if (status) result.push(`${fi}Status: ${status}`)
-    if (activity.percentComplete != null) result.push(`${fi}Progress: ${activity.percentComplete}%`)
-    const parent = activity.parentActivityId ? activityTitleById.get(activity.parentActivityId) : null
-    if (parent) result.push(`${fi}Parent: ${parent}`)
-    const tags = resolveTags(activity, tagById)
-    if (tags) result.push(`${fi}Tags: ${tags}`)
-    if (activity.location) result.push(`${fi}Location: ${activity.location}`)
-    if (activity.url) result.push(`${fi}URL: ${activity.url}`)
-    return result
-  }
-
-  const hasGroups = listDisplayRows.some(r => r.kind === 'group')
-
-  if (hasGroups) {
-    let firstGroup = true
-    for (const row of listDisplayRows) {
-      if (row.kind === 'group') {
-        if (!firstGroup) lines.push('')
-        const heading = `${row.label.toUpperCase()} (${row.count})`
-        lines.push(heading)
-        lines.push('─'.repeat(heading.length))
-        firstGroup = false
-      } else {
-        lines.push(...fmtActivity(row.activity, row.depth))
-        lines.push('')
-      }
-    }
-  } else {
-    for (const row of listDisplayRows) {
-      if (row.kind === 'activity') {
-        lines.push(...fmtActivity(row.activity, row.depth))
-        lines.push('')
-      }
-    }
-  }
-
-  return lines.join('\n').trimEnd()
-}
-
-/** List view → space-padded plain-text table, respecting column visibility, sort, group-by, and hierarchy. */
-export function buildListPlainText(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { listDisplayRows, listVisibleColumns, memberById, statusById, tagById, activityTitleById } = data
-  const lines: string[] = [buildPlainHeader(timelineName, filterLabel)]
-
-  const cols = resolveListColumns(listVisibleColumns)
-  const MAX_W: Record<string, number> = {
-    title: 40, startAt: 15, endAt: 15, duration: 10, status: 20,
-    assignees: 26, tags: 20, progress: 10, parent: 24, description: 30,
-    location: 20, url: 30, notes: 30, createdAt: 15, updatedAt: 15,
-  }
-
-  const getRenderedValue = (colId: string, activity: ApiActivity, depth: number): string => {
-    const val = getColValue(colId, activity, memberById, statusById, tagById, activityTitleById)
-    const pfx = colId === 'title' ? depthPrefix(depth) : ''
-    return pfx + val
-  }
-
-  const activityRows = (listDisplayRows ?? []).filter((r): r is { kind: 'activity'; activity: ApiActivity; depth: number } => r.kind === 'activity')
-  const fallbackActivities = activityRows.length > 0
-    ? activityRows.map(r => ({ activity: r.activity, depth: r.depth }))
-    : data.activities.map(a => ({ activity: a, depth: 0 }))
-
-  if (fallbackActivities.length === 0) {
-    lines.push('No activities.')
-    return lines.join('\n')
-  }
-
-  // Compute column widths from actual rendered content
-  const widths = cols.map(col => {
-    let w = col.label.length
-    for (const { activity, depth } of fallbackActivities) {
-      const rendered = getRenderedValue(col.id, activity, depth)
-      w = Math.max(w, Math.min(rendered.length, MAX_W[col.id] ?? 20))
-    }
-    return w
-  })
-
-  const emitTableHeader = () => {
-    lines.push(cols.map((c, i) => pad(c.label, widths[i])).join('  '))
-    lines.push(widths.map(w => '─'.repeat(w)).join('  '))
-  }
-
-  const emitRow = (activity: ApiActivity, depth: number) => {
-    lines.push(
-      cols.map((c, i) => {
-        const rendered = getRenderedValue(c.id, activity, depth)
-        return pad(rendered.slice(0, widths[i]), widths[i])
-      }).join('  '),
-    )
-  }
-
-  if (!listDisplayRows) {
-    emitTableHeader()
-    for (const { activity, depth } of fallbackActivities) emitRow(activity, depth)
-    return lines.join('\n')
-  }
-
-  const hasGroups = listDisplayRows.some(r => r.kind === 'group')
-
-  if (hasGroups) {
-    let firstGroup = true
-    for (const row of listDisplayRows) {
-      if (row.kind === 'group') {
-        if (!firstGroup) lines.push('')
-        const heading = `${row.label.toUpperCase()} (${row.count})`
-        lines.push(heading)
-        lines.push('─'.repeat(heading.length))
-        emitTableHeader()
-        firstGroup = false
-      } else {
-        emitRow(row.activity, row.depth)
-      }
-    }
-  } else {
-    emitTableHeader()
-    for (const row of listDisplayRows) {
-      if (row.kind === 'activity') emitRow(row.activity, row.depth)
-    }
-  }
-
-  return lines.join('\n')
-}
-
-/** Kanban view → plain-text sections with bullet lists. */
-export function buildKanbanPlainText(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { kanbanColumns, activities, memberById, statusById, tagById, kanbanShowHierarchy, kanbanChildrenByParentId } = data
-  const lines: string[] = [buildPlainHeader(timelineName, filterLabel)]
-  const cols = kanbanColumns ?? [{ label: 'Activities', activities }]
-
-  const fmtItem = (a: ApiActivity): string => {
-    const parts: string[] = [a.title]
-    const assignees = resolveAssignees(a, memberById)
-    if (assignees !== '—') parts.push(assignees)
-    const range = fmtDateRange(a.startAt, a.endAt)
-    if (range !== '—') parts.push(range)
-    const status = a.statusId ? (statusById.get(a.statusId) ?? null) : null
-    if (status) parts.push(status)
-    const tags = resolveTags(a, tagById)
-    if (tags) parts.push(tags)
-    return parts.join(' · ')
-  }
-
-  for (const col of cols) {
-    if (col.activities.length === 0) continue
-    const heading = `${col.label.toUpperCase()} (${col.activities.length})`
-    lines.push(heading)
-    lines.push('─'.repeat(heading.length))
-    for (const a of col.activities) {
-      lines.push(`  • ${fmtItem(a)}`)
-      if (kanbanShowHierarchy) {
-        for (const child of kanbanChildrenByParentId.get(a.id) ?? []) {
-          lines.push(`      ◦ ${fmtItem(child)}`)
-        }
-      }
-    }
-    lines.push('')
-  }
-
-  if (cols.every(c => c.activities.length === 0)) lines.push('No activities.')
-  return lines.join('\n').trimEnd()
-}
-
-/** Calendar view → plain-text agenda. */
-export function buildCalendarPlainText(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { activities, memberById, tagById } = data
-  const lines: string[] = [buildPlainHeader(timelineName, filterLabel)]
-
-  if (activities.length === 0) { lines.push('No activities.'); return lines.join('\n') }
-
-  const byDate = new Map<string, ApiActivity[]>()
-  for (const a of activities) {
-    const key = a.startAt?.slice(0, 10) ?? '__none__'
-    const bucket = byDate.get(key) ?? []
-    bucket.push(a)
-    byDate.set(key, bucket)
-  }
-
-  for (const key of [...byDate.keys()].sort()) {
-    const acts = byDate.get(key)!
-    const dateLabel = key === '__none__'
-      ? 'No date'
-      : new Date(`${key}T00:00:00Z`).toLocaleDateString('en-US', {
-          weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC',
-        })
-    lines.push(dateLabel)
-    lines.push('─'.repeat(dateLabel.length))
-    for (const a of acts) {
-      const parts: string[] = [a.title]
-      if (a.endAt && a.endAt.slice(0, 10) !== key) parts.push(`→ ${fmtDate(a.endAt)}`)
-      const assignees = resolveAssignees(a, memberById)
-      if (assignees !== '—') parts.push(assignees)
-      const tags = resolveTags(a, tagById)
-      if (tags) parts.push(tags)
-      lines.push(`  • ${parts.join(' · ')}`)
-    }
-    lines.push('')
-  }
-
-  return lines.join('\n').trimEnd()
-}
-
-// ── HTML generators (for clipboard text/html flavor) ──────────────────────────
-
-const TH = 'padding:6px 10px;border:1px solid #ccc;background:#f5f5f5;font-weight:600;text-align:left;white-space:nowrap;font-family:system-ui,sans-serif;font-size:13px'
-const TD = 'padding:5px 10px;border:1px solid #ddd;vertical-align:top;font-family:system-ui,sans-serif;font-size:13px'
-
-function htmlHeaderBlock(timelineName: string, filterLabel: string | null): string {
-  const today = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
-  const ctx = filterLabel ? ` · Filter: ${htmlEsc(filterLabel)}` : ''
-  return `<p style="font-family:system-ui,sans-serif;font-size:13px;margin:0 0 10px"><strong>${htmlEsc(timelineName)}</strong> — ${today}${ctx}</p>`
-}
-
-/** List view → HTML table for clipboard, respecting column visibility, sort, group-by, and hierarchy. */
-export function buildListHtml(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { listDisplayRows, listVisibleColumns, memberById, statusById, tagById, activityTitleById } = data
-  const cols = resolveListColumns(listVisibleColumns)
-
-  const theadRow = `<tr>${cols.map(c => `<th style="${TH}">${htmlEsc(c.label)}</th>`).join('')}</tr>`
-  const thead = `<thead>${theadRow}</thead>`
-  const colspan = cols.length
-
-  const makeRow = (activity: ApiActivity, depth: number): string => {
-    const cells = cols.map(c => {
-      const val = getColValue(c.id, activity, memberById, statusById, tagById, activityTitleById)
-      const paddingLeft = c.id === 'title' && depth > 0 ? `padding-left:${6 + depth * 16}px;` : ''
-      const prefix = c.id === 'title' && depth > 0 ? '↳ ' : ''
-      return `<td style="${paddingLeft}${TD}">${htmlEsc(prefix + val)}</td>`
-    })
-    return `<tr>${cells.join('')}</tr>`
-  }
-
-  const makeSection = (label: string, count: number): string =>
-    `<tr><th colspan="${colspan}" style="${TH};background:#e8e8e8;font-size:12px">${htmlEsc(label)} (${count})</th></tr>`
-
-  const rows: string[] = []
-  const activityList = listDisplayRows ?? data.activities.map(a => ({ kind: 'activity' as const, activity: a, depth: 0 }))
-
-  if (activityList.length === 0) {
-    rows.push(`<tr><td colspan="${colspan}" style="${TD}"><em>No activities.</em></td></tr>`)
-  } else {
-    for (const row of activityList) {
-      if (row.kind === 'group') {
-        rows.push(makeSection(row.label, row.count))
-        rows.push(theadRow)
-      } else {
-        rows.push(makeRow(row.activity, row.depth))
-      }
-    }
-  }
-
-  return `${htmlHeaderBlock(timelineName, filterLabel)}<table style="border-collapse:collapse">${thead}<tbody>${rows.join('')}</tbody></table>`
-}
-
-/** List view → HTML outline (bullet list) for clipboard. Mirrors buildListMarkdownOutline. */
-export function buildListHtmlOutline(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { listDisplayRows, memberById, statusById, tagById, activityTitleById } = data
-
-  const LI = 'font-family:system-ui,sans-serif;font-size:13px;margin:3px 0'
-  const FIELD = 'font-family:system-ui,sans-serif;font-size:12px;color:#555;margin:1px 0 1px 0'
-
-  const fmtActivity = (activity: ApiActivity, depth: number): string => {
-    const datePart = fmtDateRange(activity.startAt, activity.endAt)
-    const assignees = resolveAssignees(activity, memberById)
-    let firstLine = `<strong>${htmlEsc(activity.title)}</strong>`
-    if (datePart !== '—') firstLine += ` <span style="color:#777">(${htmlEsc(datePart)})</span>`
-    if (assignees !== '—') firstLine += ` — ${htmlEsc(assignees)}`
-
-    const fields: string[] = []
-    if (activity.description) fields.push(htmlEsc(activity.description))
-    const status = activity.statusId ? statusById.get(activity.statusId) : null
-    if (status) fields.push(`Status: ${htmlEsc(status)}`)
-    if (activity.percentComplete != null) fields.push(`Progress: ${activity.percentComplete}%`)
-    const parent = activity.parentActivityId ? activityTitleById.get(activity.parentActivityId) : null
-    if (parent) fields.push(`Parent: ${htmlEsc(parent)}`)
-    const tags = resolveTags(activity, tagById)
-    if (tags) fields.push(`Tags: ${htmlEsc(tags)}`)
-    if (activity.location) fields.push(`Location: ${htmlEsc(activity.location)}`)
-    if (activity.url) fields.push(`URL: ${htmlEsc(activity.url)}`)
-
-    const fieldHtml = fields.length > 0
-      ? `<div style="margin:2px 0 0 0">${fields.map(f => `<div style="${FIELD}">${f}</div>`).join('')}</div>`
-      : ''
-
-    const paddingLeft = depth > 0 ? `padding-left:${depth * 20}px;` : ''
-    return `<li style="${paddingLeft}${LI}">${firstLine}${fieldHtml}</li>`
-  }
-
-  const activityList = listDisplayRows ?? data.activities.map(a => ({ kind: 'activity' as const, activity: a, depth: 0 }))
-
-  if (activityList.length === 0) {
-    return `${htmlHeaderBlock(timelineName, filterLabel)}<p style="font-family:system-ui,sans-serif;font-size:13px"><em>No activities.</em></p>`
-  }
-
-  const hasGroups = activityList.some(r => r.kind === 'group')
-  const sections: string[] = []
-
-  if (hasGroups) {
-    let items: string[] = []
-    let groupLabel = ''
-    let groupCount = 0
-    const flush = () => {
-      if (groupLabel) sections.push(`<h3 style="font-family:system-ui,sans-serif;font-size:14px;margin:16px 0 4px">${htmlEsc(groupLabel)} (${groupCount})</h3><ul style="margin:0;padding-left:20px">${items.join('')}</ul>`)
-    }
-    for (const row of activityList) {
-      if (row.kind === 'group') {
-        flush()
-        groupLabel = row.label
-        groupCount = row.count
-        items = []
-      } else {
-        items.push(fmtActivity(row.activity, row.depth))
-      }
-    }
-    flush()
-  } else {
-    const items = activityList
-      .filter((r): r is { kind: 'activity'; activity: ApiActivity; depth: number } => r.kind === 'activity')
-      .map(r => fmtActivity(r.activity, r.depth))
-    sections.push(`<ul style="margin:0;padding-left:20px">${items.join('')}</ul>`)
-  }
-
-  return `${htmlHeaderBlock(timelineName, filterLabel)}${sections.join('')}`
-}
-
-/** Kanban view → HTML sections with optional hierarchy nesting. */
-export function buildKanbanHtml(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { kanbanColumns, activities, memberById, statusById, tagById, kanbanShowHierarchy, kanbanChildrenByParentId } = data
-  const cols = kanbanColumns ?? [{ label: 'Activities', activities }]
-
-  const fmtLi = (a: ApiActivity, style: string): string => {
-    const parts: string[] = [htmlEsc(a.title)]
-    const assignees = resolveAssignees(a, memberById)
-    if (assignees !== '—') parts.push(htmlEsc(assignees))
-    const range = fmtDateRange(a.startAt, a.endAt)
-    if (range !== '—') parts.push(htmlEsc(range))
-    const status = a.statusId ? (statusById.get(a.statusId) ?? null) : null
-    if (status) parts.push(htmlEsc(status))
-    const tags = resolveTags(a, tagById)
-    if (tags) parts.push(htmlEsc(tags))
-    return `<li style="${style}">${parts.join(' · ')}</li>`
-  }
-
-  const LI = 'font-family:system-ui,sans-serif;font-size:13px;margin:2px 0'
-  const LI_CHILD = 'font-family:system-ui,sans-serif;font-size:12px;margin:2px 0;color:#555'
-
-  const sections = cols
-    .filter(c => c.activities.length > 0)
-    .map(col => {
-      const items: string[] = []
-      for (const a of col.activities) {
-        const children = kanbanShowHierarchy ? (kanbanChildrenByParentId.get(a.id) ?? []) : []
-        if (children.length > 0) {
-          const childList = children.map(c => fmtLi(c, LI_CHILD)).join('')
-          items.push(`<li style="${LI}">${[htmlEsc(a.title), ...([resolveAssignees(a, memberById)].filter(s => s !== '—'))].join(' · ')}<ul style="margin:2px 0;padding-left:16px">${childList}</ul></li>`)
-        } else {
-          items.push(fmtLi(a, LI))
-        }
-      }
-      return `<h3 style="font-family:system-ui,sans-serif;font-size:14px;margin:16px 0 4px">${htmlEsc(col.label)} (${col.activities.length})</h3><ul style="margin:0;padding-left:20px">${items.join('')}</ul>`
-    })
-
-  const body = sections.length > 0 ? sections.join('') : '<p style="font-family:system-ui,sans-serif;font-size:13px"><em>No activities.</em></p>'
-  return `${htmlHeaderBlock(timelineName, filterLabel)}${body}`
-}
-
-/** Calendar view → HTML agenda. */
-export function buildCalendarHtml(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { activities, memberById, tagById } = data
-  if (activities.length === 0) {
-    return `${htmlHeaderBlock(timelineName, filterLabel)}<p style="font-family:system-ui,sans-serif;font-size:13px"><em>No activities.</em></p>`
-  }
-
-  const byDate = new Map<string, ApiActivity[]>()
-  for (const a of activities) {
-    const key = a.startAt?.slice(0, 10) ?? '__none__'
-    const bucket = byDate.get(key) ?? []
-    bucket.push(a)
-    byDate.set(key, bucket)
-  }
-
-  const sections = [...byDate.keys()].sort().map(key => {
-    const acts = byDate.get(key)!
-    const dateLabel = key === '__none__'
-      ? 'No date'
-      : new Date(`${key}T00:00:00Z`).toLocaleDateString('en-US', {
-          weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC',
-        })
-    const items = acts.map(a => {
-      const parts: string[] = [htmlEsc(a.title)]
-      if (a.endAt && a.endAt.slice(0, 10) !== key) parts.push(`→ ${htmlEsc(fmtDate(a.endAt))}`)
-      const assignees = resolveAssignees(a, memberById)
-      if (assignees !== '—') parts.push(htmlEsc(assignees))
-      const tags = resolveTags(a, tagById)
-      if (tags) parts.push(htmlEsc(tags))
-      return `<li style="font-family:system-ui,sans-serif;font-size:13px;margin:2px 0">${parts.join(' · ')}</li>`
-    })
-    return `<h3 style="font-family:system-ui,sans-serif;font-size:14px;margin:16px 0 4px">${htmlEsc(dateLabel)}</h3><ul style="margin:0;padding-left:20px">${items.join('')}</ul>`
-  })
-
-  return `${htmlHeaderBlock(timelineName, filterLabel)}${sections.join('')}`
-}
-````
-
 ## File: packages/api/internal/api/share_handler.go
 ````go
 package api
@@ -64122,442 +63138,1140 @@ type Invite struct {
 }
 ````
 
-## File: packages/web/src/components/export/PresentationFrame.tsx
+## File: packages/api/go.mod
+````
+module github.com/I0-1O/draba/packages/api
+
+go 1.25.0
+
+require (
+	github.com/coreos/go-oidc/v3 v3.18.0
+	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/gorilla/websocket v1.5.3
+	github.com/jmoiron/sqlx v1.4.0
+	github.com/oapi-codegen/runtime v1.4.0
+	github.com/stretchr/testify v1.11.1
+	github.com/xuri/excelize/v2 v2.10.1
+	golang.org/x/crypto v0.48.0
+	golang.org/x/oauth2 v0.36.0
+	modernc.org/sqlite v1.34.5
+)
+
+require (
+	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
+	github.com/google/uuid v1.6.0 // indirect
+	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/ncruces/go-strftime v1.0.0 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
+	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	github.com/richardlehane/mscfb v1.0.6 // indirect
+	github.com/richardlehane/msoleps v1.0.6 // indirect
+	github.com/tiendc/go-deepcopy v1.7.2 // indirect
+	github.com/xuri/efp v0.0.1 // indirect
+	github.com/xuri/nfp v0.0.2-0.20250530014748-2ddeb826f9a9 // indirect
+	golang.org/x/exp v0.0.0-20230315142452-642cacee5cc0 // indirect
+	golang.org/x/net v0.50.0 // indirect
+	golang.org/x/sys v0.41.0 // indirect
+	golang.org/x/text v0.34.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
+	modernc.org/libc v1.61.6 // indirect
+	modernc.org/mathutil v1.7.1 // indirect
+	modernc.org/memory v1.8.0 // indirect
+)
+````
+
+## File: packages/web/src/lib/api.ts
 ````typescript
 /**
- * PresentationFrame — an isolated, always-light document used as the shared
- * render surface for the visual exports (Phase 14.3 PNG; Phase 14.4 HTML/print).
+ * Thin fetch wrapper over the draba REST API.
  *
- * The earlier 14.3 approach mounted the clean snapshot inside the live dashboard
- * and forced light mode by toggling the `dark` class on the page's own `<html>`.
- * That repainted the visible dashboard (the "flicker") and left some elements —
- * the ones that paint from inline `var(--muted)`/`var(--card)` (kanban column
- * boxes, the Gantt sticky left rail) — stuck on dark, because html-to-image
- * can't reliably resolve theme CSS variables that hang off a `.dark` class on
- * the document root.
+ * Token lifecycle:
+ *   - Access token: kept in memory via the AuthContext; passed as Authorization header.
+ *   - Refresh token: persisted in localStorage under REFRESH_TOKEN_KEY.
+ *     On a 401, the client attempts one silent refresh then retries the original request.
+ *     Concurrent 401s share a single refresh call (mutex via in-flight promise).
+ *     If refresh also fails, the registered logout handler is called and the user
+ *     is redirected to /login.
  *
- * This component sidesteps both by rendering the snapshot into a same-origin
- * `<iframe>` that is its own document: the parent's stylesheets and fonts are
- * cloned into it (so Tailwind utilities, the `:root` design tokens, and Open
- * Sans all apply), and its `<html>` never receives the `.dark` class. The result
- * is structurally light — no class toggling on the live page (no flicker), and
- * every `var()` reference resolves against a `:root` with no dark override in
- * scope (no leftover dark boxes).
- *
- * Stylesheets are copied by cloning the `<style>`/`<link>` nodes rather than
- * reading `document.styleSheets[].cssRules`, which avoids the cross-origin
- * `SecurityError` the Google Fonts stylesheet otherwise triggers.
- *
- * The same frame is the surface Phase 14.4 reuses: `iframe.contentWindow.print()`
- * for the printable-PDF route and serialization of `contentDocument` for the
- * HTML download (htmlExport inlines same-origin stylesheet links at serialize
- * time, since cloned `<link>` hrefs don't survive a save-to-disk) — one render
- * path, shared with the Phase 13 share viewer's components, no second harness
- * to drift.
+ * All callers receive typed JSON or throw an ApiError.
  */
 
-import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { createPortal } from 'react-dom'
-import { forceLightDocumentElement, PRESENTATION_BACKGROUND } from '@/lib/presentationTheme'
+import type { components } from '@draba/shared'
 
-export interface PresentationFrameProps {
-  /**
-   * Invoked once the frame's document is ready (styles copied, light theme
-   * applied, body available). Pass the body to the PNG capture / HTML serialize.
-   * Memoize this in the caller so it doesn't re-run the readiness effect.
-   */
-  onReady?: (body: HTMLElement, iframe: HTMLIFrameElement) => void
-  children: ReactNode
+export type ApiErrorBody = components['schemas']['ApiError']
+
+// Empty string = same-origin relative URLs, which is correct when the SPA is
+// embedded in the Go binary. Set VITE_API_URL for local dev against a
+// separate API server (e.g. VITE_API_URL=http://localhost:8080).
+export const API_BASE =
+  (import.meta.env.VITE_API_URL as string | undefined) ?? ''
+
+export const REFRESH_TOKEN_KEY = 'draba_refresh_token'
+
+/** Thrown for any non-2xx response. */
+export class ApiError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly code: string,
+    message: string,
+    /** Extra fields from the error response body (e.g. assignmentCount on 409). */
+    public readonly data?: Record<string, unknown>,
+  ) {
+    super(message)
+    this.name = 'ApiError'
+  }
+}
+
+/** Reads the stored refresh token from localStorage. */
+export function getStoredRefreshToken(): string | null {
+  return localStorage.getItem(REFRESH_TOKEN_KEY)
+}
+
+/** Persists the refresh token to localStorage. */
+export function storeRefreshToken(token: string): void {
+  localStorage.setItem(REFRESH_TOKEN_KEY, token)
+}
+
+/** Removes the refresh token from localStorage (on logout). */
+export function clearStoredRefreshToken(): void {
+  localStorage.removeItem(REFRESH_TOKEN_KEY)
+}
+
+async function parseError(res: Response): Promise<ApiError> {
+  try {
+    const body = (await res.json()) as ApiErrorBody & Record<string, unknown>
+    const { error, ...rest } = body
+    const data = Object.keys(rest).length > 0 ? (rest as Record<string, unknown>) : undefined
+    return new ApiError(res.status, error.code, error.message, data)
+  } catch {
+    return new ApiError(res.status, 'UNKNOWN', res.statusText)
+  }
+}
+
+/** Low-level fetch that injects the access token and throws ApiError on non-2xx. */
+export async function apiFetch<T>(
+  path: string,
+  init: RequestInit & { accessToken?: string } = {},
+): Promise<T> {
+  const { accessToken, ...rest } = init
+  const headers = new Headers(rest.headers)
+  // FormData bodies must let the browser set the multipart boundary itself.
+  if (!(rest.body instanceof FormData)) {
+    headers.set('Content-Type', 'application/json')
+  }
+  if (accessToken) {
+    headers.set('Authorization', `Bearer ${accessToken}`)
+  }
+
+  const res = await fetch(`${API_BASE}${path}`, { ...rest, headers })
+
+  if (!res.ok) {
+    throw await parseError(res)
+  }
+
+  // 204 No Content — return undefined cast as T
+  if (res.status === 204) {
+    return undefined as unknown as T
+  }
+
+  return res.json() as Promise<T>
+}
+
+/** Extracts the filename from a Content-Disposition header, if present. */
+function filenameFromContentDisposition(header: string | null): string | null {
+  if (!header) return null
+  const match = /filename="?([^";]+)"?/.exec(header)
+  return match ? match[1] : null
+}
+
+/** Low-level fetch for binary responses (file downloads). Throws ApiError on non-2xx. */
+export async function apiFetchBlob(
+  path: string,
+  init: RequestInit & { accessToken?: string } = {},
+): Promise<{ blob: Blob; filename: string | null }> {
+  const { accessToken, ...rest } = init
+  const headers = new Headers(rest.headers)
+  headers.set('Content-Type', 'application/json')
+  if (accessToken) {
+    headers.set('Authorization', `Bearer ${accessToken}`)
+  }
+
+  const res = await fetch(`${API_BASE}${path}`, { ...rest, headers })
+
+  if (!res.ok) {
+    throw await parseError(res)
+  }
+
+  // An HTML body here means the request never reached the API — it fell
+  // through to the SPA fallback (e.g. a dev-proxy route gap), and saving it
+  // would hand the user an HTML page named .csv/.xlsx. Fail loudly instead.
+  if ((res.headers.get('Content-Type') ?? '').includes('text/html')) {
+    throw new ApiError(res.status, 'NOT_A_FILE', `Expected a file download from ${path} but received an HTML page`)
+  }
+
+  return { blob: await res.blob(), filename: filenameFromContentDisposition(res.headers.get('Content-Disposition')) }
+}
+
+// ── Silent refresh ───────────────────────────────────────────────────────────
+
+/**
+ * Registered by AuthProvider on mount. Returns the new access token, or null
+ * if the refresh token is expired/invalid (AuthProvider also handles logout
+ * and redirect in that case).
+ */
+let _silentRefresh: (() => Promise<string | null>) | null = null
+
+/** Mutex: if a refresh is already in flight, share it instead of firing a new one. */
+let _refreshInFlight: Promise<string | null> | null = null
+
+/** Called by AuthProvider to register the silent-refresh callback. */
+export function configureSilentRefresh(fn: (() => Promise<string | null>) | null): void {
+  _silentRefresh = fn
+}
+
+async function doSilentRefresh(): Promise<string | null> {
+  if (!_silentRefresh) return null
+  // Reuse an in-flight refresh instead of firing multiple simultaneous calls.
+  if (!_refreshInFlight) {
+    _refreshInFlight = _silentRefresh().finally(() => {
+      _refreshInFlight = null
+    })
+  }
+  return _refreshInFlight
 }
 
 /**
- * Clones the parent document's style and stylesheet/font link nodes into the
- * frame's head. Node-cloning (not `cssRules` serialization) is deliberate — it
- * copies Vite's dev `<style>` blocks and prod `<link>`s alike without reading
- * cross-origin sheets, which would throw `SecurityError` on the fonts stylesheet.
+ * Higher-level wrapper that supplies the access token from a getter function.
+ * On a 401, attempts one silent refresh and retries. If the refresh also fails,
+ * the registered silentRefresh callback handles logout and redirect.
+ *
+ * Used by TanStack Query hooks so they never capture a stale token closure.
  */
-function copyDocumentStyles(srcDoc: Document, destDoc: Document): void {
-  const selector = [
-    'style',
-    'link[rel="stylesheet"]',
-    'link[rel="preconnect"]',
-    'link[as="style"]',
-    'link[href*="fonts.googleapis"]',
-    'link[href*="fonts.gstatic"]',
-  ].join(',')
-  srcDoc.querySelectorAll(selector).forEach(node => {
-    destDoc.head.appendChild(node.cloneNode(true))
-  })
+export function createAuthFetch(getToken: () => string | null) {
+  return async function authFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+    try {
+      return await apiFetch<T>(path, { ...init, accessToken: getToken() ?? undefined })
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401 && _silentRefresh) {
+        const newToken = await doSilentRefresh()
+        if (!newToken) throw err
+        // Retry with the freshly-issued token.
+        return apiFetch<T>(path, { ...init, accessToken: newToken })
+      }
+      throw err
+    }
+  }
 }
 
-export default function PresentationFrame({ onReady, children }: PresentationFrameProps) {
-  const iframeRef = useRef<HTMLIFrameElement>(null)
-  const [body, setBody] = useState<HTMLElement | null>(null)
-
-  useEffect(() => {
-    const iframe = iframeRef.current
-    const doc = iframe?.contentDocument
-    if (!iframe || !doc) return
-
-    // Never dark: the snapshot must be light regardless of the user's theme,
-    // and we deliberately do not touch the parent <html> (that caused the flicker).
-    forceLightDocumentElement(doc)
-    copyDocumentStyles(document, doc)
-    doc.body.style.margin = '0'
-    doc.body.style.padding = '0'
-    doc.body.style.background = PRESENTATION_BACKGROUND
-    // Shrink-wrap to the content so scrollWidth/scrollHeight at capture time is
-    // the view's full natural extent, not the iframe viewport.
-    doc.body.style.display = 'inline-block'
-    setBody(doc.body)
-  }, [])
-
-  useEffect(() => {
-    if (body && iframeRef.current) onReady?.(body, iframeRef.current)
-  }, [body, onReady])
-
-  return (
-    <>
-      {/*
-        Positioned at the viewport origin (not an extreme off-screen offset) so
-        the browser actually paints/lays out the content — Chrome culls layout
-        for nodes placed absurdly far outside any viewport, which left earlier
-        captures blank. z-index -1 tucks it behind the export dialog's backdrop
-        (z-1000), the only thing rendered alongside it, so it's never visible.
-        Sized generously so width-flexible content lays out fully; the capture
-        reads the body's own scroll extent regardless of this box.
-      */}
-      <iframe
-        ref={iframeRef}
-        title="Export presentation surface"
-        aria-hidden
-        // Defense-in-depth: nothing is ever given a src/srcdoc (stays
-        // about:blank), but scripts and top-level navigation are blocked
-        // outright in case that ever changes.
-        sandbox="allow-same-origin"
-        style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          width: 1440,
-          height: 900,
-          border: 0,
-          zIndex: -1,
-          pointerEvents: 'none',
-        }}
-      />
-      {body && createPortal(children, body)}
-    </>
-  )
+/** Same silent-refresh behavior as createAuthFetch, for binary (blob) responses. */
+export function createAuthFetchBlob(getToken: () => string | null) {
+  return async function authFetchBlob(path: string, init: RequestInit = {}): Promise<{ blob: Blob; filename: string | null }> {
+    try {
+      return await apiFetchBlob(path, { ...init, accessToken: getToken() ?? undefined })
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401 && _silentRefresh) {
+        const newToken = await doSilentRefresh()
+        if (!newToken) throw err
+        return apiFetchBlob(path, { ...init, accessToken: newToken })
+      }
+      throw err
+    }
+  }
 }
 ````
 
-## File: packages/web/src/lib/exportCapabilities.test.ts
+## File: packages/web/src/lib/textExport.ts
 ````typescript
 /**
- * exportCapabilities — unit tests for getExportFormats and buildExportFilename.
+ * textExport — client-side Markdown, plain-text, and HTML generation for the
+ * Export dialog's Phase 14.2 textual formats.
+ *
+ * All generators are pure functions: they accept pre-resolved lookup maps
+ * (produced in DashboardPage) and return plain strings. No DOM access, no
+ * network calls — identical output to what the user sees on screen.
+ *
+ * View-specific generators:
+ *   buildList*    — GFM table (Markdown) / space-padded table (plain) / HTML <table>
+ *   buildKanban*  — one section per column
+ *   buildCalendar* — agenda-style date-grouped list
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { getExportFormats, buildExportFilename } from './exportCapabilities'
+import type { components } from '@draba/shared'
 
-describe('getExportFormats', () => {
-  it('returns data formats + PNG + printable/HTML (6) for gantt', () => {
-    const formats = getExportFormats('gantt')
-    expect(formats).toHaveLength(6)
-    const ids = formats.map(f => f.id)
-    expect(ids).toContain('csv')
-    expect(ids).toContain('xlsx')
-    expect(ids).toContain('ics')
-    expect(ids).toContain('png')
-    expect(ids).toContain('printable')
-    expect(ids).toContain('html')
-    expect(ids).not.toContain('markdown')
-    expect(ids).not.toContain('clipboard')
+type ApiActivity = components['schemas']['Activity']
+
+// ── Public types ───────────────────────────────────────────────────────────────
+
+/**
+ * A pre-built list display row for export.
+ * Group rows produce section headers; activity rows produce content.
+ * Mirrors the subset of ListDisplayRow used outside the component.
+ */
+export type ListExportRow =
+  | { kind: 'group'; label: string; count: number }
+  | { kind: 'activity'; activity: ApiActivity; depth: number }
+
+/** All data the text generators need — supplied by DashboardPage at export time. */
+export interface TextExportData {
+  /**
+   * Filtered activities.
+   * Calendar generators iterate this directly. List generators use listDisplayRows instead.
+   */
+  activities: ApiActivity[]
+  /** Member ID → display name. */
+  memberById: Map<string, string>
+  /** Status ID → status name. */
+  statusById: Map<string, string>
+  /** Tag ID → tag name. */
+  tagById: Map<string, string>
+  /** Activity ID → title (for parent-activity name lookups). */
+  activityTitleById: Map<string, string>
+  /**
+   * Kanban-only: pre-built columns produced by `buildColumns`.
+   * Null for List and Calendar views.
+   * When kanbanShowHierarchy=true, column items contain only root activities.
+   */
+  kanbanColumns: Array<{ label: string; activities: ApiActivity[] }> | null
+  /**
+   * List-only: pre-built display rows in sorted, group-by order.
+   * Group rows emit section headers; activity rows carry a depth for hierarchy.
+   * Null for non-List views.
+   */
+  listDisplayRows: ListExportRow[] | null
+  /**
+   * List-only: ordered visible column IDs (excluding visual-only colorBar/identity).
+   * Null means use the default set of export columns.
+   */
+  listVisibleColumns: string[] | null
+  /** Kanban-only: true when hierarchy nesting is active in the view. */
+  kanbanShowHierarchy: boolean
+  /** Kanban-only: parent ID → child activities (populated when kanbanShowHierarchy=true). */
+  kanbanChildrenByParentId: Map<string, ApiActivity[]>
+}
+
+// ── Date formatting ────────────────────────────────────────────────────────────
+
+function fmtDate(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return '—'
+  return d.toLocaleDateString('en-US', {
+    month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC',
   })
+}
 
-  it('returns data + PNG + printable/HTML + text formats (9) for list, kanban, calendar', () => {
-    const views = ['list', 'kanban', 'calendar'] as const
-    for (const view of views) {
-      const formats = getExportFormats(view)
-      expect(formats).toHaveLength(9)
-      const ids = formats.map(f => f.id)
-      expect(ids).toContain('csv')
-      expect(ids).toContain('xlsx')
-      expect(ids).toContain('ics')
-      expect(ids).toContain('png')
-      expect(ids).toContain('printable')
-      expect(ids).toContain('html')
-      expect(ids).toContain('markdown')
-      expect(ids).toContain('plaintext')
-      expect(ids).toContain('clipboard')
+function fmtDateRange(startAt: string | null | undefined, endAt: string | null | undefined): string {
+  const s = fmtDate(startAt)
+  const e = fmtDate(endAt)
+  if (s === '—' && e === '—') return '—'
+  if (s === e) return s
+  return `${s} – ${e}`
+}
+
+// ── Shared helpers ─────────────────────────────────────────────────────────────
+
+function resolveAssignees(activity: ApiActivity, memberById: Map<string, string>): string {
+  if (!activity.assignedMemberIds?.length) return '—'
+  return activity.assignedMemberIds.map(id => memberById.get(id) ?? id).join(', ')
+}
+
+function resolveTags(activity: ApiActivity, tagById: Map<string, string>): string {
+  if (!activity.tagIds?.length) return ''
+  return activity.tagIds.map(id => `#${tagById.get(id) ?? id}`).join(' ')
+}
+
+function buildHeader(timelineName: string, filterLabel: string | null): string {
+  const today = new Date().toLocaleDateString('en-US', {
+    month: 'long', day: 'numeric', year: 'numeric',
+  })
+  const parts = [`# ${timelineName} — ${today}`]
+  if (filterLabel) parts.push(`_Filter: ${filterLabel}_`)
+  parts.push('')
+  return parts.join('\n')
+}
+
+function buildPlainHeader(timelineName: string, filterLabel: string | null): string {
+  const today = new Date().toLocaleDateString('en-US', {
+    month: 'long', day: 'numeric', year: 'numeric',
+  })
+  const parts = [`${timelineName} — ${today}`]
+  if (filterLabel) parts.push(`Filter: ${filterLabel}`)
+  parts.push('')
+  return parts.join('\n')
+}
+
+function escMd(s: string): string {
+  return s.replace(/\|/g, '\\|')
+}
+
+function htmlEsc(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+// ── List column helpers ────────────────────────────────────────────────────────
+
+const COLUMN_LABELS: Record<string, string> = {
+  title: 'Title',
+  startAt: 'Start',
+  endAt: 'End',
+  duration: 'Duration',
+  status: 'Status',
+  assignees: 'Assigned To',
+  tags: 'Tags',
+  progress: 'Progress',
+  parent: 'Parent',
+  description: 'Description',
+  location: 'Location',
+  url: 'URL',
+  notes: 'Notes',
+  createdAt: 'Created',
+  updatedAt: 'Updated',
+}
+
+const SKIP_EXPORT_COLS = new Set(['colorBar', 'identity'])
+
+/** Default columns emitted when listVisibleColumns is null. */
+const DEFAULT_EXPORT_COL_IDS = [
+  'title', 'startAt', 'endAt', 'status', 'assignees', 'tags', 'progress', 'parent',
+]
+
+function resolveListColumns(ids: string[] | null): Array<{ id: string; label: string }> {
+  const use = ids ?? DEFAULT_EXPORT_COL_IDS
+  return use
+    .filter(id => !SKIP_EXPORT_COLS.has(id) && id in COLUMN_LABELS)
+    .map(id => ({ id, label: COLUMN_LABELS[id] }))
+}
+
+function getColValue(
+  colId: string,
+  activity: ApiActivity,
+  memberById: Map<string, string>,
+  statusById: Map<string, string>,
+  tagById: Map<string, string>,
+  activityTitleById: Map<string, string>,
+): string {
+  switch (colId) {
+    case 'title': return activity.title
+    case 'startAt': return fmtDate(activity.startAt)
+    case 'endAt': return fmtDate(activity.endAt)
+    case 'duration': {
+      if (!activity.startAt || !activity.endAt) return '—'
+      const days = Math.round(
+        (new Date(activity.endAt).getTime() - new Date(activity.startAt).getTime()) / 86400000,
+      )
+      if (days < 0) return '—'
+      return `${days + 1} day${days + 1 !== 1 ? 's' : ''}`
     }
-  })
+    case 'status': return activity.statusId ? (statusById.get(activity.statusId) ?? '—') : '—'
+    case 'assignees': return resolveAssignees(activity, memberById)
+    case 'tags': return resolveTags(activity, tagById) || '—'
+    case 'progress': return activity.percentComplete != null ? `${activity.percentComplete}%` : '—'
+    case 'parent': return activity.parentActivityId
+      ? (activityTitleById.get(activity.parentActivityId) ?? '—')
+      : '—'
+    case 'description': return activity.description ?? '—'
+    case 'location': return activity.location ?? '—'
+    case 'url': return activity.url ?? '—'
+    // notes is in the DB schema but may be absent from the strict generated TS type
+    case 'notes': return (activity as ApiActivity & { notes?: string | null }).notes ?? '—'
+    case 'createdAt': return fmtDate(activity.createdAt)
+    case 'updatedAt': return fmtDate(activity.updatedAt)
+    default: return '—'
+  }
+}
 
-  it('each descriptor has required fields', () => {
-    const allFormats = getExportFormats('list') // superset — includes text formats
-    for (const f of allFormats) {
-      expect(f.id).toBeTruthy()
-      expect(f.name).toBeTruthy()
-      expect(f.desc).toBeTruthy()
-      expect(typeof f.scope).toBe('boolean')
-      expect(['download', 'copy', 'print']).toContain(f.verb)
-      expect(typeof f.clientSide).toBe('boolean')
-      // ext may be empty string for clipboard/printable
-      if (f.id !== 'clipboard' && f.id !== 'printable') {
-        expect(f.ext).toMatch(/^\.[a-z]+$/)
+/** Returns the depth-prefix for a title cell: '' at depth 0, '↳ ' at depth 1, '  ↳ ' at depth 2, etc. */
+function depthPrefix(depth: number): string {
+  if (depth === 0) return ''
+  return `${'  '.repeat(depth - 1)}↳ `
+}
+
+// ── Markdown generators ────────────────────────────────────────────────────────
+
+/**
+ * List view → Markdown outline (bullet list).
+ * One bullet per activity; only non-empty fields are emitted as indented lines.
+ * Children are nested bullets (depth × 2 spaces of leading indent).
+ * Group-by produces ## sections.
+ */
+export function buildListMarkdownOutline(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { listDisplayRows, memberById, statusById, tagById, activityTitleById } = data
+  const lines: string[] = [buildHeader(timelineName, filterLabel)]
+
+  if (!listDisplayRows || listDisplayRows.length === 0) {
+    lines.push('_No activities._')
+    return lines.join('\n')
+  }
+
+  const fmtActivity = (activity: ApiActivity, bulletIndent: string): string[] => {
+    const result: string[] = []
+    const datePart = fmtDateRange(activity.startAt, activity.endAt)
+    const assignees = resolveAssignees(activity, memberById)
+    let firstLine = `${bulletIndent}- **${escMd(activity.title)}**`
+    if (datePart !== '—') firstLine += ` (${datePart})`
+    if (assignees !== '—') firstLine += ` — ${assignees}`
+    result.push(firstLine)
+
+    const fi = `${bulletIndent}  `
+    if (activity.description) result.push(`${fi}${escMd(activity.description)}`)
+    const status = activity.statusId ? statusById.get(activity.statusId) : null
+    if (status) result.push(`${fi}Status: ${escMd(status)}`)
+    if (activity.percentComplete != null) result.push(`${fi}Progress: ${activity.percentComplete}%`)
+    const parent = activity.parentActivityId ? activityTitleById.get(activity.parentActivityId) : null
+    if (parent) result.push(`${fi}Parent: ${escMd(parent)}`)
+    const tags = resolveTags(activity, tagById)
+    if (tags) result.push(`${fi}Tags: ${tags}`)
+    if (activity.location) result.push(`${fi}Location: ${escMd(activity.location)}`)
+    if (activity.url) result.push(`${fi}URL: ${escMd(activity.url)}`)
+    return result
+  }
+
+  const hasGroups = listDisplayRows.some(r => r.kind === 'group')
+
+  if (hasGroups) {
+    let firstGroup = true
+    for (const row of listDisplayRows) {
+      if (row.kind === 'group') {
+        if (!firstGroup) lines.push('')
+        lines.push(`## ${row.label} (${row.count})`)
+        lines.push('')
+        firstGroup = false
+      } else {
+        lines.push(...fmtActivity(row.activity, '  '.repeat(row.depth)))
+        lines.push('')
       }
     }
-  })
-
-  it('server-side formats have scope=true', () => {
-    const formats = getExportFormats('list')
-    const serverFormats = formats.filter(f => !f.clientSide)
-    for (const f of serverFormats) {
-      expect(f.scope).toBe(true)
+  } else {
+    for (const row of listDisplayRows) {
+      if (row.kind === 'activity') {
+        lines.push(...fmtActivity(row.activity, '  '.repeat(row.depth)))
+        lines.push('')
+      }
     }
-  })
+  }
 
-  it('client-side formats have scope=false and clientSide=true', () => {
-    const formats = getExportFormats('list')
-    const clientFormats = formats.filter(f => f.clientSide)
-    expect(clientFormats).toHaveLength(6) // png + printable + html + markdown + plaintext + clipboard
-    for (const f of clientFormats) {
-      expect(f.scope).toBe(false)
-      expect(f.clientSide).toBe(true)
-    }
-  })
-
-  it('clipboard has copy verb, printable has print verb, others have download', () => {
-    const formats = getExportFormats('list')
-    const clipboard = formats.find(f => f.id === 'clipboard')
-    expect(clipboard?.verb).toBe('copy')
-    const printable = formats.find(f => f.id === 'printable')
-    expect(printable?.verb).toBe('print')
-    const rest = formats.filter(f => f.id !== 'clipboard' && f.id !== 'printable')
-    for (const f of rest) {
-      expect(f.verb).toBe('download')
-    }
-  })
-})
-
-describe('buildExportFilename', () => {
-  beforeEach(() => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date('2026-06-16T00:00:00Z'))
-  })
-
-  afterEach(() => {
-    vi.useRealTimers()
-  })
-
-  it('slugifies the name and appends the date and extension', () => {
-    expect(buildExportFilename('Sales Kick-Off 2026', '.csv')).toBe('sales-kick-off-2026-2026-06-16.csv')
-  })
-
-  it('strips uppercase and special characters', () => {
-    expect(buildExportFilename('My "Timeline"!', '.xlsx')).toBe('my-timeline-2026-06-16.xlsx')
-  })
-
-  it('falls back to "timeline" when the name is empty or all punctuation', () => {
-    expect(buildExportFilename('', '.csv')).toBe('timeline-2026-06-16.csv')
-    expect(buildExportFilename('---', '.ics')).toBe('timeline-2026-06-16.ics')
-  })
-
-  it('preserves numbers and hyphens in the slug', () => {
-    expect(buildExportFilename('Q1 2026', '.csv')).toBe('q1-2026-2026-06-16.csv')
-  })
-
-  it('inserts the view segment when a view is given', () => {
-    expect(buildExportFilename('Sales Kick-Off', '.png', 'kanban')).toBe('sales-kick-off-kanban-2026-06-16.png')
-  })
-
-  it('omits the view segment when no view is given', () => {
-    expect(buildExportFilename('Sales Kick-Off', '.png')).toBe('sales-kick-off-2026-06-16.png')
-  })
-})
-````
-
-## File: packages/web/src/lib/exportCapabilities.ts
-````typescript
-/**
- * Export format descriptors for the Export dialog (Phase 14).
- *
- * One dialog serves all views (Gantt/List/Kanban/Calendar); format
- * availability and per-format copy is driven by this descriptor array so a
- * future view or format is an addition here, not a dialog redesign
- * (docs/design/handoffs/export-modal).
- *
- * 14.1: CSV, Excel, ICS (server-side, all views).
- * 14.2: Markdown, Plain text, Copy to clipboard (client-side, List/Kanban/Calendar only).
- * 14.3: PNG snapshot (client-side DOM rasterization, all views).
- * 14.4: Printable view (browser print → vector PDF), HTML save (client-side, all views).
- */
-
-import {
-  Table, FileSpreadsheet, CalendarPlus, FileText, AlignLeft, Copy, Image, Printer, FileCode,
-  type LucideIcon,
-} from 'lucide-react'
-
-export type ExportFormatId = 'csv' | 'xlsx' | 'ics' | 'png' | 'markdown' | 'plaintext' | 'clipboard' | 'printable' | 'html'
-export type ExportViewType = 'gantt' | 'list' | 'calendar' | 'kanban'
-
-export interface ExportFormatDescriptor {
-  id: ExportFormatId
-  name: string
-  icon: LucideIcon
-  /** One-line description shown in the options pane. */
-  desc: string
-  /** File extension, including the leading dot. Used as the download filename suffix. */
-  ext: string
-  /** Data formats (CSV/Excel/ICS) show the "current view vs entire timeline" scope picker. */
-  scope: boolean
-  /**
-   * Primary action verb.
-   * 'download' → "Download <ext>" button.
-   * 'copy'     → "Copy to clipboard" button with "Copied!" flash.
-   * 'print'    → "Print…" button that opens the browser's print dialog.
-   */
-  verb: 'download' | 'copy' | 'print'
-  /** True for formats generated client-side (no API call). */
-  clientSide: boolean
+  return lines.join('\n').trimEnd()
 }
 
-/** Data/calendar formats — server-side, available in every view. */
-const DATA_FORMATS: ExportFormatDescriptor[] = [
-  {
-    id: 'csv',
-    name: 'CSV',
-    icon: Table,
-    ext: '.csv',
-    scope: true,
-    verb: 'download',
-    clientSide: false,
-    desc: 'A plain spreadsheet file — opens in Excel, Google Sheets, or Numbers.',
-  },
-  {
-    id: 'xlsx',
-    name: 'Excel',
-    icon: FileSpreadsheet,
-    ext: '.xlsx',
-    scope: true,
-    verb: 'download',
-    clientSide: false,
-    desc: 'A formatted workbook for Excel, Google Sheets, or Numbers.',
-  },
-  {
-    id: 'ics',
-    name: 'Calendar (.ics)',
-    icon: CalendarPlus,
-    ext: '.ics',
-    scope: true,
-    verb: 'download',
-    clientSide: false,
-    desc: 'An iCalendar file — import into Google Calendar, Outlook, or Apple Calendar.',
-  },
-]
+/** List view → GitHub-flavored Markdown table, respecting column visibility, sort, group-by, and hierarchy. */
+export function buildListMarkdown(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { listDisplayRows, listVisibleColumns, memberById, statusById, tagById, activityTitleById } = data
+  const lines: string[] = [buildHeader(timelineName, filterLabel)]
 
-/** Image format — client-side DOM rasterization, available in every view. */
-const IMAGE_FORMATS: ExportFormatDescriptor[] = [
-  {
-    id: 'png',
-    name: 'PNG image',
-    icon: Image,
-    ext: '.png',
-    scope: false,
-    verb: 'download',
-    clientSide: true,
-    desc: 'A snapshot of this view, full scrollable extent, for a slide deck or doc.',
-  },
-]
+  const cols = resolveListColumns(listVisibleColumns)
+  const thead = `| ${cols.map(c => c.label).join(' | ')} |`
+  const tsep = `| ${cols.map(() => '---').join(' | ')} |`
 
-/**
- * Presentation formats — client-side, reuse the PresentationFrame surface
- * (Phase 14.4), available in every view.
- */
-const PRESENTATION_FORMATS: ExportFormatDescriptor[] = [
-  {
-    id: 'printable',
-    name: 'Printable view',
-    icon: Printer,
-    ext: '',
-    scope: false,
-    verb: 'print',
-    clientSide: true,
-    desc: 'Opens your browser’s print dialog on a clean, paginated version of this view — choose "Save as PDF" there for a vector file with selectable text.',
-  },
-  {
-    id: 'html',
-    name: 'HTML file',
-    icon: FileCode,
-    ext: '.html',
-    scope: false,
-    verb: 'download',
-    clientSide: true,
-    desc: 'A standalone HTML file with styles inlined — opens in any browser without draba.',
-  },
-]
+  const getCells = (activity: ApiActivity, depth: number) =>
+    cols.map(c => {
+      const val = getColValue(c.id, activity, memberById, statusById, tagById, activityTitleById)
+      const pfx = c.id === 'title' ? depthPrefix(depth) : ''
+      return escMd(pfx + val)
+    })
 
-/** Textual formats — client-side, not available on Gantt (no sensible flat text shape). */
-const TEXT_FORMATS: ExportFormatDescriptor[] = [
-  {
-    id: 'markdown',
-    name: 'Markdown',
-    icon: FileText,
-    ext: '.md',
-    scope: false,
-    verb: 'download',
-    clientSide: true,
-    desc: 'GitHub-flavored Markdown — paste into a README, Notion, or any Markdown editor.',
-  },
-  {
-    id: 'plaintext',
-    name: 'Plain text',
-    icon: AlignLeft,
-    ext: '.txt',
-    scope: false,
-    verb: 'download',
-    clientSide: true,
-    desc: 'Space-aligned plain text — works in any text editor or monospace environment.',
-  },
-  {
-    id: 'clipboard',
-    name: 'Copy to clipboard',
-    icon: Copy,
-    ext: '',
-    scope: false,
-    verb: 'copy',
-    clientSide: true,
-    desc: 'Copies both rich (HTML) and plain text so paste lands formatted in Slack, Word, or Google Docs.',
-  },
-]
+  if (!listDisplayRows || listDisplayRows.length === 0) {
+    lines.push(thead, tsep)
+    if (!listDisplayRows || listDisplayRows.length === 0) lines.push('_No activities._')
+    return lines.join('\n')
+  }
 
-/**
- * Returns the export formats available for a given view.
- * PNG and the presentation formats (printable view, HTML) are available
- * everywhere (14.3/14.4). Gantt has no sensible flat text representation,
- * so it skips the textual formats (14.2).
- */
-export function getExportFormats(view: ExportViewType): ExportFormatDescriptor[] {
-  if (view === 'gantt') return [...DATA_FORMATS, ...IMAGE_FORMATS, ...PRESENTATION_FORMATS]
-  return [...DATA_FORMATS, ...IMAGE_FORMATS, ...PRESENTATION_FORMATS, ...TEXT_FORMATS]
+  const hasGroups = listDisplayRows.some(r => r.kind === 'group')
+
+  if (hasGroups) {
+    // member or status group-by: one GFM table per section
+    let firstGroup = true
+    for (const row of listDisplayRows) {
+      if (row.kind === 'group') {
+        if (!firstGroup) lines.push('')
+        lines.push(`## ${row.label} (${row.count})`)
+        lines.push('')
+        lines.push(thead)
+        lines.push(tsep)
+        firstGroup = false
+      } else {
+        lines.push(`| ${getCells(row.activity, row.depth).join(' | ')} |`)
+      }
+    }
+  } else {
+    // flat (none) or parent-hierarchy mode: single table, depth prefix in title
+    lines.push(thead, tsep)
+    for (const row of listDisplayRows) {
+      if (row.kind === 'activity') {
+        lines.push(`| ${getCells(row.activity, row.depth).join(' | ')} |`)
+      }
+    }
+  }
+
+  return lines.join('\n')
+}
+
+/** Kanban view → one Markdown section per column, with optional hierarchy nesting. */
+export function buildKanbanMarkdown(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { kanbanColumns, activities, memberById, statusById, tagById, kanbanShowHierarchy, kanbanChildrenByParentId } = data
+  const lines: string[] = [buildHeader(timelineName, filterLabel)]
+  const cols = kanbanColumns ?? [{ label: 'Activities', activities }]
+
+  const fmtItem = (a: ApiActivity, indent: string): string => {
+    const parts: string[] = [a.title]
+    const assignees = resolveAssignees(a, memberById)
+    if (assignees !== '—') parts.push(assignees)
+    const range = fmtDateRange(a.startAt, a.endAt)
+    if (range !== '—') parts.push(range)
+    const status = a.statusId ? (statusById.get(a.statusId) ?? null) : null
+    if (status) parts.push(status)
+    const tags = resolveTags(a, tagById)
+    if (tags) parts.push(tags)
+    return `${indent}- ${parts.join(' · ')}`
+  }
+
+  for (const col of cols) {
+    if (col.activities.length === 0) continue
+    lines.push(`## ${col.label} (${col.activities.length})`)
+    for (const a of col.activities) {
+      lines.push(fmtItem(a, ''))
+      if (kanbanShowHierarchy) {
+        for (const child of kanbanChildrenByParentId.get(a.id) ?? []) {
+          lines.push(fmtItem(child, '  '))
+        }
+      }
+    }
+    lines.push('')
+  }
+
+  if (cols.every(c => c.activities.length === 0)) lines.push('_No activities._')
+  return lines.join('\n').trimEnd()
+}
+
+/** Calendar view → agenda-style date-grouped Markdown list. */
+export function buildCalendarMarkdown(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { activities, memberById, tagById } = data
+  const lines: string[] = [buildHeader(timelineName, filterLabel)]
+
+  if (activities.length === 0) {
+    lines.push('_No activities._')
+    return lines.join('\n')
+  }
+
+  const byDate = new Map<string, ApiActivity[]>()
+  for (const a of activities) {
+    const key = a.startAt?.slice(0, 10) ?? '__none__'
+    const bucket = byDate.get(key) ?? []
+    bucket.push(a)
+    byDate.set(key, bucket)
+  }
+
+  for (const key of [...byDate.keys()].sort()) {
+    const acts = byDate.get(key)!
+    const dateLabel = key === '__none__'
+      ? 'No date'
+      : new Date(`${key}T00:00:00Z`).toLocaleDateString('en-US', {
+          weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC',
+        })
+    lines.push(`## ${dateLabel}`)
+    for (const a of acts) {
+      const parts: string[] = [a.title]
+      if (a.endAt && a.endAt.slice(0, 10) !== key) parts.push(`→ ${fmtDate(a.endAt)}`)
+      const assignees = resolveAssignees(a, memberById)
+      if (assignees !== '—') parts.push(assignees)
+      const tags = resolveTags(a, tagById)
+      if (tags) parts.push(tags)
+      lines.push(`- ${parts.join(' · ')}`)
+    }
+    lines.push('')
+  }
+
+  return lines.join('\n').trimEnd()
+}
+
+// ── Plain-text generators ──────────────────────────────────────────────────────
+
+function pad(s: string, width: number): string {
+  return s.length >= width ? s : `${s}${' '.repeat(width - s.length)}`
 }
 
 /**
- * Builds the download filename for a format:
- * `<timeline-slug>[-<view>]-<yyyy-mm-dd><ext>`.
- * Matches the filename chip shown in the export dialog's options pane. The view
- * segment is included when given so a file names the view it came from (e.g.
- * `sales-kick-off-kanban-2026-06-30.png`).
+ * List view → plain-text outline (bullet list).
+ * Mirrors buildListMarkdownOutline without Markdown syntax — fields (incl. URL)
+ * are emitted raw since there's no Markdown table/pipe syntax to break here.
+ * Root activities use •, children use ◦ (depth 1+).
  */
-export function buildExportFilename(timelineName: string, ext: string, view?: ExportViewType): string {
-  const slug = timelineName
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-  const date = new Date().toISOString().slice(0, 10)
-  const viewSegment = view ? `-${view}` : ''
-  return `${slug || 'timeline'}${viewSegment}-${date}${ext}`
+export function buildListPlainTextOutline(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { listDisplayRows, memberById, statusById, tagById, activityTitleById } = data
+  const lines: string[] = [buildPlainHeader(timelineName, filterLabel)]
+
+  if (!listDisplayRows || listDisplayRows.length === 0) {
+    lines.push('No activities.')
+    return lines.join('\n')
+  }
+
+  const fmtActivity = (activity: ApiActivity, depth: number): string[] => {
+    const result: string[] = []
+    const bulletIndent = '  '.repeat(depth)
+    const bullet = depth === 0 ? '•' : '◦'
+    const datePart = fmtDateRange(activity.startAt, activity.endAt)
+    const assignees = resolveAssignees(activity, memberById)
+    let firstLine = `${bulletIndent}${bullet} ${activity.title}`
+    if (datePart !== '—') firstLine += ` (${datePart})`
+    if (assignees !== '—') firstLine += ` — ${assignees}`
+    result.push(firstLine)
+
+    const fi = `${bulletIndent}  `
+    if (activity.description) result.push(`${fi}${activity.description}`)
+    const status = activity.statusId ? statusById.get(activity.statusId) : null
+    if (status) result.push(`${fi}Status: ${status}`)
+    if (activity.percentComplete != null) result.push(`${fi}Progress: ${activity.percentComplete}%`)
+    const parent = activity.parentActivityId ? activityTitleById.get(activity.parentActivityId) : null
+    if (parent) result.push(`${fi}Parent: ${parent}`)
+    const tags = resolveTags(activity, tagById)
+    if (tags) result.push(`${fi}Tags: ${tags}`)
+    if (activity.location) result.push(`${fi}Location: ${activity.location}`)
+    if (activity.url) result.push(`${fi}URL: ${activity.url}`)
+    return result
+  }
+
+  const hasGroups = listDisplayRows.some(r => r.kind === 'group')
+
+  if (hasGroups) {
+    let firstGroup = true
+    for (const row of listDisplayRows) {
+      if (row.kind === 'group') {
+        if (!firstGroup) lines.push('')
+        const heading = `${row.label.toUpperCase()} (${row.count})`
+        lines.push(heading)
+        lines.push('─'.repeat(heading.length))
+        firstGroup = false
+      } else {
+        lines.push(...fmtActivity(row.activity, row.depth))
+        lines.push('')
+      }
+    }
+  } else {
+    for (const row of listDisplayRows) {
+      if (row.kind === 'activity') {
+        lines.push(...fmtActivity(row.activity, row.depth))
+        lines.push('')
+      }
+    }
+  }
+
+  return lines.join('\n').trimEnd()
+}
+
+/** List view → space-padded plain-text table, respecting column visibility, sort, group-by, and hierarchy. */
+export function buildListPlainText(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { listDisplayRows, listVisibleColumns, memberById, statusById, tagById, activityTitleById } = data
+  const lines: string[] = [buildPlainHeader(timelineName, filterLabel)]
+
+  const cols = resolveListColumns(listVisibleColumns)
+  const MAX_W: Record<string, number> = {
+    title: 40, startAt: 15, endAt: 15, duration: 10, status: 20,
+    assignees: 26, tags: 20, progress: 10, parent: 24, description: 30,
+    location: 20, url: 30, notes: 30, createdAt: 15, updatedAt: 15,
+  }
+
+  const getRenderedValue = (colId: string, activity: ApiActivity, depth: number): string => {
+    const val = getColValue(colId, activity, memberById, statusById, tagById, activityTitleById)
+    const pfx = colId === 'title' ? depthPrefix(depth) : ''
+    return pfx + val
+  }
+
+  const activityRows = (listDisplayRows ?? []).filter((r): r is { kind: 'activity'; activity: ApiActivity; depth: number } => r.kind === 'activity')
+  const fallbackActivities = activityRows.length > 0
+    ? activityRows.map(r => ({ activity: r.activity, depth: r.depth }))
+    : data.activities.map(a => ({ activity: a, depth: 0 }))
+
+  if (fallbackActivities.length === 0) {
+    lines.push('No activities.')
+    return lines.join('\n')
+  }
+
+  // Compute column widths from actual rendered content
+  const widths = cols.map(col => {
+    let w = col.label.length
+    for (const { activity, depth } of fallbackActivities) {
+      const rendered = getRenderedValue(col.id, activity, depth)
+      w = Math.max(w, Math.min(rendered.length, MAX_W[col.id] ?? 20))
+    }
+    return w
+  })
+
+  const emitTableHeader = () => {
+    lines.push(cols.map((c, i) => pad(c.label, widths[i])).join('  '))
+    lines.push(widths.map(w => '─'.repeat(w)).join('  '))
+  }
+
+  const emitRow = (activity: ApiActivity, depth: number) => {
+    lines.push(
+      cols.map((c, i) => {
+        const rendered = getRenderedValue(c.id, activity, depth)
+        return pad(rendered.slice(0, widths[i]), widths[i])
+      }).join('  '),
+    )
+  }
+
+  if (!listDisplayRows) {
+    emitTableHeader()
+    for (const { activity, depth } of fallbackActivities) emitRow(activity, depth)
+    return lines.join('\n')
+  }
+
+  const hasGroups = listDisplayRows.some(r => r.kind === 'group')
+
+  if (hasGroups) {
+    let firstGroup = true
+    for (const row of listDisplayRows) {
+      if (row.kind === 'group') {
+        if (!firstGroup) lines.push('')
+        const heading = `${row.label.toUpperCase()} (${row.count})`
+        lines.push(heading)
+        lines.push('─'.repeat(heading.length))
+        emitTableHeader()
+        firstGroup = false
+      } else {
+        emitRow(row.activity, row.depth)
+      }
+    }
+  } else {
+    emitTableHeader()
+    for (const row of listDisplayRows) {
+      if (row.kind === 'activity') emitRow(row.activity, row.depth)
+    }
+  }
+
+  return lines.join('\n')
+}
+
+/** Kanban view → plain-text sections with bullet lists. */
+export function buildKanbanPlainText(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { kanbanColumns, activities, memberById, statusById, tagById, kanbanShowHierarchy, kanbanChildrenByParentId } = data
+  const lines: string[] = [buildPlainHeader(timelineName, filterLabel)]
+  const cols = kanbanColumns ?? [{ label: 'Activities', activities }]
+
+  const fmtItem = (a: ApiActivity): string => {
+    const parts: string[] = [a.title]
+    const assignees = resolveAssignees(a, memberById)
+    if (assignees !== '—') parts.push(assignees)
+    const range = fmtDateRange(a.startAt, a.endAt)
+    if (range !== '—') parts.push(range)
+    const status = a.statusId ? (statusById.get(a.statusId) ?? null) : null
+    if (status) parts.push(status)
+    const tags = resolveTags(a, tagById)
+    if (tags) parts.push(tags)
+    return parts.join(' · ')
+  }
+
+  for (const col of cols) {
+    if (col.activities.length === 0) continue
+    const heading = `${col.label.toUpperCase()} (${col.activities.length})`
+    lines.push(heading)
+    lines.push('─'.repeat(heading.length))
+    for (const a of col.activities) {
+      lines.push(`  • ${fmtItem(a)}`)
+      if (kanbanShowHierarchy) {
+        for (const child of kanbanChildrenByParentId.get(a.id) ?? []) {
+          lines.push(`      ◦ ${fmtItem(child)}`)
+        }
+      }
+    }
+    lines.push('')
+  }
+
+  if (cols.every(c => c.activities.length === 0)) lines.push('No activities.')
+  return lines.join('\n').trimEnd()
+}
+
+/** Calendar view → plain-text agenda. */
+export function buildCalendarPlainText(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { activities, memberById, tagById } = data
+  const lines: string[] = [buildPlainHeader(timelineName, filterLabel)]
+
+  if (activities.length === 0) { lines.push('No activities.'); return lines.join('\n') }
+
+  const byDate = new Map<string, ApiActivity[]>()
+  for (const a of activities) {
+    const key = a.startAt?.slice(0, 10) ?? '__none__'
+    const bucket = byDate.get(key) ?? []
+    bucket.push(a)
+    byDate.set(key, bucket)
+  }
+
+  for (const key of [...byDate.keys()].sort()) {
+    const acts = byDate.get(key)!
+    const dateLabel = key === '__none__'
+      ? 'No date'
+      : new Date(`${key}T00:00:00Z`).toLocaleDateString('en-US', {
+          weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC',
+        })
+    lines.push(dateLabel)
+    lines.push('─'.repeat(dateLabel.length))
+    for (const a of acts) {
+      const parts: string[] = [a.title]
+      if (a.endAt && a.endAt.slice(0, 10) !== key) parts.push(`→ ${fmtDate(a.endAt)}`)
+      const assignees = resolveAssignees(a, memberById)
+      if (assignees !== '—') parts.push(assignees)
+      const tags = resolveTags(a, tagById)
+      if (tags) parts.push(tags)
+      lines.push(`  • ${parts.join(' · ')}`)
+    }
+    lines.push('')
+  }
+
+  return lines.join('\n').trimEnd()
+}
+
+// ── HTML generators (for clipboard text/html flavor) ──────────────────────────
+
+const TH = 'padding:6px 10px;border:1px solid #ccc;background:#f5f5f5;font-weight:600;text-align:left;white-space:nowrap;font-family:system-ui,sans-serif;font-size:13px'
+const TD = 'padding:5px 10px;border:1px solid #ddd;vertical-align:top;font-family:system-ui,sans-serif;font-size:13px'
+
+function htmlHeaderBlock(timelineName: string, filterLabel: string | null): string {
+  const today = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
+  const ctx = filterLabel ? ` · Filter: ${htmlEsc(filterLabel)}` : ''
+  return `<p style="font-family:system-ui,sans-serif;font-size:13px;margin:0 0 10px"><strong>${htmlEsc(timelineName)}</strong> — ${today}${ctx}</p>`
+}
+
+/** List view → HTML table for clipboard, respecting column visibility, sort, group-by, and hierarchy. */
+export function buildListHtml(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { listDisplayRows, listVisibleColumns, memberById, statusById, tagById, activityTitleById } = data
+  const cols = resolveListColumns(listVisibleColumns)
+
+  const theadRow = `<tr>${cols.map(c => `<th style="${TH}">${htmlEsc(c.label)}</th>`).join('')}</tr>`
+  const thead = `<thead>${theadRow}</thead>`
+  const colspan = cols.length
+
+  const makeRow = (activity: ApiActivity, depth: number): string => {
+    const cells = cols.map(c => {
+      const val = getColValue(c.id, activity, memberById, statusById, tagById, activityTitleById)
+      const paddingLeft = c.id === 'title' && depth > 0 ? `padding-left:${6 + depth * 16}px;` : ''
+      const prefix = c.id === 'title' && depth > 0 ? '↳ ' : ''
+      return `<td style="${paddingLeft}${TD}">${htmlEsc(prefix + val)}</td>`
+    })
+    return `<tr>${cells.join('')}</tr>`
+  }
+
+  const makeSection = (label: string, count: number): string =>
+    `<tr><th colspan="${colspan}" style="${TH};background:#e8e8e8;font-size:12px">${htmlEsc(label)} (${count})</th></tr>`
+
+  const rows: string[] = []
+  const activityList = listDisplayRows ?? data.activities.map(a => ({ kind: 'activity' as const, activity: a, depth: 0 }))
+
+  if (activityList.length === 0) {
+    rows.push(`<tr><td colspan="${colspan}" style="${TD}"><em>No activities.</em></td></tr>`)
+  } else {
+    for (const row of activityList) {
+      if (row.kind === 'group') {
+        rows.push(makeSection(row.label, row.count))
+        rows.push(theadRow)
+      } else {
+        rows.push(makeRow(row.activity, row.depth))
+      }
+    }
+  }
+
+  return `${htmlHeaderBlock(timelineName, filterLabel)}<table style="border-collapse:collapse">${thead}<tbody>${rows.join('')}</tbody></table>`
+}
+
+/** List view → HTML outline (bullet list) for clipboard. Mirrors buildListMarkdownOutline. */
+export function buildListHtmlOutline(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { listDisplayRows, memberById, statusById, tagById, activityTitleById } = data
+
+  const LI = 'font-family:system-ui,sans-serif;font-size:13px;margin:3px 0'
+  const FIELD = 'font-family:system-ui,sans-serif;font-size:12px;color:#555;margin:1px 0 1px 0'
+
+  const fmtActivity = (activity: ApiActivity, depth: number): string => {
+    const datePart = fmtDateRange(activity.startAt, activity.endAt)
+    const assignees = resolveAssignees(activity, memberById)
+    let firstLine = `<strong>${htmlEsc(activity.title)}</strong>`
+    if (datePart !== '—') firstLine += ` <span style="color:#777">(${htmlEsc(datePart)})</span>`
+    if (assignees !== '—') firstLine += ` — ${htmlEsc(assignees)}`
+
+    const fields: string[] = []
+    if (activity.description) fields.push(htmlEsc(activity.description))
+    const status = activity.statusId ? statusById.get(activity.statusId) : null
+    if (status) fields.push(`Status: ${htmlEsc(status)}`)
+    if (activity.percentComplete != null) fields.push(`Progress: ${activity.percentComplete}%`)
+    const parent = activity.parentActivityId ? activityTitleById.get(activity.parentActivityId) : null
+    if (parent) fields.push(`Parent: ${htmlEsc(parent)}`)
+    const tags = resolveTags(activity, tagById)
+    if (tags) fields.push(`Tags: ${htmlEsc(tags)}`)
+    if (activity.location) fields.push(`Location: ${htmlEsc(activity.location)}`)
+    if (activity.url) fields.push(`URL: ${htmlEsc(activity.url)}`)
+
+    const fieldHtml = fields.length > 0
+      ? `<div style="margin:2px 0 0 0">${fields.map(f => `<div style="${FIELD}">${f}</div>`).join('')}</div>`
+      : ''
+
+    const paddingLeft = depth > 0 ? `padding-left:${depth * 20}px;` : ''
+    return `<li style="${paddingLeft}${LI}">${firstLine}${fieldHtml}</li>`
+  }
+
+  const activityList = listDisplayRows ?? data.activities.map(a => ({ kind: 'activity' as const, activity: a, depth: 0 }))
+
+  if (activityList.length === 0) {
+    return `${htmlHeaderBlock(timelineName, filterLabel)}<p style="font-family:system-ui,sans-serif;font-size:13px"><em>No activities.</em></p>`
+  }
+
+  const hasGroups = activityList.some(r => r.kind === 'group')
+  const sections: string[] = []
+
+  if (hasGroups) {
+    let items: string[] = []
+    let groupLabel = ''
+    let groupCount = 0
+    const flush = () => {
+      if (groupLabel) sections.push(`<h3 style="font-family:system-ui,sans-serif;font-size:14px;margin:16px 0 4px">${htmlEsc(groupLabel)} (${groupCount})</h3><ul style="margin:0;padding-left:20px">${items.join('')}</ul>`)
+    }
+    for (const row of activityList) {
+      if (row.kind === 'group') {
+        flush()
+        groupLabel = row.label
+        groupCount = row.count
+        items = []
+      } else {
+        items.push(fmtActivity(row.activity, row.depth))
+      }
+    }
+    flush()
+  } else {
+    const items = activityList
+      .filter((r): r is { kind: 'activity'; activity: ApiActivity; depth: number } => r.kind === 'activity')
+      .map(r => fmtActivity(r.activity, r.depth))
+    sections.push(`<ul style="margin:0;padding-left:20px">${items.join('')}</ul>`)
+  }
+
+  return `${htmlHeaderBlock(timelineName, filterLabel)}${sections.join('')}`
+}
+
+/** Kanban view → HTML sections with optional hierarchy nesting. */
+export function buildKanbanHtml(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { kanbanColumns, activities, memberById, statusById, tagById, kanbanShowHierarchy, kanbanChildrenByParentId } = data
+  const cols = kanbanColumns ?? [{ label: 'Activities', activities }]
+
+  const fmtLi = (a: ApiActivity, style: string): string => {
+    const parts: string[] = [htmlEsc(a.title)]
+    const assignees = resolveAssignees(a, memberById)
+    if (assignees !== '—') parts.push(htmlEsc(assignees))
+    const range = fmtDateRange(a.startAt, a.endAt)
+    if (range !== '—') parts.push(htmlEsc(range))
+    const status = a.statusId ? (statusById.get(a.statusId) ?? null) : null
+    if (status) parts.push(htmlEsc(status))
+    const tags = resolveTags(a, tagById)
+    if (tags) parts.push(htmlEsc(tags))
+    return `<li style="${style}">${parts.join(' · ')}</li>`
+  }
+
+  const LI = 'font-family:system-ui,sans-serif;font-size:13px;margin:2px 0'
+  const LI_CHILD = 'font-family:system-ui,sans-serif;font-size:12px;margin:2px 0;color:#555'
+
+  const sections = cols
+    .filter(c => c.activities.length > 0)
+    .map(col => {
+      const items: string[] = []
+      for (const a of col.activities) {
+        const children = kanbanShowHierarchy ? (kanbanChildrenByParentId.get(a.id) ?? []) : []
+        if (children.length > 0) {
+          const childList = children.map(c => fmtLi(c, LI_CHILD)).join('')
+          items.push(`<li style="${LI}">${[htmlEsc(a.title), ...([resolveAssignees(a, memberById)].filter(s => s !== '—'))].join(' · ')}<ul style="margin:2px 0;padding-left:16px">${childList}</ul></li>`)
+        } else {
+          items.push(fmtLi(a, LI))
+        }
+      }
+      return `<h3 style="font-family:system-ui,sans-serif;font-size:14px;margin:16px 0 4px">${htmlEsc(col.label)} (${col.activities.length})</h3><ul style="margin:0;padding-left:20px">${items.join('')}</ul>`
+    })
+
+  const body = sections.length > 0 ? sections.join('') : '<p style="font-family:system-ui,sans-serif;font-size:13px"><em>No activities.</em></p>'
+  return `${htmlHeaderBlock(timelineName, filterLabel)}${body}`
+}
+
+/** Calendar view → HTML agenda. */
+export function buildCalendarHtml(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { activities, memberById, tagById } = data
+  if (activities.length === 0) {
+    return `${htmlHeaderBlock(timelineName, filterLabel)}<p style="font-family:system-ui,sans-serif;font-size:13px"><em>No activities.</em></p>`
+  }
+
+  const byDate = new Map<string, ApiActivity[]>()
+  for (const a of activities) {
+    const key = a.startAt?.slice(0, 10) ?? '__none__'
+    const bucket = byDate.get(key) ?? []
+    bucket.push(a)
+    byDate.set(key, bucket)
+  }
+
+  const sections = [...byDate.keys()].sort().map(key => {
+    const acts = byDate.get(key)!
+    const dateLabel = key === '__none__'
+      ? 'No date'
+      : new Date(`${key}T00:00:00Z`).toLocaleDateString('en-US', {
+          weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC',
+        })
+    const items = acts.map(a => {
+      const parts: string[] = [htmlEsc(a.title)]
+      if (a.endAt && a.endAt.slice(0, 10) !== key) parts.push(`→ ${htmlEsc(fmtDate(a.endAt))}`)
+      const assignees = resolveAssignees(a, memberById)
+      if (assignees !== '—') parts.push(htmlEsc(assignees))
+      const tags = resolveTags(a, tagById)
+      if (tags) parts.push(htmlEsc(tags))
+      return `<li style="font-family:system-ui,sans-serif;font-size:13px;margin:2px 0">${parts.join(' · ')}</li>`
+    })
+    return `<h3 style="font-family:system-ui,sans-serif;font-size:14px;margin:16px 0 4px">${htmlEsc(dateLabel)}</h3><ul style="margin:0;padding-left:20px">${items.join('')}</ul>`
+  })
+
+  return `${htmlHeaderBlock(timelineName, filterLabel)}${sections.join('')}`
 }
 ````
 
@@ -65242,6 +64956,445 @@ func (s *Server) handleRegenerateShare(w http.ResponseWriter, r *http.Request) {
 	s.icsCache.invalidate(oldToken)
 
 	writeJSON(w, http.StatusOK, share)
+}
+````
+
+## File: packages/web/src/components/export/PresentationFrame.tsx
+````typescript
+/**
+ * PresentationFrame — an isolated, always-light document used as the shared
+ * render surface for the visual exports (Phase 14.3 PNG; Phase 14.4 HTML/print).
+ *
+ * The earlier 14.3 approach mounted the clean snapshot inside the live dashboard
+ * and forced light mode by toggling the `dark` class on the page's own `<html>`.
+ * That repainted the visible dashboard (the "flicker") and left some elements —
+ * the ones that paint from inline `var(--muted)`/`var(--card)` (kanban column
+ * boxes, the Gantt sticky left rail) — stuck on dark, because html-to-image
+ * can't reliably resolve theme CSS variables that hang off a `.dark` class on
+ * the document root.
+ *
+ * This component sidesteps both by rendering the snapshot into a same-origin
+ * `<iframe>` that is its own document: the parent's stylesheets and fonts are
+ * cloned into it (so Tailwind utilities, the `:root` design tokens, and Open
+ * Sans all apply), and its `<html>` never receives the `.dark` class. The result
+ * is structurally light — no class toggling on the live page (no flicker), and
+ * every `var()` reference resolves against a `:root` with no dark override in
+ * scope (no leftover dark boxes).
+ *
+ * Stylesheets are copied by cloning the `<style>`/`<link>` nodes rather than
+ * reading `document.styleSheets[].cssRules`, which avoids the cross-origin
+ * `SecurityError` the Google Fonts stylesheet otherwise triggers.
+ *
+ * The same frame is the surface Phase 14.4 reuses: `iframe.contentWindow.print()`
+ * for the printable-PDF route and serialization of `contentDocument` for the
+ * HTML download (htmlExport inlines same-origin stylesheet links at serialize
+ * time, since cloned `<link>` hrefs don't survive a save-to-disk) — one render
+ * path, shared with the Phase 13 share viewer's components, no second harness
+ * to drift.
+ */
+
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
+import { forceLightDocumentElement, PRESENTATION_BACKGROUND } from '@/lib/presentationTheme'
+
+export interface PresentationFrameProps {
+  /**
+   * Invoked once the frame's document is ready (styles copied, light theme
+   * applied, body available). Pass the body to the PNG capture / HTML serialize.
+   * Memoize this in the caller so it doesn't re-run the readiness effect.
+   */
+  onReady?: (body: HTMLElement, iframe: HTMLIFrameElement) => void
+  children: ReactNode
+}
+
+/**
+ * Clones the parent document's style and stylesheet/font link nodes into the
+ * frame's head. Node-cloning (not `cssRules` serialization) is deliberate — it
+ * copies Vite's dev `<style>` blocks and prod `<link>`s alike without reading
+ * cross-origin sheets, which would throw `SecurityError` on the fonts stylesheet.
+ */
+function copyDocumentStyles(srcDoc: Document, destDoc: Document): void {
+  const selector = [
+    'style',
+    'link[rel="stylesheet"]',
+    'link[rel="preconnect"]',
+    'link[as="style"]',
+    'link[href*="fonts.googleapis"]',
+    'link[href*="fonts.gstatic"]',
+  ].join(',')
+  srcDoc.querySelectorAll(selector).forEach(node => {
+    destDoc.head.appendChild(node.cloneNode(true))
+  })
+}
+
+export default function PresentationFrame({ onReady, children }: PresentationFrameProps) {
+  const iframeRef = useRef<HTMLIFrameElement>(null)
+  const [body, setBody] = useState<HTMLElement | null>(null)
+
+  useEffect(() => {
+    const iframe = iframeRef.current
+    const doc = iframe?.contentDocument
+    if (!iframe || !doc) return
+
+    // Never dark: the snapshot must be light regardless of the user's theme,
+    // and we deliberately do not touch the parent <html> (that caused the flicker).
+    forceLightDocumentElement(doc)
+    copyDocumentStyles(document, doc)
+    doc.body.style.margin = '0'
+    doc.body.style.padding = '0'
+    doc.body.style.background = PRESENTATION_BACKGROUND
+    // Shrink-wrap to the content so scrollWidth/scrollHeight at capture time is
+    // the view's full natural extent, not the iframe viewport.
+    doc.body.style.display = 'inline-block'
+    setBody(doc.body)
+  }, [])
+
+  useEffect(() => {
+    if (body && iframeRef.current) onReady?.(body, iframeRef.current)
+  }, [body, onReady])
+
+  return (
+    <>
+      {/*
+        Positioned at the viewport origin (not an extreme off-screen offset) so
+        the browser actually paints/lays out the content — Chrome culls layout
+        for nodes placed absurdly far outside any viewport, which left earlier
+        captures blank. z-index -1 tucks it behind the export dialog's backdrop
+        (z-1000), the only thing rendered alongside it, so it's never visible.
+        Sized generously so width-flexible content lays out fully; the capture
+        reads the body's own scroll extent regardless of this box.
+      */}
+      <iframe
+        ref={iframeRef}
+        title="Export presentation surface"
+        aria-hidden
+        // Defense-in-depth: nothing is ever given a src/srcdoc (stays
+        // about:blank), but scripts and top-level navigation are blocked
+        // outright in case that ever changes.
+        sandbox="allow-same-origin"
+        style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          width: 1440,
+          height: 900,
+          border: 0,
+          zIndex: -1,
+          pointerEvents: 'none',
+        }}
+      />
+      {body && createPortal(children, body)}
+    </>
+  )
+}
+````
+
+## File: packages/web/src/lib/exportCapabilities.test.ts
+````typescript
+/**
+ * exportCapabilities — unit tests for getExportFormats and buildExportFilename.
+ */
+
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { getExportFormats, buildExportFilename } from './exportCapabilities'
+
+describe('getExportFormats', () => {
+  it('returns data formats + PNG + printable/HTML (6) for gantt', () => {
+    const formats = getExportFormats('gantt')
+    expect(formats).toHaveLength(6)
+    const ids = formats.map(f => f.id)
+    expect(ids).toContain('csv')
+    expect(ids).toContain('xlsx')
+    expect(ids).toContain('ics')
+    expect(ids).toContain('png')
+    expect(ids).toContain('printable')
+    expect(ids).toContain('html')
+    expect(ids).not.toContain('markdown')
+    expect(ids).not.toContain('clipboard')
+  })
+
+  it('returns data + PNG + printable/HTML + text formats (9) for list, kanban, calendar', () => {
+    const views = ['list', 'kanban', 'calendar'] as const
+    for (const view of views) {
+      const formats = getExportFormats(view)
+      expect(formats).toHaveLength(9)
+      const ids = formats.map(f => f.id)
+      expect(ids).toContain('csv')
+      expect(ids).toContain('xlsx')
+      expect(ids).toContain('ics')
+      expect(ids).toContain('png')
+      expect(ids).toContain('printable')
+      expect(ids).toContain('html')
+      expect(ids).toContain('markdown')
+      expect(ids).toContain('plaintext')
+      expect(ids).toContain('clipboard')
+    }
+  })
+
+  it('each descriptor has required fields', () => {
+    const allFormats = getExportFormats('list') // superset — includes text formats
+    for (const f of allFormats) {
+      expect(f.id).toBeTruthy()
+      expect(f.name).toBeTruthy()
+      expect(f.desc).toBeTruthy()
+      expect(typeof f.scope).toBe('boolean')
+      expect(['download', 'copy', 'print']).toContain(f.verb)
+      expect(typeof f.clientSide).toBe('boolean')
+      // ext may be empty string for clipboard/printable
+      if (f.id !== 'clipboard' && f.id !== 'printable') {
+        expect(f.ext).toMatch(/^\.[a-z]+$/)
+      }
+    }
+  })
+
+  it('server-side formats have scope=true', () => {
+    const formats = getExportFormats('list')
+    const serverFormats = formats.filter(f => !f.clientSide)
+    for (const f of serverFormats) {
+      expect(f.scope).toBe(true)
+    }
+  })
+
+  it('client-side formats have scope=false and clientSide=true', () => {
+    const formats = getExportFormats('list')
+    const clientFormats = formats.filter(f => f.clientSide)
+    expect(clientFormats).toHaveLength(6) // png + printable + html + markdown + plaintext + clipboard
+    for (const f of clientFormats) {
+      expect(f.scope).toBe(false)
+      expect(f.clientSide).toBe(true)
+    }
+  })
+
+  it('clipboard has copy verb, printable has print verb, others have download', () => {
+    const formats = getExportFormats('list')
+    const clipboard = formats.find(f => f.id === 'clipboard')
+    expect(clipboard?.verb).toBe('copy')
+    const printable = formats.find(f => f.id === 'printable')
+    expect(printable?.verb).toBe('print')
+    const rest = formats.filter(f => f.id !== 'clipboard' && f.id !== 'printable')
+    for (const f of rest) {
+      expect(f.verb).toBe('download')
+    }
+  })
+})
+
+describe('buildExportFilename', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-06-16T00:00:00Z'))
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('slugifies the name and appends the date and extension', () => {
+    expect(buildExportFilename('Sales Kick-Off 2026', '.csv')).toBe('sales-kick-off-2026-2026-06-16.csv')
+  })
+
+  it('strips uppercase and special characters', () => {
+    expect(buildExportFilename('My "Timeline"!', '.xlsx')).toBe('my-timeline-2026-06-16.xlsx')
+  })
+
+  it('falls back to "timeline" when the name is empty or all punctuation', () => {
+    expect(buildExportFilename('', '.csv')).toBe('timeline-2026-06-16.csv')
+    expect(buildExportFilename('---', '.ics')).toBe('timeline-2026-06-16.ics')
+  })
+
+  it('preserves numbers and hyphens in the slug', () => {
+    expect(buildExportFilename('Q1 2026', '.csv')).toBe('q1-2026-2026-06-16.csv')
+  })
+
+  it('inserts the view segment when a view is given', () => {
+    expect(buildExportFilename('Sales Kick-Off', '.png', 'kanban')).toBe('sales-kick-off-kanban-2026-06-16.png')
+  })
+
+  it('omits the view segment when no view is given', () => {
+    expect(buildExportFilename('Sales Kick-Off', '.png')).toBe('sales-kick-off-2026-06-16.png')
+  })
+})
+````
+
+## File: packages/web/src/lib/exportCapabilities.ts
+````typescript
+/**
+ * Export format descriptors for the Export dialog (Phase 14).
+ *
+ * One dialog serves all views (Gantt/List/Kanban/Calendar); format
+ * availability and per-format copy is driven by this descriptor array so a
+ * future view or format is an addition here, not a dialog redesign
+ * (docs/design/handoffs/export-modal).
+ *
+ * 14.1: CSV, Excel, ICS (server-side, all views).
+ * 14.2: Markdown, Plain text, Copy to clipboard (client-side, List/Kanban/Calendar only).
+ * 14.3: PNG snapshot (client-side DOM rasterization, all views).
+ * 14.4: Printable view (browser print → vector PDF), HTML save (client-side, all views).
+ */
+
+import {
+  Table, FileSpreadsheet, CalendarPlus, FileText, AlignLeft, Copy, Image, Printer, FileCode,
+  type LucideIcon,
+} from 'lucide-react'
+
+export type ExportFormatId = 'csv' | 'xlsx' | 'ics' | 'png' | 'markdown' | 'plaintext' | 'clipboard' | 'printable' | 'html'
+export type ExportViewType = 'gantt' | 'list' | 'calendar' | 'kanban'
+
+export interface ExportFormatDescriptor {
+  id: ExportFormatId
+  name: string
+  icon: LucideIcon
+  /** One-line description shown in the options pane. */
+  desc: string
+  /** File extension, including the leading dot. Used as the download filename suffix. */
+  ext: string
+  /** Data formats (CSV/Excel/ICS) show the "current view vs entire timeline" scope picker. */
+  scope: boolean
+  /**
+   * Primary action verb.
+   * 'download' → "Download <ext>" button.
+   * 'copy'     → "Copy to clipboard" button with "Copied!" flash.
+   * 'print'    → "Print…" button that opens the browser's print dialog.
+   */
+  verb: 'download' | 'copy' | 'print'
+  /** True for formats generated client-side (no API call). */
+  clientSide: boolean
+}
+
+/** Data/calendar formats — server-side, available in every view. */
+const DATA_FORMATS: ExportFormatDescriptor[] = [
+  {
+    id: 'csv',
+    name: 'CSV',
+    icon: Table,
+    ext: '.csv',
+    scope: true,
+    verb: 'download',
+    clientSide: false,
+    desc: 'A plain spreadsheet file — opens in Excel, Google Sheets, or Numbers.',
+  },
+  {
+    id: 'xlsx',
+    name: 'Excel',
+    icon: FileSpreadsheet,
+    ext: '.xlsx',
+    scope: true,
+    verb: 'download',
+    clientSide: false,
+    desc: 'A formatted workbook for Excel, Google Sheets, or Numbers.',
+  },
+  {
+    id: 'ics',
+    name: 'Calendar (.ics)',
+    icon: CalendarPlus,
+    ext: '.ics',
+    scope: true,
+    verb: 'download',
+    clientSide: false,
+    desc: 'An iCalendar file — import into Google Calendar, Outlook, or Apple Calendar.',
+  },
+]
+
+/** Image format — client-side DOM rasterization, available in every view. */
+const IMAGE_FORMATS: ExportFormatDescriptor[] = [
+  {
+    id: 'png',
+    name: 'PNG image',
+    icon: Image,
+    ext: '.png',
+    scope: false,
+    verb: 'download',
+    clientSide: true,
+    desc: 'A snapshot of this view, full scrollable extent, for a slide deck or doc.',
+  },
+]
+
+/**
+ * Presentation formats — client-side, reuse the PresentationFrame surface
+ * (Phase 14.4), available in every view.
+ */
+const PRESENTATION_FORMATS: ExportFormatDescriptor[] = [
+  {
+    id: 'printable',
+    name: 'Printable view',
+    icon: Printer,
+    ext: '',
+    scope: false,
+    verb: 'print',
+    clientSide: true,
+    desc: 'Opens your browser’s print dialog on a clean, paginated version of this view — choose "Save as PDF" there for a vector file with selectable text.',
+  },
+  {
+    id: 'html',
+    name: 'HTML file',
+    icon: FileCode,
+    ext: '.html',
+    scope: false,
+    verb: 'download',
+    clientSide: true,
+    desc: 'A standalone HTML file with styles inlined — opens in any browser without draba.',
+  },
+]
+
+/** Textual formats — client-side, not available on Gantt (no sensible flat text shape). */
+const TEXT_FORMATS: ExportFormatDescriptor[] = [
+  {
+    id: 'markdown',
+    name: 'Markdown',
+    icon: FileText,
+    ext: '.md',
+    scope: false,
+    verb: 'download',
+    clientSide: true,
+    desc: 'GitHub-flavored Markdown — paste into a README, Notion, or any Markdown editor.',
+  },
+  {
+    id: 'plaintext',
+    name: 'Plain text',
+    icon: AlignLeft,
+    ext: '.txt',
+    scope: false,
+    verb: 'download',
+    clientSide: true,
+    desc: 'Space-aligned plain text — works in any text editor or monospace environment.',
+  },
+  {
+    id: 'clipboard',
+    name: 'Copy to clipboard',
+    icon: Copy,
+    ext: '',
+    scope: false,
+    verb: 'copy',
+    clientSide: true,
+    desc: 'Copies both rich (HTML) and plain text so paste lands formatted in Slack, Word, or Google Docs.',
+  },
+]
+
+/**
+ * Returns the export formats available for a given view.
+ * PNG and the presentation formats (printable view, HTML) are available
+ * everywhere (14.3/14.4). Gantt has no sensible flat text representation,
+ * so it skips the textual formats (14.2).
+ */
+export function getExportFormats(view: ExportViewType): ExportFormatDescriptor[] {
+  if (view === 'gantt') return [...DATA_FORMATS, ...IMAGE_FORMATS, ...PRESENTATION_FORMATS]
+  return [...DATA_FORMATS, ...IMAGE_FORMATS, ...PRESENTATION_FORMATS, ...TEXT_FORMATS]
+}
+
+/**
+ * Builds the download filename for a format:
+ * `<timeline-slug>[-<view>]-<yyyy-mm-dd><ext>`.
+ * Matches the filename chip shown in the export dialog's options pane. The view
+ * segment is included when given so a file names the view it came from (e.g.
+ * `sales-kick-off-kanban-2026-06-30.png`).
+ */
+export function buildExportFilename(timelineName: string, ext: string, view?: ExportViewType): string {
+  const slug = timelineName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  const date = new Date().toISOString().slice(0, 10)
+  const viewSegment = view ? `-${view}` : ''
+  return `${slug || 'timeline'}${viewSegment}-${date}${ext}`
 }
 ````
 
@@ -77896,6 +78049,40 @@ _Planned 2026-07-03 — see [docs/plans/phase-15-import.md](plans/phase-15-impor
 
 ---
 
+### Backup & Restore (Phase 16)
+
+_Planned 2026-07-08 — see [docs/plans/phase-16-backup.md](plans/phase-16-backup.md). Design thesis: a backup you haven't verified and can't find is not a backup. Decisions locked: SQLite-only (`Engine` seam for future drivers — MySQL/Postgres surfaces cut, no such drivers exist); `VACUUM INTO` + `PRAGMA integrity_check`; history = directory scan, filename is the record (no DB table); `DRABA_BACKUP_DIR` default `/data/backups` (on the mounted volume); no HTTP download, no in-app restore (runbook), no encryption at rest for v1; schedule presets not cron, default-on daily 02:00 / keep-last-14._
+
+**16.1 Server — engine, manager, manual backup + status/history API:**
+- [ ] `internal/backup`: `Engine` interface + `sqliteEngine` (`VACUUM INTO` hot copy under WAL; `PRAGMA integrity_check` on the copy; failed copies deleted, never left on disk)
+- [ ] `internal/backup.Manager`: filename scheme `draba-<UTC>Z-<manual|scheduled>.db`, temp-name → verify → rename (interruption never leaves a pattern-matching file), one-at-a-time concurrency guard, keep-last-N retention sweep (pattern-matching files only)
+- [ ] `DRABA_BACKUP_DIR` env (default `/data/backups`), startup create + writability validation, `packages/api/CLAUDE.md` env-block entry
+- [ ] `GET /admin/backup/status` — DB path/size/WAL size/modified, backup-dir writability, last backup, health (ok <24h / stale 1–7d / critical >7d or none), running flag, schedule summary; superadmin-only
+- [ ] `POST /admin/backup` — synchronous run-now; `201` + entry, `409 BACKUP_IN_PROGRESS` under guard, no leftover file on failure
+- [ ] `GET /admin/backup/history` — directory scan, pattern-filtered, newest first; foreign files never listed
+- [ ] `DELETE /admin/backup/{filename}` — exact pattern match as the path-traversal guard; `404`/`204`
+- [ ] OpenAPI: `BackupStatus`, `BackupEntry`, `BackupSchedule`; regenerate TS types
+- [ ] Tests: vacuum under concurrent writes, verify-failure cleanup, filename round-trip + foreign-file exclusion + traversal rejection, retention sweep, concurrency guard, status shape
+
+**16.2 Server — scheduler, retention-in-anger, failure notification:**
+- [ ] `internal/backup.Scheduler`: preset → next-run computation (injected clock), timer loop, config-change recompute, skip-while-running; no catch-up for missed windows (v1)
+- [ ] `GET`/`PUT /admin/backup/schedule` — presets `off|hourly|every6h|every12h|daily@HH:MM|weekly@day+HH:MM` + `keepLast` 1–365, validated; one `instance_settings` JSON key; response echoes `nextRunAt`
+- [ ] Default-on for instances with no stored config: daily 02:00, keep-last-14
+- [ ] `backup.completed` / `backup.failed` bus events (instance-scoped, not team-broadcast); failure consumer emails superadmins via existing mailer, silent no-op without SMTP config
+- [ ] `main.go` wiring: `backup.Manager` + `go scheduler.Run(ctx)` beside the WS hub
+- [ ] Tests: fake-clock runs across every preset, recompute on config change, failure → one email per superadmin, no-SMTP no-op
+
+**16.3 Web + ops docs + hardening:**
+- [ ] Settings › Backup section (superadmin-gated like SMTP): status card + health badge with thresholds spelled out, backup-dir warning when unwritable
+- [ ] "Back up now" button (sync, spinner, toast, disabled while running) + history table (size, trigger chip, delete-with-confirm) + schedule form (preset/time/day/keep-last, shows next run)
+- [ ] `useBackupStatus` / `useBackupHistory` / `useBackupSchedule` hooks + mutations (`useSettings.ts` conventions)
+- [ ] Component tests: health badge states, schedule validation, delete confirm, in-progress disable
+- [ ] `docs/OPERATIONS.md`: restore runbook (stop → copy over `draba.db`, remove `-wal`/`-shm` → start), volume contract + second-mount example, docker-compose snippet
+- [ ] Live Docker verification: real backup of the seeded test DB, restore runbook walked through once for real
+- [ ] `/test-phase 16`, TESTING.md Phase 16 assertions, log.md + session-state.md updates
+
+---
+
 ### External Connectors (Inbound Webhooks) — Phase 18 (was mislabeled "Phase 15"; re-numbered 2026-07-03 to match [ROADMAP Phase 18](ROADMAP.md#phase-18--external-connectors-webhooks))
 Includes both the webhook backend and the per-timeline connector sidebar UI (previously a separate Up-Next block).
 
@@ -79659,46 +79846,27 @@ Get data *into* draba from a spreadsheet — CSV / Excel import with a mandatory
 ---
 
 ### Phase 16 — Backup & Restore
-**Status:** ⬜ | **Effort:** M (2–3 days, directional estimate)
+**Status:** 🟢 Planned (scope settled 2026-07-08) | **Effort:** M (2.5–3 days across three pausable sub-phases) | **Plan:** [docs/plans/phase-16-backup.md](plans/phase-16-backup.md)
 
 Admin tools for database backup visibility, manual backups, and scheduled backup configuration. Self-hosted deployments need a way to know their data is safe without SSH-ing into the container. **Pulled ahead of the remaining phases** because once real teams start putting real data in (via [import](#phase-15--import--tabular) and [shared](#phase-13--shares--multi-share-views-with-passwords) workflows), data safety stops being optional.
 
-**Directional scope (to be firmed up before the phase):**
+**Design thesis (detail in the plan):** *a backup you haven't verified and can't find is not a backup.* Every backup is `PRAGMA integrity_check`-verified at creation (failed copies are deleted, never left looking like backups), lands in `DRABA_BACKUP_DIR` (default `/data/backups` — on the already-mounted data volume, so it survives container recreation with zero config), and the filename **is** the history record (directory scan, no DB table — a table inside the database being backed up is self-defeating after a restore).
 
-*Backup status (read-only admin surface):*
-- `/settings/admin/backup` page: current DB file path, file size, last-modified timestamp, WAL size (SQLite), connection count
-- Health indicator: green when last backup < 24h old, amber when 1–7 days, red when > 7 days or no backup exists
-- For MySQL/Postgres adapters: show connection string (masked), database size, last `pg_dump`/`mysqldump` timestamp if available
+**Scope (sub-phases — detail in the [plan](plans/phase-16-backup.md)):**
 
-*Manual backup:*
-- "Back up now" button → triggers a hot copy of the SQLite file (using `VACUUM INTO` or the backup API) to a configurable backup directory
-- For MySQL/Postgres: trigger `pg_dump`/`mysqldump` to the backup directory
-- Download backup file directly from the admin UI (optional — evaluate security implications)
+- **16.1 Server — engine + manual backup:** `internal/backup` (`Engine` seam with one `sqliteEngine` impl: `VACUUM INTO` hot copy under WAL + integrity verify; `Manager`: naming, concurrency guard, retention sweep, temp-name→verify→rename so interruptions never leave a pattern-matching corpse), `GET /admin/backup/status` (DB path/size/WAL, health ok/stale/critical at <24h / 1–7d / >7d, last backup, dir writability), `POST /admin/backup` (sync, `409` when one is running), `GET /admin/backup/history`, `DELETE /admin/backup/{filename}` (pattern match = traversal guard). All superadmin-only.
+- **16.2 Server — scheduler + notification:** preset schedules (`off|hourly|every6h|every12h|daily@HH:MM|weekly` — presets, not cron expressions), stored as one `instance_settings` JSON key, **default-on: daily 02:00 / keep-last-14**; purpose-built goroutine with injected clock (first background scheduler in the codebase — deliberately not a job framework); keep-last-N retention counting only pattern-matching files; `backup.completed`/`backup.failed` bus events with an SMTP failure-notification consumer (silent no-op when SMTP unconfigured).
+- **16.3 Web + ops docs + hardening:** Settings › Backup section (status card + health badge, Back up now, schedule form with next-run, history table with delete), `docs/OPERATIONS.md` restore runbook + volume contract (restore = documented `cp` procedure, **not** an in-app feature), live Docker verification incl. walking the runbook once for real, `/test-phase 16`, TESTING.md assertions.
 
-*Scheduled backups:*
-- Cron-style schedule configuration (daily at 2am, every 6 hours, etc.)
-- Retention policy: keep last N backups, or keep backups for N days
-- Backup location: local directory (default), or S3-compatible object storage (stretch)
-- Notification on backup failure (via SMTP if configured)
+**Scope corrections vs. the earlier directional text (2026-07-08 codebase scan):** MySQL/Postgres surfaces cut entirely — no such drivers exist in `go.mod`; the `Engine` interface is the whole concession to the future. Open questions resolved in the plan: `VACUUM INTO` over the backup API (single statement, pure-Go-driver-friendly, compacted standalone output); **no** backup download over HTTP for v1 (the file is the whole instance — password hashes and encrypted credentials included; a self-hosting admin has filesystem access by definition); **no** encryption at rest for v1 (same disk and permissions as the live DB — encrypt at the volume layer if required). Also cut: S3 targets, cron expressions, in-app restore, catch-up runs for missed windows (health indicator covers the gap honestly), success-notification emails.
 
-*API:*
-- `GET /admin/backup/status` — current backup state (superadmin only)
-- `POST /admin/backup` — trigger immediate backup (superadmin only)
-- `GET /admin/backup/history` — list recent backups with size and status
-- `GET/PUT /admin/backup/schedule` — read/update backup schedule config
-- `DELETE /admin/backup/:id` — delete a specific backup file
-
-**Open questions (resolve before starting):**
-- Should backup files be downloadable from the admin UI, or only stored on the server filesystem? (Security tradeoff: convenience vs. risk of unauthorized download)
-- For SQLite, `VACUUM INTO` vs. the SQLite backup API — which handles concurrent writes better under WAL mode?
-- Do we need backup encryption at rest? (Probably not for v1 if the backup directory is on the same host)
-
-**Exit criteria (placeholder — refine in-phase):**
-- A superadmin can see the current DB status (path, size, last modified) on the admin backup page
-- "Back up now" creates a usable copy of the database in the configured backup directory
-- A scheduled backup runs at the configured interval and produces a valid backup file
-- Retention policy automatically cleans up old backups beyond the configured limit
-- Backup history shows the last N backups with timestamps and sizes
+**Exit criteria — safe to pause when** *(full list in the plan)*:
+- The Settings › Backup page shows live DB path/size/WAL and an honest health badge (red on a fresh instance, green + timestamp after a backup)
+- "Back up now" produces an integrity-checked file in the backup dir that restores via the runbook into a working draba — walked through once for real against the test Docker instance
+- A scheduled backup fires at the configured preset time without request traffic; retention keeps exactly N, never touching foreign files in the directory
+- Concurrent backup requests get `409`; path-traversal-shaped delete filenames are rejected
+- An induced failure emails the superadmin when SMTP is configured, and fails loudly in status/logs either way
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean; `pnpm --filter web test` passes
 
 ---
 
