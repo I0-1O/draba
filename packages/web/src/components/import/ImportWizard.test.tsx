@@ -2,7 +2,8 @@
  * ImportWizard — behavior tests for the stepped flow: auto-mapped files skip
  * the mapping step, unmapped columns force it, mapping/date-order/tag-option
  * changes each re-run the dry-run, the commit button counts only importable
- * (ok + warning) rows, and the commit pass posts dryRun:false.
+ * (ok + warning) rows, the commit pass posts dryRun:false, and a failed
+ * commit stays on the preview step with an error banner.
  *
  * The api module is mocked at the createAuthFetch seam so the real
  * useImportPreview/useCommitImport hooks (FormData construction, dryRun
@@ -11,7 +12,7 @@
 
 import '@testing-library/jest-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import ImportWizard from './ImportWizard'
 import type { ImportResult } from '@/hooks/useImport'
@@ -81,6 +82,22 @@ function unmappedResult(): ImportResult {
   })
 }
 
+/** A result whose numeric dates stayed ambiguous — the server disclosed the
+ * order it applied with the exact per-cell warning text from importer/dates.go. */
+function ambiguousDatesResult(): ImportResult {
+  return autoMappedResult({
+    mapping: { Task: 'title', Begin: 'start', Budget: '' },
+    rows: [
+      {
+        line: 2,
+        status: 'warning',
+        activity: { title: 'Alpha', start: '2026-03-05', end: '2026-03-05' },
+        issues: [{ level: 'warning', field: 'start', message: '"3/5/26" read as month-day-year' }],
+      },
+    ],
+  })
+}
+
 function csvFile(): File {
   return new File(['Title,Start\nAlpha,2026-03-05'], 'plan.csv', { type: 'text/csv' })
 }
@@ -92,12 +109,12 @@ function optionsOfCall(n: number): Record<string, unknown> {
   return JSON.parse(fd.get('options') as string) as Record<string, unknown>
 }
 
-function renderWizard() {
+function renderWizard(props: { onGoToTimeline?: (id: string) => void } = {}) {
   const onClose = vi.fn()
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
   render(
     <QueryClientProvider client={qc}>
-      <ImportWizard teamId="team-1" timelines={timelines} activeTimelineId="tl-1" onClose={onClose} />
+      <ImportWizard teamId="team-1" timelines={timelines} activeTimelineId="tl-1" onClose={onClose} {...props} />
     </QueryClientProvider>,
   )
   return { onClose }
@@ -135,6 +152,45 @@ describe('ImportWizard', () => {
     expect(await screen.findByText(/Map columns/)).toBeInTheDocument()
     // The unmapped column renders with "Don't import" selected.
     expect(screen.getByLabelText('Field for column Budget')).toHaveValue('')
+    // No ambiguous-date warnings in this result → no date-order question.
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument()
+  })
+
+  it('sorts unmapped columns first and disables fields already claimed by another column', async () => {
+    mockAuthFetch.mockResolvedValueOnce(unmappedResult())
+    renderWizard()
+    await chooseFile()
+    await screen.findByText(/Map columns/)
+
+    // Unmapped Budget outranks the alphabetically-earlier mapped columns.
+    const selects = screen.getAllByLabelText(/^Field for column /)
+    expect(selects.map(s => s.getAttribute('aria-label'))).toEqual([
+      'Field for column Budget',
+      'Field for column Begin',
+      'Field for column Task',
+    ])
+
+    // In Budget's dropdown: Title is claimed by Task → disabled; Description is free.
+    const budget = screen.getByLabelText('Field for column Budget')
+    expect(within(budget).getByRole('option', { name: 'Title' })).toBeDisabled()
+    expect(within(budget).getByRole('option', { name: 'Description' })).toBeEnabled()
+    // A column's own field stays selectable in its own dropdown.
+    const task = screen.getByLabelText('Field for column Task')
+    expect(within(task).getByRole('option', { name: 'Title' })).toBeEnabled()
+  })
+
+  it('shows the date-order question for ambiguous dates and re-runs the dry-run on change', async () => {
+    mockAuthFetch.mockResolvedValue(ambiguousDatesResult())
+    renderWizard()
+    await chooseFile()
+    await screen.findByText(/Map columns/)
+
+    // The server's "read as month-day-year" warning is the only trigger.
+    expect(screen.getByRole('radio', { name: /Month \/ Day \/ Year/ })).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(screen.getByRole('radio', { name: /Day \/ Month \/ Year/ }))
+
+    await waitFor(() => expect(mockAuthFetch).toHaveBeenCalledTimes(2))
+    expect(optionsOfCall(1)).toMatchObject({ dryRun: true, dateOrder: 'dmy' })
   })
 
   it('re-runs the dry-run with the explicit mapping when a column is reassigned', async () => {
@@ -173,6 +229,81 @@ describe('ImportWizard', () => {
     expect(await screen.findByText('2 activities imported')).toBeInTheDocument()
     expect(screen.getByText(/1 row skipped \(errors\)/)).toBeInTheDocument()
     expect(optionsOfCall(1).dryRun).toBe(false)
+  })
+
+  it('stays on the preview step with the server message when the commit fails', async () => {
+    const { ApiError } = await import('@/lib/api')
+    mockAuthFetch.mockResolvedValueOnce(autoMappedResult())
+    renderWizard()
+    await chooseFile()
+
+    mockAuthFetch.mockRejectedValueOnce(new ApiError(409, 'IMPORT_CONFLICT', 'timeline was archived mid-import'))
+    fireEvent.click(await screen.findByRole('button', { name: 'Import 2 activities' }))
+
+    expect(await screen.findByText('timeline was archived mid-import')).toBeInTheDocument()
+    // No advance to the result step — the preview (and its data) stays put…
+    expect(screen.getByText(/Preview import/)).toBeInTheDocument()
+    expect(screen.getByText('1 ready')).toBeInTheDocument()
+    // …and the commit button is re-enabled for a retry.
+    expect(screen.getByRole('button', { name: 'Import 2 activities' })).toBeEnabled()
+  })
+
+  it('falls back to a generic message when the commit fails without an ApiError', async () => {
+    mockAuthFetch.mockResolvedValueOnce(autoMappedResult())
+    renderWizard()
+    await chooseFile()
+
+    mockAuthFetch.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    fireEvent.click(await screen.findByRole('button', { name: 'Import 2 activities' }))
+
+    expect(await screen.findByText('Import failed — nothing was written. Try again.')).toBeInTheDocument()
+    expect(screen.getByText(/Preview import/)).toBeInTheDocument()
+  })
+
+  it('fetches and saves the template from the upload-step download links', async () => {
+    // jsdom has no object-URL support — stub the pieces saveBlob touches.
+    const createObjectURL = vi.fn(() => 'blob:mock')
+    const revokeObjectURL = vi.fn()
+    Object.assign(URL, { createObjectURL, revokeObjectURL })
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    mockAuthFetchBlob.mockResolvedValue({ blob: new Blob(['Title,Start']), filename: 'draba-import-template.csv' })
+
+    renderWizard()
+    fireEvent.click(screen.getByRole('button', { name: 'CSV' }))
+    await waitFor(() => expect(click).toHaveBeenCalledTimes(1))
+    expect(mockAuthFetchBlob).toHaveBeenCalledWith('/import/template.csv')
+    expect(createObjectURL).toHaveBeenCalled()
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:mock')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Excel' }))
+    await waitFor(() => expect(mockAuthFetchBlob).toHaveBeenCalledWith('/import/template.xlsx'))
+
+    click.mockRestore()
+  })
+
+  it('offers "View timeline" after importing into a non-active timeline', async () => {
+    const onGoToTimeline = vi.fn()
+    mockAuthFetch.mockResolvedValue(autoMappedResult())
+    const { onClose } = renderWizard({ onGoToTimeline })
+
+    // Retarget the import at tl-2 (the active timeline is tl-1).
+    fireEvent.change(screen.getByLabelText('Import into'), { target: { value: 'tl-2' } })
+    await chooseFile()
+    fireEvent.click(await screen.findByRole('button', { name: 'Import 2 activities' }))
+
+    fireEvent.click(await screen.findByRole('button', { name: 'View timeline' }))
+    expect(onGoToTimeline).toHaveBeenCalledWith('tl-2')
+    expect(onClose).toHaveBeenCalled()
+  })
+
+  it('hides "View timeline" when the import targeted the already-active timeline', async () => {
+    mockAuthFetch.mockResolvedValue(autoMappedResult())
+    renderWizard({ onGoToTimeline: vi.fn() })
+    await chooseFile()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Import 2 activities' }))
+    await screen.findByRole('button', { name: 'Done' })
+    expect(screen.queryByRole('button', { name: 'View timeline' })).not.toBeInTheDocument()
   })
 
   it('re-runs the dry-run with createMissingTags when the tag checkbox is toggled', async () => {

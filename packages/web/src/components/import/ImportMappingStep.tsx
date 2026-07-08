@@ -1,8 +1,8 @@
 /**
  * ImportMappingStep — the wizard's conditional map-columns step.
  *
- * One row per file column: the column header, a sample of what the server
- * mapped it to, and a field dropdown (or "Don't import"). A field already
+ * One row per file column: the column header and a field dropdown (or
+ * "Don't import"), unmapped columns sorted to the top. A field already
  * claimed by another column is disabled — two columns on one field is a
  * server-side file error, so the UI simply prevents it. The date-order
  * question renders here only when the file's numeric dates stayed ambiguous
