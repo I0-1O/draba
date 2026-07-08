@@ -924,6 +924,83 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/backup/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get database and backup health status */
+        get: operations["getBackupStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/backup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run a manual backup now (synchronous)
+         * @description Copies the live database with VACUUM INTO, verifies the copy with PRAGMA integrity_check, and only then gives it a backup filename. A failed backup never leaves a file on disk.
+         */
+        post: operations["runBackup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/backup/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List backups in the backup directory, newest first
+         * @description The filesystem is the source of truth — a directory scan filtered to the backup filename pattern. Files deleted out-of-band disappear; foreign files in the directory are never listed.
+         */
+        get: operations["listBackups"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/backup/{filename}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete one backup by filename
+         * @description The filename must exactly match the backup filename pattern — the pattern check is the path-traversal guard, and it also makes foreign files in the directory undeletable through the API.
+         */
+        delete: operations["deleteBackup"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/teams/{teamId}/status-templates": {
         parameters: {
             query?: never;
@@ -1404,6 +1481,56 @@ export interface components {
         AdminUserRow: {
             teamCount?: number;
         } & components["schemas"]["User"];
+        /** @description One backup file. The filename is the record: it encodes the UTC creation timestamp and the trigger, and doubles as the delete id. */
+        BackupEntry: {
+            /** @description e.g. "draba-20260708T020000Z-scheduled.db" */
+            filename: string;
+            /** Format: int64 */
+            sizeBytes: number;
+            /** Format: date-time */
+            createdAt: string;
+            /** @enum {string} */
+            trigger: "manual" | "scheduled";
+        };
+        BackupStatus: {
+            database: {
+                /** @enum {string} */
+                driver: "sqlite";
+                path: string;
+                /** Format: int64 */
+                sizeBytes: number;
+                /** Format: int64 */
+                walSizeBytes: number;
+                /** Format: date-time */
+                modifiedAt?: string | null;
+            };
+            backupDir: {
+                path: string;
+                writable: boolean;
+            };
+            lastBackup?: components["schemas"]["BackupEntry"] | null;
+            /**
+             * @description ok < 24h, stale 1-7 days, critical > 7 days or no backup. Thresholds fixed in v1.
+             * @enum {string}
+             */
+            health: "ok" | "stale" | "critical";
+            running: boolean;
+            /** @description Null until the Phase 16.2 scheduler lands (and when scheduling is off). */
+            schedule?: components["schemas"]["BackupSchedule"] | null;
+        };
+        /** @description Preset-based backup schedule (Phase 16.2). Stored as one instance_settings JSON value. */
+        BackupSchedule: {
+            /** @enum {string} */
+            preset: "off" | "hourly" | "every6h" | "every12h" | "daily" | "weekly";
+            /** @description HH:MM (UTC), for daily and weekly presets. */
+            time?: string;
+            /**
+             * @description Weekly preset only.
+             * @enum {string}
+             */
+            day?: "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
+            keepLast: number;
+        };
         Team: {
             id: string;
             name: string;
@@ -4177,6 +4304,111 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+        };
+    };
+    getBackupStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current backup status. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    runBackup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Backup created and verified. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupEntry"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description A backup is already in progress (code BACKUP_IN_PROGRESS). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Backup failed (code BACKUP_FAILED); no file was left behind. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    listBackups: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Backup entries, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        backups: components["schemas"]["BackupEntry"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    deleteBackup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                filename: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Backup deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
         };
     };
     listStatusTemplates: {

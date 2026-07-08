@@ -1300,16 +1300,16 @@ _Planned 2026-07-03 — see [docs/plans/phase-15-import.md](plans/phase-15-impor
 
 _Planned 2026-07-08 — see [docs/plans/phase-16-backup.md](plans/phase-16-backup.md). Design thesis: a backup you haven't verified and can't find is not a backup. Decisions locked: SQLite-only (`Engine` seam for future drivers — MySQL/Postgres surfaces cut, no such drivers exist); `VACUUM INTO` + `PRAGMA integrity_check`; history = directory scan, filename is the record (no DB table); `DRABA_BACKUP_DIR` default `/data/backups` (on the mounted volume); no HTTP download, no in-app restore (runbook), no encryption at rest for v1; schedule presets not cron, default-on daily 02:00 / keep-last-14._
 
-**16.1 Server — engine, manager, manual backup + status/history API:**
-- [ ] `internal/backup`: `Engine` interface + `sqliteEngine` (`VACUUM INTO` hot copy under WAL; `PRAGMA integrity_check` on the copy; failed copies deleted, never left on disk)
-- [ ] `internal/backup.Manager`: filename scheme `draba-<UTC>Z-<manual|scheduled>.db`, temp-name → verify → rename (interruption never leaves a pattern-matching file), one-at-a-time concurrency guard, keep-last-N retention sweep (pattern-matching files only)
-- [ ] `DRABA_BACKUP_DIR` env (default `/data/backups`), startup create + writability validation, `packages/api/CLAUDE.md` env-block entry
-- [ ] `GET /admin/backup/status` — DB path/size/WAL size/modified, backup-dir writability, last backup, health (ok <24h / stale 1–7d / critical >7d or none), running flag, schedule summary; superadmin-only
-- [ ] `POST /admin/backup` — synchronous run-now; `201` + entry, `409 BACKUP_IN_PROGRESS` under guard, no leftover file on failure
-- [ ] `GET /admin/backup/history` — directory scan, pattern-filtered, newest first; foreign files never listed
-- [ ] `DELETE /admin/backup/{filename}` — exact pattern match as the path-traversal guard; `404`/`204`
-- [ ] OpenAPI: `BackupStatus`, `BackupEntry`, `BackupSchedule`; regenerate TS types
-- [ ] Tests: vacuum under concurrent writes, verify-failure cleanup, filename round-trip + foreign-file exclusion + traversal rejection, retention sweep, concurrency guard, status shape
+**16.1 Server — engine, manager, manual backup + status/history API:** ✅ 2026-07-08
+- [x] `internal/backup`: `Engine` interface + `sqliteEngine` (`VACUUM INTO` hot copy under WAL; `PRAGMA integrity_check` on the copy; failed copies deleted, never left on disk)
+- [x] `internal/backup.Manager`: filename scheme `draba-<UTC>Z-<manual|scheduled>.db`, temp-name → verify → rename (interruption never leaves a pattern-matching file), one-at-a-time concurrency guard, keep-last-N retention sweep (pattern-matching files only)
+- [x] `DRABA_BACKUP_DIR` env (default `/data/backups`), startup create + writability validation, `packages/api/CLAUDE.md` env-block entry
+- [x] `GET /admin/backup/status` — DB path/size/WAL size/modified, backup-dir writability, last backup, health (ok <24h / stale 1–7d / critical >7d or none), running flag, schedule summary (`null` until 16.2); superadmin-only
+- [x] `POST /admin/backup` — synchronous run-now; `201` + entry, `409 BACKUP_IN_PROGRESS` under guard, no leftover file on failure
+- [x] `GET /admin/backup/history` — directory scan, pattern-filtered, newest first; foreign files never listed
+- [x] `DELETE /admin/backup/{filename}` — exact pattern match as the path-traversal guard; `404`/`204`
+- [x] OpenAPI: `BackupStatus`, `BackupEntry`, `BackupSchedule`; regenerate TS types
+- [x] Tests: vacuum under concurrent writes, verify-failure cleanup, filename round-trip + foreign-file exclusion + traversal rejection, retention sweep, concurrency guard, status shape
 
 **16.2 Server — scheduler, retention-in-anger, failure notification:**
 - [ ] `internal/backup.Scheduler`: preset → next-run computation (injected clock), timer loop, config-change recompute, skip-while-running; no catch-up for missed windows (v1)

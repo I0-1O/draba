@@ -35,6 +35,7 @@ golangci-lint run
 ```
 DRABA_DB_DRIVER=sqlite          # sqlite | mysql | postgres
 DRABA_DB_DSN=./draba.db         # file path for SQLite, connection string for others
+DRABA_BACKUP_DIR=/data/backups  # where verified backups land; default is on the data volume
 DRABA_JWT_SECRET=               # required — random secret for signing JWTs
 DRABA_PORT=8080                 # default 8080
 DRABA_LOG_LEVEL=info            # debug | info | warn | error (default info; set debug in docker-compose for dev)

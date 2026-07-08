@@ -130,6 +130,93 @@ components:
         teamCount:
           type: integer
 
+    BackupEntry:
+      type: object
+      description: >
+        One backup file. The filename is the record: it encodes the UTC
+        creation timestamp and the trigger, and doubles as the delete id.
+      required: [filename, sizeBytes, createdAt, trigger]
+      properties:
+        filename:
+          type: string
+          description: e.g. "draba-20260708T020000Z-scheduled.db"
+        sizeBytes:
+          type: integer
+          format: int64
+        createdAt:
+          type: string
+          format: date-time
+        trigger:
+          type: string
+          enum: [manual, scheduled]
+
+    BackupStatus:
+      type: object
+      required: [database, backupDir, health, running]
+      properties:
+        database:
+          type: object
+          required: [driver, path, sizeBytes, walSizeBytes]
+          properties:
+            driver:
+              type: string
+              enum: [sqlite]
+            path:
+              type: string
+            sizeBytes:
+              type: integer
+              format: int64
+            walSizeBytes:
+              type: integer
+              format: int64
+            modifiedAt:
+              type: string
+              format: date-time
+              nullable: true
+        backupDir:
+          type: object
+          required: [path, writable]
+          properties:
+            path:
+              type: string
+            writable:
+              type: boolean
+        lastBackup:
+          allOf:
+            - $ref: '#/components/schemas/BackupEntry'
+          nullable: true
+        health:
+          type: string
+          enum: [ok, stale, critical]
+          description: ok < 24h, stale 1-7 days, critical > 7 days or no backup. Thresholds fixed in v1.
+        running:
+          type: boolean
+        schedule:
+          allOf:
+            - $ref: '#/components/schemas/BackupSchedule'
+          nullable: true
+          description: Null until the Phase 16.2 scheduler lands (and when scheduling is off).
+
+    BackupSchedule:
+      type: object
+      description: Preset-based backup schedule (Phase 16.2). Stored as one instance_settings JSON value.
+      required: [preset, keepLast]
+      properties:
+        preset:
+          type: string
+          enum: [off, hourly, every6h, every12h, daily, weekly]
+        time:
+          type: string
+          description: HH:MM (UTC), for daily and weekly presets.
+        day:
+          type: string
+          enum: [mon, tue, wed, thu, fri, sat, sun]
+          description: Weekly preset only.
+        keepLast:
+          type: integer
+          minimum: 1
+          maximum: 365
+
     Team:
       type: object
       required: [id, name, slug, createdAt, updatedAt]
@@ -3537,6 +3624,100 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+
+  /admin/backup/status:
+    get:
+      operationId: getBackupStatus
+      summary: Get database and backup health status
+      tags: [admin]
+      responses:
+        "200":
+          description: Current backup status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/backup:
+    post:
+      operationId: runBackup
+      summary: Run a manual backup now (synchronous)
+      description: >
+        Copies the live database with VACUUM INTO, verifies the copy with
+        PRAGMA integrity_check, and only then gives it a backup filename.
+        A failed backup never leaves a file on disk.
+      tags: [admin]
+      responses:
+        "201":
+          description: Backup created and verified.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupEntry"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: A backup is already in progress (code BACKUP_IN_PROGRESS).
+        "500":
+          description: Backup failed (code BACKUP_FAILED); no file was left behind.
+
+  /admin/backup/history:
+    get:
+      operationId: listBackups
+      summary: List backups in the backup directory, newest first
+      description: >
+        The filesystem is the source of truth — a directory scan filtered to
+        the backup filename pattern. Files deleted out-of-band disappear;
+        foreign files in the directory are never listed.
+      tags: [admin]
+      responses:
+        "200":
+          description: Backup entries, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [backups]
+                properties:
+                  backups:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/BackupEntry"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/backup/{filename}:
+    delete:
+      operationId: deleteBackup
+      summary: Delete one backup by filename
+      description: >
+        The filename must exactly match the backup filename pattern — the
+        pattern check is the path-traversal guard, and it also makes foreign
+        files in the directory undeletable through the API.
+      tags: [admin]
+      parameters:
+        - name: filename
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Backup deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /teams/{teamId}/status-templates:
     get:

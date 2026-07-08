@@ -2,6 +2,30 @@
 
 ---
 
+## 2026-07-08 — Phase 16.1: Backup server — engine, manager, manual backup + status/history API
+
+**Goal:** The core of Backup & Restore per [the plan](plans/phase-16-backup.md) §16.1: a verified-at-creation SQLite backup subsystem (`VACUUM INTO` hot copy + `PRAGMA integrity_check` on the copy) with the four non-schedule admin endpoints. Design thesis: *a backup you haven't verified and can't find is not a backup* — every file that looks like a backup passed verification, and the directory itself is the history record (no DB table).
+
+**Backend (`packages/api`):**
+- `internal/backup/` (new package):
+  - `backup.go` — `Engine` interface (`Backup`/`Verify`, the seam for future dump-based engines) + `sqliteEngine`: `VACUUM INTO ?` over the existing `*sqlx.DB` (consistent snapshot under WAL, no C-level backup API needed on the pure-Go driver; produces a compacted, standalone, WAL-free file), then `PRAGMA integrity_check` run against the *copy* via its own connection.
+  - `filename.go` — `draba-<UTC compact>Z-<manual|scheduled>.db` format/parse round-trip; the strict regex doubles as the delete path-traversal guard (no separator can match) and the foreign-file filter for history/retention.
+  - `manager.go` — `Manager`: `RunNow` does temp-name (`draba-inprogress.tmp`, never pattern-matching, so interruption leaves no corpse) → verify → collision-safe rename (same-second backups bump the timestamp instead of overwriting — matters on Windows where `os.Rename` won't clobber) → keep-last-N retention sweep (pattern-matching files only; sweep failures logged, never fail the backup). One-at-a-time via `mutex.TryLock` → `ErrBackupInProgress`; `running` atomic for status. `History()` = directory scan newest-first (missing dir = empty, not error; returns `[]Entry{}` never nil — the 15.1 JSON-`null` lesson). `Delete()` pattern-checks before resolving any path. `Status()` = DB file stats + WAL size + dir writability probe + last backup + health (`ok` <24h / `stale` 1–7d / `critical` >7d or none). `EnsureDir` = MkdirAll + write-probe. Injected `now` clock for tests. Any step failing removes the partial file.
+- `internal/api/backup_handler.go` (new) — `GET /admin/backup/status` (response includes `schedule: null` until 16.2 so the shape is stable), `POST /admin/backup` (synchronous; `201` + entry / `409 BACKUP_IN_PROGRESS` / `500 BACKUP_FAILED` with the reason and no leftover file), `GET /admin/backup/history` (`{backups: []}`), `DELETE /admin/backup/{filename}` (`404` for pattern mismatch and missing file alike, `204` on delete). All behind `requireSuperadmin`, same guard as `/admin/smtp`.
+- `internal/api/server.go` — `WithBackup(*backup.Manager)` (same optional-wiring shape as `WithUI`/`WithOIDC`); the `/admin/backup*` routes register only when wired. No mux conflicts (distinct literal segments/methods).
+- `cmd/draba/main.go` — `DRABA_BACKUP_DIR` env (default `/data/backups` — the already-mounted data volume), `backup.EnsureDir` at boot: an unwritable dir is a loud `slog.Warn`, **not fatal** (status reports `writable:false`; a misconfigured volume never blocks the app). `packages/api/CLAUDE.md` env block updated.
+- **Not in 16.1 (per plan):** scheduler, schedule GET/PUT, `instance_settings` persistence, bus events + SMTP failure consumer — all 16.2. Web UI + OPERATIONS.md runbook — 16.3.
+
+**API contract:** `openapi.yaml` gained `BackupEntry`, `BackupStatus`, and `BackupSchedule` schemas (the schedule schema is defined now so 16.2 only adds paths) + the four paths; `packages/shared/src/index.ts` regenerated.
+
+**Tests:** `internal/backup/manager_test.go` — vacuum under concurrent writes against a real WAL-mode file DB (copy passes integrity check, contains ≥ the seeded rows), verify-failure and backup-failure both leave an empty directory, filename round-trip + 14-case foreign/traversal rejection table, retention sweep (keep-2, foreign file untouched), same-second collision bump, concurrency guard with a blocking engine (`ErrBackupInProgress` + `Running()`), delete guards, missing-dir history is empty-not-nil, full status shape fresh + after backup, health threshold boundary table (24h/7d edges). `internal/api/backup_handler_test.go` — superadmin gating on all four routes (member → 403), manual run end-to-end over HTTP (file on disk, history, status flips critical→ok, delete → 204 then 404), foreign/traversal delete rejection with the foreign file surviving, `409` + `running:true` while a blocking backup holds the lock, engine failure → `500 BACKUP_FAILED` with an empty dir.
+
+**Checks:** `golangci-lint run` 0 issues; `go test ./...` all pass; `pnpm --filter web lint` clean; `pnpm --filter web build` clean.
+
+Next: 16.2 (scheduler with injected clock, schedule endpoints + `instance_settings` persistence, default-on daily 02:00 / keep-14, bus events + SMTP failure notification).
+
+---
+
 ## 2026-07-06 — /test-phase 15.2
 - Subagents run: static-check, unit-test (Go + Vitest), schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 7 pass, 1 fail → fixed same session (web-e2e: dev-only — `vite.config.ts` proxy had no `/import` entry, so `GET /import/template.csv|.xlsx` hit Vite's SPA fallback and downloaded HTML named `.csv`; prod embedded build unaffected. Added the one-line proxy entry and re-verified live: unauthenticated → API 401 JSON, authenticated → 200 `text/csv` with the correct template header row. All other web-e2e assertions passed live against the dev server → test Docker API, including the full wizard flow, commit + immediate board update, and zero console errors — the stale container's JSON-`null` issue arrays were absorbed by the client guard as designed.)

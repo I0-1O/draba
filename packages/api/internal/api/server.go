@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/backup"
 	"github.com/I0-1O/draba/packages/api/internal/db"
 	"github.com/I0-1O/draba/packages/api/internal/events"
 	"github.com/I0-1O/draba/packages/api/internal/mailer"
@@ -68,6 +69,10 @@ type Server struct {
 	// oidcAutoCreateUsers controls whether an unknown external identity is
 	// auto-provisioned a local account on first SSO login.
 	oidcAutoCreateUsers bool
+	// backup is non-nil only when the backup subsystem is wired (always in
+	// production; opt-in for tests). When nil the /admin/backup* routes are
+	// not registered. Set via WithBackup.
+	backup *backup.Manager
 }
 
 // NewServer constructs a Server with its required dependencies. It does not
@@ -141,6 +146,13 @@ func (s *Server) WithOIDC(svc *auth.OIDCService, autoCreate bool) *Server {
 // local account on first SSO login.
 func (s *Server) oidcAutoCreate() bool { return s.oidcAutoCreateUsers }
 
+// WithBackup enables the backup admin endpoints backed by m. Call before
+// Routes; when never called, the /admin/backup* routes do not exist.
+func (s *Server) WithBackup(m *backup.Manager) *Server {
+	s.backup = m
+	return s
+}
+
 // Routes returns the fully-wired HTTP handler for the API, including all
 // core routes plus any routes added by registered tier modules.
 func (s *Server) Routes() http.Handler {
@@ -173,6 +185,15 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
 	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
 	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
+
+	// Backup admin routes (Phase 16.1). Registered only when the backup
+	// manager is wired so tests without a backup dir skip the surface.
+	if s.backup != nil {
+		mux.HandleFunc("GET /admin/backup/status", chain(s.handleGetBackupStatus, s.authMiddleware))
+		mux.HandleFunc("POST /admin/backup", chain(s.handlePostBackup, s.authMiddleware))
+		mux.HandleFunc("GET /admin/backup/history", chain(s.handleGetBackupHistory, s.authMiddleware))
+		mux.HandleFunc("DELETE /admin/backup/{filename}", chain(s.handleDeleteBackup, s.authMiddleware))
+	}
 
 	// Public — no auth required; used by the login page and shared views.
 	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)

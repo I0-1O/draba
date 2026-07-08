@@ -1661,7 +1661,7 @@ Get data *into* draba from a spreadsheet — CSV / Excel import with a mandatory
 ---
 
 ### Phase 16 — Backup & Restore
-**Status:** 🟢 Planned (scope settled 2026-07-08) | **Effort:** M (2.5–3 days across three pausable sub-phases) | **Plan:** [docs/plans/phase-16-backup.md](plans/phase-16-backup.md)
+**Status:** 🔄 In Progress (16.1 built 2026-07-08, all automated checks pass; 16.2 scheduler + 16.3 web/ops next) | **Effort:** M (2.5–3 days across three pausable sub-phases) | **Plan:** [docs/plans/phase-16-backup.md](plans/phase-16-backup.md)
 
 Admin tools for database backup visibility, manual backups, and scheduled backup configuration. Self-hosted deployments need a way to know their data is safe without SSH-ing into the container. **Pulled ahead of the remaining phases** because once real teams start putting real data in (via [import](#phase-15--import--tabular) and [shared](#phase-13--shares--multi-share-views-with-passwords) workflows), data safety stops being optional.
 
