@@ -139,6 +139,7 @@ packages/
         api_types.gen.go
         auth_handler.go
         authz.go
+        backup_handler.go
         export_handler.go
         helpers.go
         import_handler.go
@@ -164,6 +165,10 @@ packages/
         jwt.go
         oidc.go
         password.go
+      backup/
+        backup.go
+        filename.go
+        manager.go
       buildinfo/
         buildinfo.go
       db/
@@ -18149,58 +18154,6 @@ time = false
 
 [misc]
 clean_on_exit = true
-````
-
-## File: packages/api/CLAUDE.md
-````markdown
-# packages/api
-
-This is the draba API server. Go, REST + WebSocket, with a built-in CalDAV server.
-
-## Entry Points
-- `cmd/draba/main.go` — wires dependencies, starts HTTP server
-- `migrations/` — SQL migration files, run automatically on startup
-
-## Key Internal Packages
-- `internal/api/` — HTTP handlers and routing (thin — no business logic)
-- `internal/auth/` — JWT, invite tokens, password hashing
-- `internal/caldav/` — built-in CalDAV server implementation
-- `internal/calendar/` — Google Calendar OAuth + sync; CalDAV outbound sync
-- `internal/db/` — repository layer; adapters for SQLite, MySQL, Postgres
-- `internal/events/` — internal event bus (pub/sub for state changes)
-- `internal/models/` — domain types shared across packages
-- `internal/ws/` — WebSocket hub and broadcaster
-
-## Run
-```bash
-go run ./cmd/draba
-```
-
-## Test
-```bash
-go test ./...
-```
-
-## Lint
-```bash
-golangci-lint run
-```
-
-## Environment Variables
-```
-DRABA_DB_DRIVER=sqlite          # sqlite | mysql | postgres
-DRABA_DB_DSN=./draba.db         # file path for SQLite, connection string for others
-DRABA_JWT_SECRET=               # required — random secret for signing JWTs
-DRABA_PORT=8080                 # default 8080
-DRABA_LOG_LEVEL=info            # debug | info | warn | error (default info; set debug in docker-compose for dev)
-DRABA_GOOGLE_CLIENT_ID=         # required for Google Calendar sync
-DRABA_GOOGLE_CLIENT_SECRET=     # required for Google Calendar sync
-DRABA_BASE_URL=                 # public URL of the server (used for OAuth callbacks, CalDAV URLs)
-```
-
-## Conventions
-See `docs/CONVENTIONS.md` for Go patterns, error handling, and testing conventions.
-See `skills/go-comments.md` for comment conventions (package headers, exported doc comments, when to use inline comments). Apply these whenever writing or editing Go code.
 ````
 
 ## File: packages/api/Dockerfile
@@ -44150,6 +44103,98 @@ func isValidPassword(p string) bool {
 }
 ````
 
+## File: packages/api/internal/api/backup_handler.go
+````go
+package api
+
+import (
+	"errors"
+	"net/http"
+
+	"github.com/I0-1O/draba/packages/api/internal/backup"
+)
+
+// handleGetBackupStatus handles GET /admin/backup/status. Reports the live
+// database file, the backup directory, the last backup, and the derived
+// health rating. Superadmin-only.
+func (s *Server) handleGetBackupStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	st, err := s.backup.Status()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to read backup status")
+		return
+	}
+
+	// schedule is always null until Phase 16.2 lands the scheduler; the key
+	// is present so the response shape is stable for the web client.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"database":   st.Database,
+		"backupDir":  st.BackupDir,
+		"lastBackup": st.LastBackup,
+		"health":     st.Health,
+		"running":    st.Running,
+		"schedule":   nil,
+	})
+}
+
+// handlePostBackup handles POST /admin/backup. Runs a manual backup
+// synchronously and returns the resulting history entry. Superadmin-only.
+func (s *Server) handlePostBackup(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	entry, err := s.backup.RunNow(r.Context(), backup.TriggerManual)
+	if errors.Is(err, backup.ErrBackupInProgress) {
+		writeError(w, http.StatusConflict, "BACKUP_IN_PROGRESS", "a backup is already in progress")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "BACKUP_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, entry)
+}
+
+// handleGetBackupHistory handles GET /admin/backup/history. Lists the
+// backups in the backup directory, newest first. Superadmin-only.
+func (s *Server) handleGetBackupHistory(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	entries, err := s.backup.History()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list backups")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"backups": entries})
+}
+
+// handleDeleteBackup handles DELETE /admin/backup/{filename}. The manager
+// only deletes filenames that exactly match the backup pattern, which is
+// the path-traversal guard. Superadmin-only.
+func (s *Server) handleDeleteBackup(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	err := s.backup.Delete(r.PathValue("filename"))
+	if errors.Is(err, backup.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "backup not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete backup")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+````
+
 ## File: packages/api/internal/api/import_handler.go
 ````go
 package api
@@ -45371,6 +45416,455 @@ func HashPassword(password string) (string, error) {
 // which case occurred.
 func CheckPassword(hash, password string) error {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+}
+````
+
+## File: packages/api/internal/backup/backup.go
+````go
+// Package backup implements verified SQLite database backups. Each backup
+// is a hot copy taken with VACUUM INTO (consistent under WAL without
+// blocking writers), integrity-checked at creation, and stored as a
+// timestamped file in a well-known directory. The directory is the history
+// record: the filename encodes when the backup ran and what triggered it,
+// so no state about backups is kept inside the database being backed up.
+package backup
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/jmoiron/sqlx"
+)
+
+// Engine produces and verifies backup files for one database driver.
+// The only implementation today is the SQLite engine; the interface is the
+// seam for future dump-based engines (MySQL/Postgres) when those drivers
+// actually exist in the codebase.
+type Engine interface {
+	// Backup writes a standalone copy of the live database to destPath.
+	// destPath must not already exist.
+	Backup(ctx context.Context, destPath string) error
+	// Verify checks that the file at path is a sound database. A backup
+	// that fails Verify must never be kept.
+	Verify(ctx context.Context, path string) error
+}
+
+// NewSQLiteEngine returns an Engine that copies the live SQLite database
+// reached through db using VACUUM INTO and verifies copies with
+// PRAGMA integrity_check.
+func NewSQLiteEngine(db *sqlx.DB) Engine {
+	return &sqliteEngine{db: db}
+}
+
+type sqliteEngine struct {
+	db *sqlx.DB
+}
+
+// Backup takes a consistent snapshot without blocking concurrent writers:
+// under WAL, VACUUM INTO reads a stable snapshot and produces a compacted,
+// standalone, WAL-free file.
+func (e *sqliteEngine) Backup(ctx context.Context, destPath string) error {
+	if _, err := e.db.ExecContext(ctx, "VACUUM INTO ?", destPath); err != nil {
+		return fmt.Errorf("vacuum into %s: %w", destPath, err)
+	}
+	return nil
+}
+
+// Verify opens the copy with its own connection and runs
+// PRAGMA integrity_check against it — the check must run on the copy, not
+// the live database, because the copy is what a restore would use.
+func (e *sqliteEngine) Verify(ctx context.Context, path string) error {
+	conn, err := sqlx.Open("sqlite", path)
+	if err != nil {
+		return fmt.Errorf("opening backup copy: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	var result string
+	if err := conn.GetContext(ctx, &result, "PRAGMA integrity_check"); err != nil {
+		return fmt.Errorf("integrity check: %w", err)
+	}
+	if result != "ok" {
+		return fmt.Errorf("integrity check failed: %s", result)
+	}
+	return nil
+}
+````
+
+## File: packages/api/internal/backup/filename.go
+````go
+package backup
+
+import (
+	"fmt"
+	"regexp"
+	"time"
+)
+
+// Trigger records what initiated a backup; it is embedded in the filename.
+type Trigger string
+
+// The two ways a backup can be initiated.
+const (
+	TriggerManual    Trigger = "manual"
+	TriggerScheduled Trigger = "scheduled"
+)
+
+// filenameTimeLayout is the UTC timestamp embedded in backup filenames.
+// Second resolution, no separators beyond T/Z, so names sort chronologically.
+const filenameTimeLayout = "20060102T150405Z"
+
+// filenamePattern matches exactly the files this package creates. It is
+// deliberately strict: it doubles as the path-traversal guard on delete
+// (no separator can match) and the filter that keeps foreign files an admin
+// dropped into the directory out of history and retention.
+var filenamePattern = regexp.MustCompile(`^draba-(\d{8}T\d{6}Z)-(manual|scheduled)\.db$`)
+
+// FormatFilename returns the backup filename for a backup taken at t with
+// the given trigger, e.g. "draba-20260708T020000Z-scheduled.db".
+func FormatFilename(t time.Time, trigger Trigger) string {
+	return fmt.Sprintf("draba-%s-%s.db", t.UTC().Format(filenameTimeLayout), trigger)
+}
+
+// ParseFilename reports whether name is a backup filename this package
+// created, and if so returns the embedded timestamp and trigger.
+func ParseFilename(name string) (t time.Time, trigger Trigger, ok bool) {
+	m := filenamePattern.FindStringSubmatch(name)
+	if m == nil {
+		return time.Time{}, "", false
+	}
+	ts, err := time.Parse(filenameTimeLayout, m[1])
+	if err != nil {
+		return time.Time{}, "", false
+	}
+	return ts, Trigger(m[2]), true
+}
+````
+
+## File: packages/api/internal/backup/manager.go
+````go
+package backup
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"sort"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// Sentinel errors surfaced to the HTTP layer.
+var (
+	// ErrBackupInProgress is returned when a backup is requested while one
+	// is already running. One backup at a time, always.
+	ErrBackupInProgress = errors.New("a backup is already in progress")
+	// ErrNotFound is returned by Delete when the filename does not match
+	// the backup pattern or no such backup exists.
+	ErrNotFound = errors.New("backup not found")
+)
+
+// tempName is the in-progress copy's filename. It never matches
+// filenamePattern, so an interrupted backup is invisible to history and
+// retention, and is simply overwritten by the next run.
+const tempName = "draba-inprogress.tmp"
+
+// DefaultKeepLast is the retention count applied until a schedule config
+// says otherwise.
+const DefaultKeepLast = 14
+
+// Entry describes one backup file, as listed in history and returned from
+// a manual run. CreatedAt is the timestamp embedded in the filename — the
+// filename is the record.
+type Entry struct {
+	Filename  string    `json:"filename"`
+	SizeBytes int64     `json:"sizeBytes"`
+	CreatedAt time.Time `json:"createdAt"`
+	Trigger   Trigger   `json:"trigger"`
+}
+
+// DatabaseInfo reports facts about the live database file for the status
+// endpoint.
+type DatabaseInfo struct {
+	Driver       string     `json:"driver"`
+	Path         string     `json:"path"`
+	SizeBytes    int64      `json:"sizeBytes"`
+	WalSizeBytes int64      `json:"walSizeBytes"`
+	ModifiedAt   *time.Time `json:"modifiedAt"`
+}
+
+// DirInfo reports where backups land and whether that directory is
+// currently writable.
+type DirInfo struct {
+	Path     string `json:"path"`
+	Writable bool   `json:"writable"`
+}
+
+// Status is the aggregate state the admin status endpoint reports.
+type Status struct {
+	Database   DatabaseInfo `json:"database"`
+	BackupDir  DirInfo      `json:"backupDir"`
+	LastBackup *Entry       `json:"lastBackup"`
+	Health     string       `json:"health"`
+	Running    bool         `json:"running"`
+}
+
+// Health thresholds are fixed in v1: a backup younger than 24h is healthy,
+// older than 7 days (or absent) is critical, anything between is stale.
+const (
+	HealthOK       = "ok"
+	HealthStale    = "stale"
+	HealthCritical = "critical"
+)
+
+// HealthFor classifies backup freshness. last is the most recent backup's
+// timestamp, nil when no backup exists.
+func HealthFor(last *time.Time, now time.Time) string {
+	switch {
+	case last == nil:
+		return HealthCritical
+	case now.Sub(*last) < 24*time.Hour:
+		return HealthOK
+	case now.Sub(*last) <= 7*24*time.Hour:
+		return HealthStale
+	default:
+		return HealthCritical
+	}
+}
+
+// Manager owns the backup directory: it names, runs, verifies, lists,
+// deletes, and prunes backups, and enforces that only one backup runs at
+// a time.
+type Manager struct {
+	engine   Engine
+	dir      string
+	dbPath   string
+	keepLast atomic.Int32
+	running  atomic.Bool
+	// mu serializes runs; TryLock (not Lock) so a second caller gets an
+	// immediate ErrBackupInProgress instead of queueing.
+	mu sync.Mutex
+	// now is the clock, injectable in tests.
+	now func() time.Time
+}
+
+// NewManager returns a Manager writing backups of the database file at
+// dbPath into dir, using engine to produce and verify copies. Retention
+// starts at DefaultKeepLast.
+func NewManager(engine Engine, dir, dbPath string) *Manager {
+	m := &Manager{engine: engine, dir: dir, dbPath: dbPath, now: time.Now}
+	m.keepLast.Store(DefaultKeepLast)
+	return m
+}
+
+// SetKeepLast updates the retention count enforced after each successful
+// backup. Values below 1 are ignored.
+func (m *Manager) SetKeepLast(n int) {
+	if n >= 1 {
+		m.keepLast.Store(int32(n)) //nolint:gosec // bounded by schedule validation (1–365)
+	}
+}
+
+// Running reports whether a backup is currently executing.
+func (m *Manager) Running() bool { return m.running.Load() }
+
+// RunNow performs one backup synchronously: copy to a temp name, verify
+// the copy, rename to the final pattern-matching name, then sweep
+// retention. A failure at any step removes the partial file — a file that
+// looks like a backup always is one. Returns ErrBackupInProgress when
+// another backup is running.
+func (m *Manager) RunNow(ctx context.Context, trigger Trigger) (*Entry, error) {
+	if !m.mu.TryLock() {
+		return nil, ErrBackupInProgress
+	}
+	defer m.mu.Unlock()
+	m.running.Store(true)
+	defer m.running.Store(false)
+
+	if err := EnsureDir(m.dir); err != nil {
+		return nil, fmt.Errorf("backup dir: %w", err)
+	}
+
+	tmp := filepath.Join(m.dir, tempName)
+	// A stale temp file from a killed process would make VACUUM INTO fail.
+	_ = os.Remove(tmp)
+
+	if err := m.engine.Backup(ctx, tmp); err != nil {
+		_ = os.Remove(tmp)
+		return nil, fmt.Errorf("creating backup: %w", err)
+	}
+	if err := m.engine.Verify(ctx, tmp); err != nil {
+		_ = os.Remove(tmp)
+		return nil, fmt.Errorf("verifying backup: %w", err)
+	}
+
+	info, err := os.Stat(tmp)
+	if err != nil {
+		_ = os.Remove(tmp)
+		return nil, fmt.Errorf("inspecting backup: %w", err)
+	}
+
+	// Bump the timestamp until the name is free: two backups within the
+	// same second must not overwrite each other.
+	ts := m.now().UTC().Truncate(time.Second)
+	var final string
+	for {
+		final = filepath.Join(m.dir, FormatFilename(ts, trigger))
+		if _, err := os.Stat(final); errors.Is(err, fs.ErrNotExist) {
+			break
+		}
+		ts = ts.Add(time.Second)
+	}
+	if err := os.Rename(tmp, final); err != nil {
+		_ = os.Remove(tmp)
+		return nil, fmt.Errorf("finalizing backup: %w", err)
+	}
+
+	m.sweepRetention()
+
+	return &Entry{
+		Filename:  filepath.Base(final),
+		SizeBytes: info.Size(),
+		CreatedAt: ts,
+		Trigger:   trigger,
+	}, nil
+}
+
+// sweepRetention deletes the oldest pattern-matching backups beyond the
+// keep-last-N count. Sweep failures are logged, never propagated — the
+// backup that just succeeded is not undone by a cleanup problem.
+func (m *Manager) sweepRetention() {
+	keep := int(m.keepLast.Load())
+	entries, err := m.History()
+	if err != nil {
+		slog.Warn("backup: retention sweep skipped", "err", err)
+		return
+	}
+	if len(entries) <= keep {
+		return
+	}
+	for _, e := range entries[keep:] {
+		if err := os.Remove(filepath.Join(m.dir, e.Filename)); err != nil {
+			slog.Warn("backup: retention delete failed", "file", e.Filename, "err", err)
+		}
+	}
+}
+
+// History lists the backups in the directory, newest first. The filesystem
+// is the source of truth: files deleted out-of-band disappear, and files
+// that don't match the backup pattern are never listed. A missing directory
+// is an empty history, not an error.
+func (m *Manager) History() ([]Entry, error) {
+	dirents, err := os.ReadDir(m.dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return []Entry{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading backup dir: %w", err)
+	}
+
+	entries := []Entry{}
+	for _, d := range dirents {
+		if d.IsDir() {
+			continue
+		}
+		ts, trigger, ok := ParseFilename(d.Name())
+		if !ok {
+			continue
+		}
+		var size int64
+		if info, err := d.Info(); err == nil {
+			size = info.Size()
+		}
+		entries = append(entries, Entry{
+			Filename:  d.Name(),
+			SizeBytes: size,
+			CreatedAt: ts,
+			Trigger:   trigger,
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if !entries[i].CreatedAt.Equal(entries[j].CreatedAt) {
+			return entries[i].CreatedAt.After(entries[j].CreatedAt)
+		}
+		return entries[i].Filename > entries[j].Filename
+	})
+	return entries, nil
+}
+
+// Delete removes one backup by filename. The strict pattern match is the
+// path-traversal guard: nothing containing a separator (or any name this
+// package didn't create) can ever resolve to a deletable path. Returns
+// ErrNotFound for pattern mismatches and missing files alike.
+func (m *Manager) Delete(filename string) error {
+	if _, _, ok := ParseFilename(filename); !ok {
+		return ErrNotFound
+	}
+	err := os.Remove(filepath.Join(m.dir, filename))
+	if errors.Is(err, fs.ErrNotExist) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("deleting backup: %w", err)
+	}
+	return nil
+}
+
+// Status reports the live database file's stats, the backup directory's
+// writability, the most recent backup, and the derived health rating.
+func (m *Manager) Status() (*Status, error) {
+	st := &Status{
+		Database:  DatabaseInfo{Driver: "sqlite", Path: m.dbPath},
+		BackupDir: DirInfo{Path: m.dir, Writable: EnsureDir(m.dir) == nil},
+		Running:   m.Running(),
+	}
+
+	// Stat failures (e.g. an in-memory DSN in tests) leave sizes at zero
+	// rather than failing the whole status call.
+	if info, err := os.Stat(m.dbPath); err == nil {
+		st.Database.SizeBytes = info.Size()
+		mod := info.ModTime().UTC()
+		st.Database.ModifiedAt = &mod
+	}
+	if info, err := os.Stat(m.dbPath + "-wal"); err == nil {
+		st.Database.WalSizeBytes = info.Size()
+	}
+
+	history, err := m.History()
+	if err != nil {
+		return nil, err
+	}
+	var last *time.Time
+	if len(history) > 0 {
+		st.LastBackup = &history[0]
+		last = &history[0].CreatedAt
+	}
+	st.Health = HealthFor(last, m.now().UTC())
+	return st, nil
+}
+
+// EnsureDir creates dir if needed and probes that it is writable by
+// creating and removing a marker file. Called at startup (so a broken
+// volume mount is loud in the logs from boot) and before every run.
+func EnsureDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("creating %s: %w", dir, err)
+	}
+	probe := filepath.Join(dir, ".draba-writecheck")
+	f, err := os.Create(probe)
+	if err != nil {
+		return fmt.Errorf("%s is not writable: %w", dir, err)
+	}
+	_ = f.Close()
+	if err := os.Remove(probe); err != nil {
+		return fmt.Errorf("cleaning up write probe in %s: %w", dir, err)
+	}
+	return nil
 }
 ````
 
@@ -48980,6 +49474,59 @@ func (c *client) writePump(h *Hub) {
 		}
 	}
 }
+````
+
+## File: packages/api/CLAUDE.md
+````markdown
+# packages/api
+
+This is the draba API server. Go, REST + WebSocket, with a built-in CalDAV server.
+
+## Entry Points
+- `cmd/draba/main.go` — wires dependencies, starts HTTP server
+- `migrations/` — SQL migration files, run automatically on startup
+
+## Key Internal Packages
+- `internal/api/` — HTTP handlers and routing (thin — no business logic)
+- `internal/auth/` — JWT, invite tokens, password hashing
+- `internal/caldav/` — built-in CalDAV server implementation
+- `internal/calendar/` — Google Calendar OAuth + sync; CalDAV outbound sync
+- `internal/db/` — repository layer; adapters for SQLite, MySQL, Postgres
+- `internal/events/` — internal event bus (pub/sub for state changes)
+- `internal/models/` — domain types shared across packages
+- `internal/ws/` — WebSocket hub and broadcaster
+
+## Run
+```bash
+go run ./cmd/draba
+```
+
+## Test
+```bash
+go test ./...
+```
+
+## Lint
+```bash
+golangci-lint run
+```
+
+## Environment Variables
+```
+DRABA_DB_DRIVER=sqlite          # sqlite | mysql | postgres
+DRABA_DB_DSN=./draba.db         # file path for SQLite, connection string for others
+DRABA_BACKUP_DIR=/data/backups  # where verified backups land; default is on the data volume
+DRABA_JWT_SECRET=               # required — random secret for signing JWTs
+DRABA_PORT=8080                 # default 8080
+DRABA_LOG_LEVEL=info            # debug | info | warn | error (default info; set debug in docker-compose for dev)
+DRABA_GOOGLE_CLIENT_ID=         # required for Google Calendar sync
+DRABA_GOOGLE_CLIENT_SECRET=     # required for Google Calendar sync
+DRABA_BASE_URL=                 # public URL of the server (used for OAuth callbacks, CalDAV URLs)
+```
+
+## Conventions
+See `docs/CONVENTIONS.md` for Go patterns, error handling, and testing conventions.
+See `skills/go-comments.md` for comment conventions (package headers, exported doc comments, when to use inline comments). Apply these whenever writing or editing Go code.
 ````
 
 ## File: packages/web/src/components/calendar/CalendarGrid.tsx
@@ -55933,218 +56480,6 @@ Messy-file corpus e2e (European CSV, Excel dates, mixed formats, dupes, unknown 
 - `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean; `pnpm --filter web test` passes
 ````
 
-## File: packages/api/cmd/draba/main.go
-````go
-// Command draba is the API server entry point. It wires repositories,
-// the auth token service, and tier configuration into the HTTP server,
-// then listens for requests until the process is killed.
-package main
-
-import (
-	"context"
-	"fmt"
-	"io/fs"
-	"log/slog"
-	"net/http"
-	"os"
-	"strings"
-
-	"github.com/I0-1O/draba/packages/api/internal/api"
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/buildinfo"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-	sampledata "github.com/I0-1O/draba/packages/api/sample_data"
-	drabui "github.com/I0-1O/draba/packages/api/ui"
-)
-
-const banner = "\n" +
-	"      _           _\n" +
-	"     | |         | |\n" +
-	"   __| |_ __ __ _| |__   __ _\n" +
-	"  / _` | '__/ _` | '_ \\ / _` |\n" +
-	" | (_| | | | (_| | |_) | (_| |\n" +
-	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
-	"\n" +
-	"  see who's doing what, when.\n\n"
-
-func main() {
-	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
-		runResetPassword(os.Args[2:])
-		return
-	}
-
-	setupLogger()
-	fmt.Print(banner)
-	slog.Info("build", "commit", buildinfo.Short(), "built", buildinfo.Built)
-
-	port := getenv("DRABA_PORT", "8080")
-	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
-	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
-	if jwtSecret == "" {
-		slog.Error("DRABA_JWT_SECRET must be set")
-		os.Exit(1)
-	}
-
-	t, err := tier.Load()
-	if err != nil {
-		slog.Error("tier load failed", "err", err)
-		os.Exit(1)
-	}
-	l := t.Limits()
-	if l.MaxUsers == 0 {
-		slog.Info("tier", "tier", t)
-	} else {
-		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
-	}
-
-	database, err := db.Open(dsn)
-	if err != nil {
-		slog.Error("db: open failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: opened", "dsn", dsn)
-
-	if err := db.Migrate(database); err != nil {
-		slog.Error("db: migrate failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: migrations applied")
-
-	// Optional pre-launch convenience: seed the canonical sample dataset into an
-	// empty database so a freshly-wiped dev/test instance comes up populated.
-	// Gated by DRABA_SEED_SAMPLE_DATA and a no-op once the DB has any users — it
-	// must stay unset in any real deployment.
-	if os.Getenv("DRABA_SEED_SAMPLE_DATA") == "1" {
-		sql, err := sampledata.SQL()
-		if err != nil {
-			slog.Error("db: reading embedded sample data failed", "err", err)
-			os.Exit(1)
-		}
-		seeded, err := db.SeedSampleDataIfEmpty(database, sql)
-		if err != nil {
-			slog.Error("db: sample-data seed failed", "err", err)
-			os.Exit(1)
-		}
-		if seeded {
-			slog.Info("db: sample data seeded (database was empty)")
-		} else {
-			slog.Info("db: sample-data seed skipped (database already populated)")
-		}
-	}
-
-	users := db.NewUserRepo(database)
-	invites := db.NewInviteRepo(database)
-	teams := db.NewTeamRepo(database)
-	activityRepo := db.NewActivityRepo(database)
-	timelineRepo := db.NewTimelineRepo(database)
-	savedFilterRepo := db.NewSavedFilterRepo(database)
-	preferenceRepo := db.NewUserPreferenceRepo(database)
-	apiTokenRepo := db.NewAPITokenRepo(database)
-	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
-	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
-	statusRepo := db.NewStatusRepo(database)
-	tagRepo := db.NewTagRepo(database)
-	shareRepo := db.NewShareRepo(database)
-	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
-	tokens := auth.NewTokenService(jwtSecret)
-
-	bus := events.NewBus()
-	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
-		_, err := teams.GetMember(teamID, userID)
-		return err
-	})
-	go hub.Run()
-	slog.Info("ws: hub running")
-
-	if mods := tier.Registered(); len(mods) > 0 {
-		slog.Info("modules loaded", "count", len(mods))
-	}
-
-	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagRepo, shareRepo, m, tokens, t, bus, hub)
-
-	// Wire up the embedded React SPA when a production build is present.
-	// In dev the static/ directory only has .gitkeep so this is a no-op.
-	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
-		if _, err := sub.Open("index.html"); err == nil {
-			srv.WithUI(sub)
-			slog.Info("ui: serving embedded SPA")
-		}
-	}
-
-	// Optional SSO. OIDC is disabled unless DRABA_OIDC_ISSUER is set. When it
-	// is, discovery runs against the issuer at startup; a failure here is fatal
-	// so a broken SSO setup is caught at boot rather than presenting users a
-	// dead login button. The client secret is read once and never leaves the
-	// process.
-	oidcSvc, err := auth.NewOIDCService(context.Background(), &auth.OIDCConfig{
-		Issuer:       os.Getenv("DRABA_OIDC_ISSUER"),
-		ClientID:     os.Getenv("DRABA_OIDC_CLIENT_ID"),
-		ClientSecret: os.Getenv("DRABA_OIDC_CLIENT_SECRET"),
-		RedirectURL:  oidcRedirectURL(),
-	})
-	if err != nil {
-		slog.Error("oidc: configuration failed", "err", err)
-		os.Exit(1)
-	}
-	if oidcSvc != nil {
-		// Auto-provisioning defaults ON (first SSO login creates the account),
-		// matching the password-register bootstrap. Set DRABA_OIDC_AUTO_CREATE=0
-		// to require accounts be pre-created before SSO login is allowed.
-		autoCreate := os.Getenv("DRABA_OIDC_AUTO_CREATE") != "0"
-		srv.WithOIDC(oidcSvc, autoCreate)
-		slog.Info("oidc: SSO enabled", "issuer", os.Getenv("DRABA_OIDC_ISSUER"), "autoCreate", autoCreate)
-	}
-
-	slog.Info("listening", "port", port)
-	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
-		slog.Error("server error", "err", err)
-		os.Exit(1)
-	}
-}
-
-// oidcRedirectURL returns the OIDC callback URL the IdP must redirect back to.
-// It honours an explicit DRABA_OIDC_REDIRECT_URL override, otherwise derives it
-// from DRABA_BASE_URL so a single base-URL setting covers both the app and the
-// SSO callback.
-func oidcRedirectURL() string {
-	if v := os.Getenv("DRABA_OIDC_REDIRECT_URL"); v != "" {
-		return v
-	}
-	if os.Getenv("DRABA_OIDC_ISSUER") == "" {
-		return "" // SSO disabled; no redirect needed.
-	}
-	return strings.TrimRight(getenv("DRABA_BASE_URL", "http://localhost:8080"), "/") + "/auth/oidc/callback"
-}
-
-// setupLogger initialises the global slog logger. Level is controlled by
-// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
-// All output goes to stdout so Docker captures it in `docker logs`.
-func setupLogger() {
-	level := slog.LevelInfo
-	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
-}
-
-// getenv returns the env var value or fallback when unset/empty.
-func getenv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-````
-
 ## File: packages/api/internal/auth/oidc.go
 ````go
 // OIDC / SSO support. This file is the ONLY place draba talks to an external
@@ -61618,6 +61953,230 @@ If bookmarkable/shareable print URLs are ever wanted, a real `/timelines/:id/pri
 - `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean.
 ````
 
+## File: packages/api/cmd/draba/main.go
+````go
+// Command draba is the API server entry point. It wires repositories,
+// the auth token service, and tier configuration into the HTTP server,
+// then listens for requests until the process is killed.
+package main
+
+import (
+	"context"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
+
+	"github.com/I0-1O/draba/packages/api/internal/api"
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/backup"
+	"github.com/I0-1O/draba/packages/api/internal/buildinfo"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+	sampledata "github.com/I0-1O/draba/packages/api/sample_data"
+	drabui "github.com/I0-1O/draba/packages/api/ui"
+)
+
+const banner = "\n" +
+	"      _           _\n" +
+	"     | |         | |\n" +
+	"   __| |_ __ __ _| |__   __ _\n" +
+	"  / _` | '__/ _` | '_ \\ / _` |\n" +
+	" | (_| | | | (_| | |_) | (_| |\n" +
+	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
+	"\n" +
+	"  see who's doing what, when.\n\n"
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
+		runResetPassword(os.Args[2:])
+		return
+	}
+
+	setupLogger()
+	fmt.Print(banner)
+	slog.Info("build", "commit", buildinfo.Short(), "built", buildinfo.Built)
+
+	port := getenv("DRABA_PORT", "8080")
+	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
+	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
+	if jwtSecret == "" {
+		slog.Error("DRABA_JWT_SECRET must be set")
+		os.Exit(1)
+	}
+
+	t, err := tier.Load()
+	if err != nil {
+		slog.Error("tier load failed", "err", err)
+		os.Exit(1)
+	}
+	l := t.Limits()
+	if l.MaxUsers == 0 {
+		slog.Info("tier", "tier", t)
+	} else {
+		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
+	}
+
+	database, err := db.Open(dsn)
+	if err != nil {
+		slog.Error("db: open failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: opened", "dsn", dsn)
+
+	if err := db.Migrate(database); err != nil {
+		slog.Error("db: migrate failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: migrations applied")
+
+	// Optional pre-launch convenience: seed the canonical sample dataset into an
+	// empty database so a freshly-wiped dev/test instance comes up populated.
+	// Gated by DRABA_SEED_SAMPLE_DATA and a no-op once the DB has any users — it
+	// must stay unset in any real deployment.
+	if os.Getenv("DRABA_SEED_SAMPLE_DATA") == "1" {
+		sql, err := sampledata.SQL()
+		if err != nil {
+			slog.Error("db: reading embedded sample data failed", "err", err)
+			os.Exit(1)
+		}
+		seeded, err := db.SeedSampleDataIfEmpty(database, sql)
+		if err != nil {
+			slog.Error("db: sample-data seed failed", "err", err)
+			os.Exit(1)
+		}
+		if seeded {
+			slog.Info("db: sample data seeded (database was empty)")
+		} else {
+			slog.Info("db: sample-data seed skipped (database already populated)")
+		}
+	}
+
+	users := db.NewUserRepo(database)
+	invites := db.NewInviteRepo(database)
+	teams := db.NewTeamRepo(database)
+	activityRepo := db.NewActivityRepo(database)
+	timelineRepo := db.NewTimelineRepo(database)
+	savedFilterRepo := db.NewSavedFilterRepo(database)
+	preferenceRepo := db.NewUserPreferenceRepo(database)
+	apiTokenRepo := db.NewAPITokenRepo(database)
+	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
+	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
+	statusRepo := db.NewStatusRepo(database)
+	tagRepo := db.NewTagRepo(database)
+	shareRepo := db.NewShareRepo(database)
+	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
+	tokens := auth.NewTokenService(jwtSecret)
+
+	bus := events.NewBus()
+	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
+		_, err := teams.GetMember(teamID, userID)
+		return err
+	})
+	go hub.Run()
+	slog.Info("ws: hub running")
+
+	if mods := tier.Registered(); len(mods) > 0 {
+		slog.Info("modules loaded", "count", len(mods))
+	}
+
+	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagRepo, shareRepo, m, tokens, t, bus, hub)
+
+	// Backup subsystem (Phase 16). An unwritable backup dir is loud at boot
+	// but not fatal — the status endpoint reports it and runs fail cleanly,
+	// so a misconfigured volume never blocks the app itself from serving.
+	backupDir := getenv("DRABA_BACKUP_DIR", "/data/backups")
+	if err := backup.EnsureDir(backupDir); err != nil {
+		slog.Warn("backup: directory not writable; backups will fail until fixed", "dir", backupDir, "err", err)
+	} else {
+		slog.Info("backup: directory ready", "dir", backupDir)
+	}
+	srv.WithBackup(backup.NewManager(backup.NewSQLiteEngine(database), backupDir, dsn))
+
+	// Wire up the embedded React SPA when a production build is present.
+	// In dev the static/ directory only has .gitkeep so this is a no-op.
+	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
+		if _, err := sub.Open("index.html"); err == nil {
+			srv.WithUI(sub)
+			slog.Info("ui: serving embedded SPA")
+		}
+	}
+
+	// Optional SSO. OIDC is disabled unless DRABA_OIDC_ISSUER is set. When it
+	// is, discovery runs against the issuer at startup; a failure here is fatal
+	// so a broken SSO setup is caught at boot rather than presenting users a
+	// dead login button. The client secret is read once and never leaves the
+	// process.
+	oidcSvc, err := auth.NewOIDCService(context.Background(), &auth.OIDCConfig{
+		Issuer:       os.Getenv("DRABA_OIDC_ISSUER"),
+		ClientID:     os.Getenv("DRABA_OIDC_CLIENT_ID"),
+		ClientSecret: os.Getenv("DRABA_OIDC_CLIENT_SECRET"),
+		RedirectURL:  oidcRedirectURL(),
+	})
+	if err != nil {
+		slog.Error("oidc: configuration failed", "err", err)
+		os.Exit(1)
+	}
+	if oidcSvc != nil {
+		// Auto-provisioning defaults ON (first SSO login creates the account),
+		// matching the password-register bootstrap. Set DRABA_OIDC_AUTO_CREATE=0
+		// to require accounts be pre-created before SSO login is allowed.
+		autoCreate := os.Getenv("DRABA_OIDC_AUTO_CREATE") != "0"
+		srv.WithOIDC(oidcSvc, autoCreate)
+		slog.Info("oidc: SSO enabled", "issuer", os.Getenv("DRABA_OIDC_ISSUER"), "autoCreate", autoCreate)
+	}
+
+	slog.Info("listening", "port", port)
+	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
+		slog.Error("server error", "err", err)
+		os.Exit(1)
+	}
+}
+
+// oidcRedirectURL returns the OIDC callback URL the IdP must redirect back to.
+// It honours an explicit DRABA_OIDC_REDIRECT_URL override, otherwise derives it
+// from DRABA_BASE_URL so a single base-URL setting covers both the app and the
+// SSO callback.
+func oidcRedirectURL() string {
+	if v := os.Getenv("DRABA_OIDC_REDIRECT_URL"); v != "" {
+		return v
+	}
+	if os.Getenv("DRABA_OIDC_ISSUER") == "" {
+		return "" // SSO disabled; no redirect needed.
+	}
+	return strings.TrimRight(getenv("DRABA_BASE_URL", "http://localhost:8080"), "/") + "/auth/oidc/callback"
+}
+
+// setupLogger initialises the global slog logger. Level is controlled by
+// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
+// All output goes to stdout so Docker captures it in `docker logs`.
+func setupLogger() {
+	level := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+}
+
+// getenv returns the env var value or fallback when unset/empty.
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+````
+
 ## File: packages/api/internal/api/export_handler.go
 ````go
 package api
@@ -64275,368 +64834,6 @@ export function buildCalendarHtml(
 }
 ````
 
-## File: packages/api/internal/api/server.go
-````go
-// Package api hosts the HTTP handlers, routing, and middleware for the
-// draba REST API. Handlers are intentionally thin: they decode requests,
-// delegate to repositories and services, and write responses. Business
-// logic belongs in the domain packages, not here.
-package api
-
-import (
-	"fmt"
-	"io/fs"
-	"net/http"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-)
-
-// TimelineStore is the persistence interface required by timeline handlers.
-// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
-type TimelineStore interface {
-	Create(t *models.Timeline) error
-	GetByID(id string) (*models.Timeline, error)
-	GetByShareToken(token string) (*models.Timeline, error)
-	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
-	HasAccess(timelineID, teamMemberID string) (bool, error)
-	GrantAccess(timelineID, teamMemberID, role string) error
-	RevokeAccess(timelineID, teamMemberID string) error
-	GetAccessRole(timelineID, teamMemberID string) (string, error)
-	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
-	SetArchived(id string, at *time.Time) error
-	Update(t *models.Timeline) error
-	Delete(id string) error
-}
-
-// Server holds shared dependencies for all HTTP handlers.
-type Server struct {
-	users          *db.UserRepo
-	invites        *db.InviteRepo
-	teams          *db.TeamRepo
-	activities     *db.ActivityRepo
-	timelines      TimelineStore
-	savedFilters   *db.SavedFilterRepo
-	preferences    *db.UserPreferenceRepo
-	apiTokens      *db.APITokenRepo
-	instanceSets   *db.InstanceSettingsRepo
-	passwordTokens *db.PasswordResetTokenRepo
-	statuses       *db.StatusRepo
-	tags           *db.TagRepo
-	shares         *db.ShareRepo
-	shareCache     *shareCache
-	icsCache       *icsFeedCache
-	unlockLimiter  *rateLimiter
-	mailer         *mailer.Mailer
-	tokens         *auth.TokenService
-	tier           tier.Tier
-	bus            *events.Bus
-	hub            *ws.Hub
-	uiFS           fs.FS
-	// oidc is non-nil only when SSO is configured (DRABA_OIDC_ISSUER set).
-	// When nil, the /auth/oidc/* routes report SSO as disabled and no external
-	// identity provider is ever contacted. Set via WithOIDC.
-	oidc *auth.OIDCService
-	// oidcAutoCreateUsers controls whether an unknown external identity is
-	// auto-provisioned a local account on first SSO login.
-	oidcAutoCreateUsers bool
-}
-
-// NewServer constructs a Server with its required dependencies. It does not
-// touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(
-	users *db.UserRepo,
-	invites *db.InviteRepo,
-	teams *db.TeamRepo,
-	activitiesRepo *db.ActivityRepo,
-	timelinesRepo TimelineStore,
-	savedFiltersRepo *db.SavedFilterRepo,
-	preferencesRepo *db.UserPreferenceRepo,
-	apiTokensRepo *db.APITokenRepo,
-	instanceSetsRepo *db.InstanceSettingsRepo,
-	passwordTokensRepo *db.PasswordResetTokenRepo,
-	statusesRepo *db.StatusRepo,
-	tagsRepo *db.TagRepo,
-	sharesRepo *db.ShareRepo,
-	m *mailer.Mailer,
-	tokens *auth.TokenService,
-	t tier.Tier,
-	bus *events.Bus,
-	hub *ws.Hub,
-) *Server {
-	// Both public-share caches share the DRABA_SHARE_CACHE_TTL setting.
-	sc := newShareCache()
-	return &Server{
-		users:          users,
-		invites:        invites,
-		teams:          teams,
-		activities:     activitiesRepo,
-		timelines:      timelinesRepo,
-		savedFilters:   savedFiltersRepo,
-		preferences:    preferencesRepo,
-		apiTokens:      apiTokensRepo,
-		instanceSets:   instanceSetsRepo,
-		passwordTokens: passwordTokensRepo,
-		statuses:       statusesRepo,
-		tags:           tagsRepo,
-		shares:         sharesRepo,
-		shareCache:     sc,
-		icsCache:       newICSFeedCache(sc.ttl),
-		unlockLimiter:  newRateLimiter(unlockMaxAttempts, time.Hour),
-		mailer:         m,
-		tokens:         tokens,
-		tier:           t,
-		bus:            bus,
-		hub:            hub,
-	}
-}
-
-// WithUI registers an embedded React SPA to be served at GET /. The FS must
-// be rooted at the build output directory (i.e. contain index.html directly).
-// When called, all unmatched GET paths fall back to index.html so React Router
-// handles client-side navigation. Safe to skip in dev (no-op when not called).
-func (s *Server) WithUI(uiFS fs.FS) *Server {
-	s.uiFS = uiFS
-	return s
-}
-
-// WithOIDC enables SSO. Passing a nil service leaves SSO disabled (the zero
-// value), so callers can wire it unconditionally from a possibly-nil
-// constructor result. autoCreate controls first-login auto-provisioning.
-func (s *Server) WithOIDC(svc *auth.OIDCService, autoCreate bool) *Server {
-	s.oidc = svc
-	s.oidcAutoCreateUsers = autoCreate
-	return s
-}
-
-// oidcAutoCreate reports whether unknown external identities are provisioned a
-// local account on first SSO login.
-func (s *Server) oidcAutoCreate() bool { return s.oidcAutoCreateUsers }
-
-// Routes returns the fully-wired HTTP handler for the API, including all
-// core routes plus any routes added by registered tier modules.
-func (s *Server) Routes() http.Handler {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
-	mux.HandleFunc("GET /version", s.handleVersion)
-
-	mux.HandleFunc("POST /auth/register", s.handleRegister)
-	mux.HandleFunc("POST /auth/login", s.handleLogin)
-	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
-	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
-	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
-	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
-	// OIDC / SSO. Public (no auth): they start and complete the external login
-	// flow. Both report SSO disabled with 404 when DRABA_OIDC_ISSUER is unset.
-	mux.HandleFunc("GET /auth/oidc/login", s.handleOIDCLogin)
-	mux.HandleFunc("GET /auth/oidc/callback", s.handleOIDCCallback)
-
-	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
-	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
-	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
-
-	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
-	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
-	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
-	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
-	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
-	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
-	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
-
-	// Public — no auth required; used by the login page and shared views.
-	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
-
-	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
-	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
-	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
-	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
-	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
-	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
-	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
-	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
-	// 3-segment GET paths and neither is more specific when the third segment differs.
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
-	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
-	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
-	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
-	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
-	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
-	// the more-specific literal "share" segment takes precedence.
-	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
-	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
-	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
-	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
-	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
-	// paths like /timelines/share/statuses).
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
-
-	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
-	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
-	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
-	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
-	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
-	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
-	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
-	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
-
-	// Share routes.
-	// GET /shares/{token} is public — no auth. The token is the credential.
-	// POST /timelines/{id}/shares uses the same /timelines/{id}/... prefix
-	// as archive/unarchive so it avoids the Go 1.22 mux pattern conflict with
-	// GET /timelines/share/{token} (only GET-method paths conflict).
-	// GET /teams/{id}/timelines/{timelineId}/shares uses the team-scoped prefix
-	// to avoid the GET conflict described above.
-	mux.HandleFunc("GET /shares/{token}", s.handleGetShareProjection)
-	mux.HandleFunc("POST /shares/{token}/unlock", s.handleUnlockShare)
-	mux.HandleFunc("POST /timelines/{id}/shares", chain(s.handleCreateShare, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/shares", chain(s.handleListShares, s.authMiddleware))
-	mux.HandleFunc("PATCH /shares/{id}", chain(s.handleUpdateShare, s.authMiddleware))
-	mux.HandleFunc("DELETE /shares/{id}", chain(s.handleDeleteShare, s.authMiddleware))
-	// Token rotation — the revocation story for ICS feeds (no password gate).
-	// GET /shares/{token}.ics is served inside handleGetShareProjection: the
-	// {token} wildcard spans the whole segment, so the .ics suffix arrives in
-	// the path value and is dispatched there.
-	mux.HandleFunc("POST /shares/{id}/regenerate", chain(s.handleRegenerateShare, s.authMiddleware))
-	// Named feed variant: the {file} slug is cosmetic (calendar clients
-	// default the calendar name from the URL filename); the token is the key.
-	mux.HandleFunc("GET /shares/{token}/{file}", s.handleGetShareICSNamed)
-
-	// Export routes (Phase 14.1).
-	// POST /timelines/{id}/export shares the /timelines/{id}/... prefix with
-	// archive/unarchive/shares — fine, since only GET-method paths conflict
-	// with GET /timelines/share/{token}.
-	// The GET convenience endpoints use the team-scoped prefix (like
-	// activities/statuses/access above) to avoid that same GET conflict:
-	// /teams/{id}/timelines/{timelineId}/export.csv is 4 segments, so it
-	// can't collide with the 3-segment GET /timelines/share/{token}.
-	mux.HandleFunc("POST /timelines/{id}/export", chain(s.handlePostTimelineExport, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/export.csv", chain(s.handleGetTimelineExportCSV, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/export.xlsx", chain(s.handleGetTimelineExportXLSX, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/export.ics", chain(s.handleGetTimelineExportICS, s.authMiddleware))
-
-	// Import routes (Phase 15.1). The POST uses the same team-scoped route
-	// family as the activity/status routes. The templates are static content
-	// (example data only) but stay behind auth like every other non-share
-	// endpoint.
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/import", chain(s.handlePostTimelineImport, s.authMiddleware))
-	mux.HandleFunc("GET /import/template.csv", chain(s.handleGetImportTemplateCSV, s.authMiddleware))
-	mux.HandleFunc("GET /import/template.xlsx", chain(s.handleGetImportTemplateXLSX, s.authMiddleware))
-
-	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
-	// JWT itself before upgrading, because WebSocket clients can't set headers.
-	mux.HandleFunc("GET /ws", s.hub.ServeWS)
-
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-
-	if s.uiFS != nil {
-		mux.Handle("GET /", spaHandler(s.uiFS))
-	}
-
-	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
-	for _, m := range tier.Registered() {
-		if err := m.Register(ctx); err != nil {
-			// Module registration is a startup invariant — a failure here is a programming error.
-			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
-		}
-	}
-
-	return requestLogger(mux)
-}
-
-// chain applies a single middleware to a handler function.
-func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
-	return m(h).ServeHTTP
-}
-
-// spaHandler serves the embedded React SPA. Known static assets are served
-// directly; any unrecognised path falls back to index.html so React Router
-// handles client-side navigation.
-func spaHandler(uiFS fs.FS) http.Handler {
-	fserver := http.FileServer(http.FS(uiFS))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			path = "index.html"
-		}
-		if _, err := uiFS.Open(path); err != nil {
-			// Unknown path — serve index.html and let React Router handle it.
-			r = r.Clone(r.Context())
-			r.URL.Path = "/"
-			fserver.ServeHTTP(w, r)
-			return
-		}
-		fserver.ServeHTTP(w, r)
-	})
-}
-````
-
 ## File: packages/api/internal/api/share_ics_handler.go
 ````go
 package api
@@ -65395,6 +65592,389 @@ export function buildExportFilename(timelineName: string, ext: string, view?: Ex
   const date = new Date().toISOString().slice(0, 10)
   const viewSegment = view ? `-${view}` : ''
   return `${slug || 'timeline'}${viewSegment}-${date}${ext}`
+}
+````
+
+## File: packages/api/internal/api/server.go
+````go
+// Package api hosts the HTTP handlers, routing, and middleware for the
+// draba REST API. Handlers are intentionally thin: they decode requests,
+// delegate to repositories and services, and write responses. Business
+// logic belongs in the domain packages, not here.
+package api
+
+import (
+	"fmt"
+	"io/fs"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/backup"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+)
+
+// TimelineStore is the persistence interface required by timeline handlers.
+// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
+type TimelineStore interface {
+	Create(t *models.Timeline) error
+	GetByID(id string) (*models.Timeline, error)
+	GetByShareToken(token string) (*models.Timeline, error)
+	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
+	HasAccess(timelineID, teamMemberID string) (bool, error)
+	GrantAccess(timelineID, teamMemberID, role string) error
+	RevokeAccess(timelineID, teamMemberID string) error
+	GetAccessRole(timelineID, teamMemberID string) (string, error)
+	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
+	SetArchived(id string, at *time.Time) error
+	Update(t *models.Timeline) error
+	Delete(id string) error
+}
+
+// Server holds shared dependencies for all HTTP handlers.
+type Server struct {
+	users          *db.UserRepo
+	invites        *db.InviteRepo
+	teams          *db.TeamRepo
+	activities     *db.ActivityRepo
+	timelines      TimelineStore
+	savedFilters   *db.SavedFilterRepo
+	preferences    *db.UserPreferenceRepo
+	apiTokens      *db.APITokenRepo
+	instanceSets   *db.InstanceSettingsRepo
+	passwordTokens *db.PasswordResetTokenRepo
+	statuses       *db.StatusRepo
+	tags           *db.TagRepo
+	shares         *db.ShareRepo
+	shareCache     *shareCache
+	icsCache       *icsFeedCache
+	unlockLimiter  *rateLimiter
+	mailer         *mailer.Mailer
+	tokens         *auth.TokenService
+	tier           tier.Tier
+	bus            *events.Bus
+	hub            *ws.Hub
+	uiFS           fs.FS
+	// oidc is non-nil only when SSO is configured (DRABA_OIDC_ISSUER set).
+	// When nil, the /auth/oidc/* routes report SSO as disabled and no external
+	// identity provider is ever contacted. Set via WithOIDC.
+	oidc *auth.OIDCService
+	// oidcAutoCreateUsers controls whether an unknown external identity is
+	// auto-provisioned a local account on first SSO login.
+	oidcAutoCreateUsers bool
+	// backup is non-nil only when the backup subsystem is wired (always in
+	// production; opt-in for tests). When nil the /admin/backup* routes are
+	// not registered. Set via WithBackup.
+	backup *backup.Manager
+}
+
+// NewServer constructs a Server with its required dependencies. It does not
+// touch the network; call Routes to obtain the http.Handler to serve.
+func NewServer(
+	users *db.UserRepo,
+	invites *db.InviteRepo,
+	teams *db.TeamRepo,
+	activitiesRepo *db.ActivityRepo,
+	timelinesRepo TimelineStore,
+	savedFiltersRepo *db.SavedFilterRepo,
+	preferencesRepo *db.UserPreferenceRepo,
+	apiTokensRepo *db.APITokenRepo,
+	instanceSetsRepo *db.InstanceSettingsRepo,
+	passwordTokensRepo *db.PasswordResetTokenRepo,
+	statusesRepo *db.StatusRepo,
+	tagsRepo *db.TagRepo,
+	sharesRepo *db.ShareRepo,
+	m *mailer.Mailer,
+	tokens *auth.TokenService,
+	t tier.Tier,
+	bus *events.Bus,
+	hub *ws.Hub,
+) *Server {
+	// Both public-share caches share the DRABA_SHARE_CACHE_TTL setting.
+	sc := newShareCache()
+	return &Server{
+		users:          users,
+		invites:        invites,
+		teams:          teams,
+		activities:     activitiesRepo,
+		timelines:      timelinesRepo,
+		savedFilters:   savedFiltersRepo,
+		preferences:    preferencesRepo,
+		apiTokens:      apiTokensRepo,
+		instanceSets:   instanceSetsRepo,
+		passwordTokens: passwordTokensRepo,
+		statuses:       statusesRepo,
+		tags:           tagsRepo,
+		shares:         sharesRepo,
+		shareCache:     sc,
+		icsCache:       newICSFeedCache(sc.ttl),
+		unlockLimiter:  newRateLimiter(unlockMaxAttempts, time.Hour),
+		mailer:         m,
+		tokens:         tokens,
+		tier:           t,
+		bus:            bus,
+		hub:            hub,
+	}
+}
+
+// WithUI registers an embedded React SPA to be served at GET /. The FS must
+// be rooted at the build output directory (i.e. contain index.html directly).
+// When called, all unmatched GET paths fall back to index.html so React Router
+// handles client-side navigation. Safe to skip in dev (no-op when not called).
+func (s *Server) WithUI(uiFS fs.FS) *Server {
+	s.uiFS = uiFS
+	return s
+}
+
+// WithOIDC enables SSO. Passing a nil service leaves SSO disabled (the zero
+// value), so callers can wire it unconditionally from a possibly-nil
+// constructor result. autoCreate controls first-login auto-provisioning.
+func (s *Server) WithOIDC(svc *auth.OIDCService, autoCreate bool) *Server {
+	s.oidc = svc
+	s.oidcAutoCreateUsers = autoCreate
+	return s
+}
+
+// oidcAutoCreate reports whether unknown external identities are provisioned a
+// local account on first SSO login.
+func (s *Server) oidcAutoCreate() bool { return s.oidcAutoCreateUsers }
+
+// WithBackup enables the backup admin endpoints backed by m. Call before
+// Routes; when never called, the /admin/backup* routes do not exist.
+func (s *Server) WithBackup(m *backup.Manager) *Server {
+	s.backup = m
+	return s
+}
+
+// Routes returns the fully-wired HTTP handler for the API, including all
+// core routes plus any routes added by registered tier modules.
+func (s *Server) Routes() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
+	mux.HandleFunc("GET /version", s.handleVersion)
+
+	mux.HandleFunc("POST /auth/register", s.handleRegister)
+	mux.HandleFunc("POST /auth/login", s.handleLogin)
+	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
+	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
+	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
+	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
+	// OIDC / SSO. Public (no auth): they start and complete the external login
+	// flow. Both report SSO disabled with 404 when DRABA_OIDC_ISSUER is unset.
+	mux.HandleFunc("GET /auth/oidc/login", s.handleOIDCLogin)
+	mux.HandleFunc("GET /auth/oidc/callback", s.handleOIDCCallback)
+
+	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
+	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
+	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
+
+	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
+	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
+	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
+	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
+	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
+	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
+	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
+
+	// Backup admin routes (Phase 16.1). Registered only when the backup
+	// manager is wired so tests without a backup dir skip the surface.
+	if s.backup != nil {
+		mux.HandleFunc("GET /admin/backup/status", chain(s.handleGetBackupStatus, s.authMiddleware))
+		mux.HandleFunc("POST /admin/backup", chain(s.handlePostBackup, s.authMiddleware))
+		mux.HandleFunc("GET /admin/backup/history", chain(s.handleGetBackupHistory, s.authMiddleware))
+		mux.HandleFunc("DELETE /admin/backup/{filename}", chain(s.handleDeleteBackup, s.authMiddleware))
+	}
+
+	// Public — no auth required; used by the login page and shared views.
+	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
+
+	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
+	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
+	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
+	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
+	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
+	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
+	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
+	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
+	// 3-segment GET paths and neither is more specific when the third segment differs.
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
+	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
+	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
+	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
+	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
+	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
+	// the more-specific literal "share" segment takes precedence.
+	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
+	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
+	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
+	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
+	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
+	// paths like /timelines/share/statuses).
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
+
+	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
+	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
+	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
+	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
+	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
+	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
+	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
+	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
+
+	// Share routes.
+	// GET /shares/{token} is public — no auth. The token is the credential.
+	// POST /timelines/{id}/shares uses the same /timelines/{id}/... prefix
+	// as archive/unarchive so it avoids the Go 1.22 mux pattern conflict with
+	// GET /timelines/share/{token} (only GET-method paths conflict).
+	// GET /teams/{id}/timelines/{timelineId}/shares uses the team-scoped prefix
+	// to avoid the GET conflict described above.
+	mux.HandleFunc("GET /shares/{token}", s.handleGetShareProjection)
+	mux.HandleFunc("POST /shares/{token}/unlock", s.handleUnlockShare)
+	mux.HandleFunc("POST /timelines/{id}/shares", chain(s.handleCreateShare, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/shares", chain(s.handleListShares, s.authMiddleware))
+	mux.HandleFunc("PATCH /shares/{id}", chain(s.handleUpdateShare, s.authMiddleware))
+	mux.HandleFunc("DELETE /shares/{id}", chain(s.handleDeleteShare, s.authMiddleware))
+	// Token rotation — the revocation story for ICS feeds (no password gate).
+	// GET /shares/{token}.ics is served inside handleGetShareProjection: the
+	// {token} wildcard spans the whole segment, so the .ics suffix arrives in
+	// the path value and is dispatched there.
+	mux.HandleFunc("POST /shares/{id}/regenerate", chain(s.handleRegenerateShare, s.authMiddleware))
+	// Named feed variant: the {file} slug is cosmetic (calendar clients
+	// default the calendar name from the URL filename); the token is the key.
+	mux.HandleFunc("GET /shares/{token}/{file}", s.handleGetShareICSNamed)
+
+	// Export routes (Phase 14.1).
+	// POST /timelines/{id}/export shares the /timelines/{id}/... prefix with
+	// archive/unarchive/shares — fine, since only GET-method paths conflict
+	// with GET /timelines/share/{token}.
+	// The GET convenience endpoints use the team-scoped prefix (like
+	// activities/statuses/access above) to avoid that same GET conflict:
+	// /teams/{id}/timelines/{timelineId}/export.csv is 4 segments, so it
+	// can't collide with the 3-segment GET /timelines/share/{token}.
+	mux.HandleFunc("POST /timelines/{id}/export", chain(s.handlePostTimelineExport, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/export.csv", chain(s.handleGetTimelineExportCSV, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/export.xlsx", chain(s.handleGetTimelineExportXLSX, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/export.ics", chain(s.handleGetTimelineExportICS, s.authMiddleware))
+
+	// Import routes (Phase 15.1). The POST uses the same team-scoped route
+	// family as the activity/status routes. The templates are static content
+	// (example data only) but stay behind auth like every other non-share
+	// endpoint.
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/import", chain(s.handlePostTimelineImport, s.authMiddleware))
+	mux.HandleFunc("GET /import/template.csv", chain(s.handleGetImportTemplateCSV, s.authMiddleware))
+	mux.HandleFunc("GET /import/template.xlsx", chain(s.handleGetImportTemplateXLSX, s.authMiddleware))
+
+	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
+	// JWT itself before upgrading, because WebSocket clients can't set headers.
+	mux.HandleFunc("GET /ws", s.hub.ServeWS)
+
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
+	if s.uiFS != nil {
+		mux.Handle("GET /", spaHandler(s.uiFS))
+	}
+
+	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
+	for _, m := range tier.Registered() {
+		if err := m.Register(ctx); err != nil {
+			// Module registration is a startup invariant — a failure here is a programming error.
+			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
+		}
+	}
+
+	return requestLogger(mux)
+}
+
+// chain applies a single middleware to a handler function.
+func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
+	return m(h).ServeHTTP
+}
+
+// spaHandler serves the embedded React SPA. Known static assets are served
+// directly; any unrecognised path falls back to index.html so React Router
+// handles client-side navigation.
+func spaHandler(uiFS fs.FS) http.Handler {
+	fserver := http.FileServer(http.FS(uiFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			path = "index.html"
+		}
+		if _, err := uiFS.Open(path); err != nil {
+			// Unknown path — serve index.html and let React Router handle it.
+			r = r.Clone(r.Context())
+			r.URL.Path = "/"
+			fserver.ServeHTTP(w, r)
+			return
+		}
+		fserver.ServeHTTP(w, r)
+	})
 }
 ````
 
@@ -66371,6 +66951,83 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/backup/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get database and backup health status */
+        get: operations["getBackupStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/backup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run a manual backup now (synchronous)
+         * @description Copies the live database with VACUUM INTO, verifies the copy with PRAGMA integrity_check, and only then gives it a backup filename. A failed backup never leaves a file on disk.
+         */
+        post: operations["runBackup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/backup/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List backups in the backup directory, newest first
+         * @description The filesystem is the source of truth — a directory scan filtered to the backup filename pattern. Files deleted out-of-band disappear; foreign files in the directory are never listed.
+         */
+        get: operations["listBackups"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/backup/{filename}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete one backup by filename
+         * @description The filename must exactly match the backup filename pattern — the pattern check is the path-traversal guard, and it also makes foreign files in the directory undeletable through the API.
+         */
+        delete: operations["deleteBackup"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/teams/{teamId}/status-templates": {
         parameters: {
             query?: never;
@@ -66851,6 +67508,56 @@ export interface components {
         AdminUserRow: {
             teamCount?: number;
         } & components["schemas"]["User"];
+        /** @description One backup file. The filename is the record: it encodes the UTC creation timestamp and the trigger, and doubles as the delete id. */
+        BackupEntry: {
+            /** @description e.g. "draba-20260708T020000Z-scheduled.db" */
+            filename: string;
+            /** Format: int64 */
+            sizeBytes: number;
+            /** Format: date-time */
+            createdAt: string;
+            /** @enum {string} */
+            trigger: "manual" | "scheduled";
+        };
+        BackupStatus: {
+            database: {
+                /** @enum {string} */
+                driver: "sqlite";
+                path: string;
+                /** Format: int64 */
+                sizeBytes: number;
+                /** Format: int64 */
+                walSizeBytes: number;
+                /** Format: date-time */
+                modifiedAt?: string | null;
+            };
+            backupDir: {
+                path: string;
+                writable: boolean;
+            };
+            lastBackup?: components["schemas"]["BackupEntry"] | null;
+            /**
+             * @description ok < 24h, stale 1-7 days, critical > 7 days or no backup. Thresholds fixed in v1.
+             * @enum {string}
+             */
+            health: "ok" | "stale" | "critical";
+            running: boolean;
+            /** @description Null until the Phase 16.2 scheduler lands (and when scheduling is off). */
+            schedule?: components["schemas"]["BackupSchedule"] | null;
+        };
+        /** @description Preset-based backup schedule (Phase 16.2). Stored as one instance_settings JSON value. */
+        BackupSchedule: {
+            /** @enum {string} */
+            preset: "off" | "hourly" | "every6h" | "every12h" | "daily" | "weekly";
+            /** @description HH:MM (UTC), for daily and weekly presets. */
+            time?: string;
+            /**
+             * @description Weekly preset only.
+             * @enum {string}
+             */
+            day?: "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
+            keepLast: number;
+        };
         Team: {
             id: string;
             name: string;
@@ -69626,6 +70333,111 @@ export interface operations {
             403: components["responses"]["Forbidden"];
         };
     };
+    getBackupStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current backup status. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    runBackup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Backup created and verified. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupEntry"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description A backup is already in progress (code BACKUP_IN_PROGRESS). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Backup failed (code BACKUP_FAILED); no file was left behind. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    listBackups: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Backup entries, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        backups: components["schemas"]["BackupEntry"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    deleteBackup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                filename: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Backup deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
     listStatusTemplates: {
         parameters: {
             query?: never;
@@ -70670,6 +71482,93 @@ components:
       properties:
         teamCount:
           type: integer
+
+    BackupEntry:
+      type: object
+      description: >
+        One backup file. The filename is the record: it encodes the UTC
+        creation timestamp and the trigger, and doubles as the delete id.
+      required: [filename, sizeBytes, createdAt, trigger]
+      properties:
+        filename:
+          type: string
+          description: e.g. "draba-20260708T020000Z-scheduled.db"
+        sizeBytes:
+          type: integer
+          format: int64
+        createdAt:
+          type: string
+          format: date-time
+        trigger:
+          type: string
+          enum: [manual, scheduled]
+
+    BackupStatus:
+      type: object
+      required: [database, backupDir, health, running]
+      properties:
+        database:
+          type: object
+          required: [driver, path, sizeBytes, walSizeBytes]
+          properties:
+            driver:
+              type: string
+              enum: [sqlite]
+            path:
+              type: string
+            sizeBytes:
+              type: integer
+              format: int64
+            walSizeBytes:
+              type: integer
+              format: int64
+            modifiedAt:
+              type: string
+              format: date-time
+              nullable: true
+        backupDir:
+          type: object
+          required: [path, writable]
+          properties:
+            path:
+              type: string
+            writable:
+              type: boolean
+        lastBackup:
+          allOf:
+            - $ref: '#/components/schemas/BackupEntry'
+          nullable: true
+        health:
+          type: string
+          enum: [ok, stale, critical]
+          description: ok < 24h, stale 1-7 days, critical > 7 days or no backup. Thresholds fixed in v1.
+        running:
+          type: boolean
+        schedule:
+          allOf:
+            - $ref: '#/components/schemas/BackupSchedule'
+          nullable: true
+          description: Null until the Phase 16.2 scheduler lands (and when scheduling is off).
+
+    BackupSchedule:
+      type: object
+      description: Preset-based backup schedule (Phase 16.2). Stored as one instance_settings JSON value.
+      required: [preset, keepLast]
+      properties:
+        preset:
+          type: string
+          enum: [off, hourly, every6h, every12h, daily, weekly]
+        time:
+          type: string
+          description: HH:MM (UTC), for daily and weekly presets.
+        day:
+          type: string
+          enum: [mon, tue, wed, thu, fri, sat, sun]
+          description: Weekly preset only.
+        keepLast:
+          type: integer
+          minimum: 1
+          maximum: 365
 
     Team:
       type: object
@@ -74078,6 +74977,100 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+
+  /admin/backup/status:
+    get:
+      operationId: getBackupStatus
+      summary: Get database and backup health status
+      tags: [admin]
+      responses:
+        "200":
+          description: Current backup status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/backup:
+    post:
+      operationId: runBackup
+      summary: Run a manual backup now (synchronous)
+      description: >
+        Copies the live database with VACUUM INTO, verifies the copy with
+        PRAGMA integrity_check, and only then gives it a backup filename.
+        A failed backup never leaves a file on disk.
+      tags: [admin]
+      responses:
+        "201":
+          description: Backup created and verified.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupEntry"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: A backup is already in progress (code BACKUP_IN_PROGRESS).
+        "500":
+          description: Backup failed (code BACKUP_FAILED); no file was left behind.
+
+  /admin/backup/history:
+    get:
+      operationId: listBackups
+      summary: List backups in the backup directory, newest first
+      description: >
+        The filesystem is the source of truth — a directory scan filtered to
+        the backup filename pattern. Files deleted out-of-band disappear;
+        foreign files in the directory are never listed.
+      tags: [admin]
+      responses:
+        "200":
+          description: Backup entries, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [backups]
+                properties:
+                  backups:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/BackupEntry"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/backup/{filename}:
+    delete:
+      operationId: deleteBackup
+      summary: Delete one backup by filename
+      description: >
+        The filename must exactly match the backup filename pattern — the
+        pattern check is the path-traversal guard, and it also makes foreign
+        files in the directory undeletable through the API.
+      tags: [admin]
+      parameters:
+        - name: filename
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Backup deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /teams/{teamId}/status-templates:
     get:
@@ -78053,16 +79046,16 @@ _Planned 2026-07-03 — see [docs/plans/phase-15-import.md](plans/phase-15-impor
 
 _Planned 2026-07-08 — see [docs/plans/phase-16-backup.md](plans/phase-16-backup.md). Design thesis: a backup you haven't verified and can't find is not a backup. Decisions locked: SQLite-only (`Engine` seam for future drivers — MySQL/Postgres surfaces cut, no such drivers exist); `VACUUM INTO` + `PRAGMA integrity_check`; history = directory scan, filename is the record (no DB table); `DRABA_BACKUP_DIR` default `/data/backups` (on the mounted volume); no HTTP download, no in-app restore (runbook), no encryption at rest for v1; schedule presets not cron, default-on daily 02:00 / keep-last-14._
 
-**16.1 Server — engine, manager, manual backup + status/history API:**
-- [ ] `internal/backup`: `Engine` interface + `sqliteEngine` (`VACUUM INTO` hot copy under WAL; `PRAGMA integrity_check` on the copy; failed copies deleted, never left on disk)
-- [ ] `internal/backup.Manager`: filename scheme `draba-<UTC>Z-<manual|scheduled>.db`, temp-name → verify → rename (interruption never leaves a pattern-matching file), one-at-a-time concurrency guard, keep-last-N retention sweep (pattern-matching files only)
-- [ ] `DRABA_BACKUP_DIR` env (default `/data/backups`), startup create + writability validation, `packages/api/CLAUDE.md` env-block entry
-- [ ] `GET /admin/backup/status` — DB path/size/WAL size/modified, backup-dir writability, last backup, health (ok <24h / stale 1–7d / critical >7d or none), running flag, schedule summary; superadmin-only
-- [ ] `POST /admin/backup` — synchronous run-now; `201` + entry, `409 BACKUP_IN_PROGRESS` under guard, no leftover file on failure
-- [ ] `GET /admin/backup/history` — directory scan, pattern-filtered, newest first; foreign files never listed
-- [ ] `DELETE /admin/backup/{filename}` — exact pattern match as the path-traversal guard; `404`/`204`
-- [ ] OpenAPI: `BackupStatus`, `BackupEntry`, `BackupSchedule`; regenerate TS types
-- [ ] Tests: vacuum under concurrent writes, verify-failure cleanup, filename round-trip + foreign-file exclusion + traversal rejection, retention sweep, concurrency guard, status shape
+**16.1 Server — engine, manager, manual backup + status/history API:** ✅ 2026-07-08
+- [x] `internal/backup`: `Engine` interface + `sqliteEngine` (`VACUUM INTO` hot copy under WAL; `PRAGMA integrity_check` on the copy; failed copies deleted, never left on disk)
+- [x] `internal/backup.Manager`: filename scheme `draba-<UTC>Z-<manual|scheduled>.db`, temp-name → verify → rename (interruption never leaves a pattern-matching file), one-at-a-time concurrency guard, keep-last-N retention sweep (pattern-matching files only)
+- [x] `DRABA_BACKUP_DIR` env (default `/data/backups`), startup create + writability validation, `packages/api/CLAUDE.md` env-block entry
+- [x] `GET /admin/backup/status` — DB path/size/WAL size/modified, backup-dir writability, last backup, health (ok <24h / stale 1–7d / critical >7d or none), running flag, schedule summary (`null` until 16.2); superadmin-only
+- [x] `POST /admin/backup` — synchronous run-now; `201` + entry, `409 BACKUP_IN_PROGRESS` under guard, no leftover file on failure
+- [x] `GET /admin/backup/history` — directory scan, pattern-filtered, newest first; foreign files never listed
+- [x] `DELETE /admin/backup/{filename}` — exact pattern match as the path-traversal guard; `404`/`204`
+- [x] OpenAPI: `BackupStatus`, `BackupEntry`, `BackupSchedule`; regenerate TS types
+- [x] Tests: vacuum under concurrent writes, verify-failure cleanup, filename round-trip + foreign-file exclusion + traversal rejection, retention sweep, concurrency guard, status shape
 
 **16.2 Server — scheduler, retention-in-anger, failure notification:**
 - [ ] `internal/backup.Scheduler`: preset → next-run computation (injected clock), timer loop, config-change recompute, skip-while-running; no catch-up for missed windows (v1)
@@ -79846,7 +80839,7 @@ Get data *into* draba from a spreadsheet — CSV / Excel import with a mandatory
 ---
 
 ### Phase 16 — Backup & Restore
-**Status:** 🟢 Planned (scope settled 2026-07-08) | **Effort:** M (2.5–3 days across three pausable sub-phases) | **Plan:** [docs/plans/phase-16-backup.md](plans/phase-16-backup.md)
+**Status:** 🔄 In Progress (16.1 built 2026-07-08, all automated checks pass; 16.2 scheduler + 16.3 web/ops next) | **Effort:** M (2.5–3 days across three pausable sub-phases) | **Plan:** [docs/plans/phase-16-backup.md](plans/phase-16-backup.md)
 
 Admin tools for database backup visibility, manual backups, and scheduled backup configuration. Self-hosted deployments need a way to know their data is safe without SSH-ing into the container. **Pulled ahead of the remaining phases** because once real teams start putting real data in (via [import](#phase-15--import--tabular) and [shared](#phase-13--shares--multi-share-views-with-passwords) workflows), data safety stops being optional.
 
@@ -80007,6 +81000,30 @@ Adds i18n infrastructure and ships the first non-English locale. The "Default la
 ## File: docs/log.md
 ````markdown
 # Development Log
+
+---
+
+## 2026-07-08 — Phase 16.1: Backup server — engine, manager, manual backup + status/history API
+
+**Goal:** The core of Backup & Restore per [the plan](plans/phase-16-backup.md) §16.1: a verified-at-creation SQLite backup subsystem (`VACUUM INTO` hot copy + `PRAGMA integrity_check` on the copy) with the four non-schedule admin endpoints. Design thesis: *a backup you haven't verified and can't find is not a backup* — every file that looks like a backup passed verification, and the directory itself is the history record (no DB table).
+
+**Backend (`packages/api`):**
+- `internal/backup/` (new package):
+  - `backup.go` — `Engine` interface (`Backup`/`Verify`, the seam for future dump-based engines) + `sqliteEngine`: `VACUUM INTO ?` over the existing `*sqlx.DB` (consistent snapshot under WAL, no C-level backup API needed on the pure-Go driver; produces a compacted, standalone, WAL-free file), then `PRAGMA integrity_check` run against the *copy* via its own connection.
+  - `filename.go` — `draba-<UTC compact>Z-<manual|scheduled>.db` format/parse round-trip; the strict regex doubles as the delete path-traversal guard (no separator can match) and the foreign-file filter for history/retention.
+  - `manager.go` — `Manager`: `RunNow` does temp-name (`draba-inprogress.tmp`, never pattern-matching, so interruption leaves no corpse) → verify → collision-safe rename (same-second backups bump the timestamp instead of overwriting — matters on Windows where `os.Rename` won't clobber) → keep-last-N retention sweep (pattern-matching files only; sweep failures logged, never fail the backup). One-at-a-time via `mutex.TryLock` → `ErrBackupInProgress`; `running` atomic for status. `History()` = directory scan newest-first (missing dir = empty, not error; returns `[]Entry{}` never nil — the 15.1 JSON-`null` lesson). `Delete()` pattern-checks before resolving any path. `Status()` = DB file stats + WAL size + dir writability probe + last backup + health (`ok` <24h / `stale` 1–7d / `critical` >7d or none). `EnsureDir` = MkdirAll + write-probe. Injected `now` clock for tests. Any step failing removes the partial file.
+- `internal/api/backup_handler.go` (new) — `GET /admin/backup/status` (response includes `schedule: null` until 16.2 so the shape is stable), `POST /admin/backup` (synchronous; `201` + entry / `409 BACKUP_IN_PROGRESS` / `500 BACKUP_FAILED` with the reason and no leftover file), `GET /admin/backup/history` (`{backups: []}`), `DELETE /admin/backup/{filename}` (`404` for pattern mismatch and missing file alike, `204` on delete). All behind `requireSuperadmin`, same guard as `/admin/smtp`.
+- `internal/api/server.go` — `WithBackup(*backup.Manager)` (same optional-wiring shape as `WithUI`/`WithOIDC`); the `/admin/backup*` routes register only when wired. No mux conflicts (distinct literal segments/methods).
+- `cmd/draba/main.go` — `DRABA_BACKUP_DIR` env (default `/data/backups` — the already-mounted data volume), `backup.EnsureDir` at boot: an unwritable dir is a loud `slog.Warn`, **not fatal** (status reports `writable:false`; a misconfigured volume never blocks the app). `packages/api/CLAUDE.md` env block updated.
+- **Not in 16.1 (per plan):** scheduler, schedule GET/PUT, `instance_settings` persistence, bus events + SMTP failure consumer — all 16.2. Web UI + OPERATIONS.md runbook — 16.3.
+
+**API contract:** `openapi.yaml` gained `BackupEntry`, `BackupStatus`, and `BackupSchedule` schemas (the schedule schema is defined now so 16.2 only adds paths) + the four paths; `packages/shared/src/index.ts` regenerated.
+
+**Tests:** `internal/backup/manager_test.go` — vacuum under concurrent writes against a real WAL-mode file DB (copy passes integrity check, contains ≥ the seeded rows), verify-failure and backup-failure both leave an empty directory, filename round-trip + 14-case foreign/traversal rejection table, retention sweep (keep-2, foreign file untouched), same-second collision bump, concurrency guard with a blocking engine (`ErrBackupInProgress` + `Running()`), delete guards, missing-dir history is empty-not-nil, full status shape fresh + after backup, health threshold boundary table (24h/7d edges). `internal/api/backup_handler_test.go` — superadmin gating on all four routes (member → 403), manual run end-to-end over HTTP (file on disk, history, status flips critical→ok, delete → 204 then 404), foreign/traversal delete rejection with the foreign file surviving, `409` + `running:true` while a blocking backup holds the lock, engine failure → `500 BACKUP_FAILED` with an empty dir.
+
+**Checks:** `golangci-lint run` 0 issues; `go test ./...` all pass; `pnpm --filter web lint` clean; `pnpm --filter web build` clean.
+
+Next: 16.2 (scheduler with injected clock, schedule endpoints + `instance_settings` persistence, default-on daily 02:00 / keep-14, bus events + SMTP failure notification).
 
 ---
 
