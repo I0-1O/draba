@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short. Per-phase implementation detail lives in [docs/log.md](../log.md); this file is a current-state snapshot only._
 
-**Last updated:** 2026-07-08 (Phase 16.1 built — backup engine/manager + the four non-schedule `/admin/backup*` endpoints; all automated checks pass. Entry in log.md. Next: 16.2 scheduler.)
+**Last updated:** 2026-07-09 (`/test-phase 16.1` — all 8 subagents pass, incl. live smoke of the four `/admin/backup*` endpoints against the test container; container confirmed current, stale-binary open issue closed. Next: 16.2 scheduler.)
 
 ---
 
@@ -29,7 +29,7 @@ _Updated after each significant work session. Read this first to orient — it i
 
 ## Open Issues
 
-The test Docker container runs a pre-15.2 binary whose import responses marshal empty issue lists as JSON `null` — the web client guards against it, but rebuild the container before 15.3's `/test-phase 15` run (which also picks up the wizard for e2e).
+~~Test Docker container stale (pre-15.2 nil-slice bug)~~ — resolved: the 2026-07-09 `/test-phase 16.1` run confirmed the live container serves the 16.1 `/admin/backup*` endpoints and returns `[]` (not `null`) for empty import issue lists. No rebuild needed before 15.3.
 
 Manual verification items for 10.4.6, 11.1, 11.1.1, 11.1.2, 11.2, 11.3, 12, and 13.1–13.5 tracked in TASKS.md — 13.4's headline item (subscribe from a real Google/Apple calendar) additionally needs the feed URL reachable by Google's fetcher, not just the LAN. Phase 14 (14.1–14.4) is fully live-verified — no longer open. A formal `/test-phase` Docker-container run (like 14.1–14.3 got) hasn't happened for 14.4 specifically; the live dev-server-against-Docker-API verification done 2026-07-01 is a reasonable substitute but worth a follow-up `/test-phase 14.4` if gaps show up later.
 

@@ -2,6 +2,14 @@
 
 ---
 
+## 2026-07-09 — /test-phase 16.1
+- Subagents run: static-check, unit-test (Go + Vitest), schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass (8/8; ws-smoke live portion clean-skipped — no WS client on the dev box, covered by `TestHub_*` unit tests per precedent. docs/TESTING.md still has no Phase 15/16 sections, so 16.1 assertions were sourced from ROADMAP/plan §16.1 + the 2026-07-08 log entry — backfill remains 15.3/16.3 scope)
+- Smoke target: the test Docker host (reset via SSH before the run)
+- Notable: the test container is **no longer stale** — api-smoke confirmed the live binary serves all four `/admin/backup*` endpoints (status→backup→history→delete full cycle, traversal delete rejected, non-superadmin 403) *and* emits `[]` not `null` for empty import issue lists, closing the "rebuild before 15.3" open issue. security-review passed with one informational note: `POST /admin/backup` 500s return `err.Error()`, which can include an absolute temp path — superadmin-only audience, same paths status reports intentionally; accepted. Schema-check confirmed 16.1 added no migrations (directory-is-the-record design holds). web-e2e scope guard: zero "backup" references in packages/web/src — no 16.3 UI shipped early.
+
+---
+
 ## 2026-07-08 — Phase 16.1: Backup server — engine, manager, manual backup + status/history API
 
 **Goal:** The core of Backup & Restore per [the plan](plans/phase-16-backup.md) §16.1: a verified-at-creation SQLite backup subsystem (`VACUUM INTO` hot copy + `PRAGMA integrity_check` on the copy) with the four non-schedule admin endpoints. Design thesis: *a backup you haven't verified and can't find is not a backup* — every file that looks like a backup passed verification, and the directory itself is the history record (no DB table).
