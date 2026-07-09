@@ -29572,6 +29572,307 @@ export default function BrandingSync() {
 }
 ````
 
+## File: packages/web/src/components/CalendarShareModal.tsx
+````typescript
+/**
+ * CalendarShareModal — manage the ICS calendar feeds for a timeline.
+ *
+ * Deliberately a different surface from ShareModal (Phase 13.4): a Calendar
+ * share is not a frozen view snapshot but a live subscribable ICS feed. The
+ * modal is a flat list of every feed the timeline can publish — the whole
+ * timeline first, then one row per team member — each with an on/off toggle.
+ * Toggling a row on creates that feed and reveals its URL (copy, one-click
+ * subscribe links, regenerate); toggling off deletes it, killing the URL
+ * immediately.
+ *
+ * All feeds are public read-only. There is no password option: calendar
+ * clients cannot unlock a subscription URL interactively, so the unguessable
+ * token is the secret and revocation is regenerate-or-toggle-off.
+ */
+
+import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
+import {
+  CalendarDays, Link2, Copy, Check, RefreshCw, X, Users,
+} from 'lucide-react'
+import { useListShares, useCreateShare, useDeleteShare, useRegenerateShare } from '@/hooks/useShares'
+import { useTeamMembers } from '@/hooks/useTeamActivities'
+import { Badge } from '@/components/identity/Badge'
+import { resolveColorHex } from '@/components/identity/identity-constants'
+import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
+import { MEMBER_COLORS } from '@/types'
+import type { components } from '@draba/shared'
+
+type Share = components['schemas']['Share']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+
+interface Props {
+  teamId: string
+  timelineId: string
+  /** Display name of the timeline, shown in the header subtitle and feed names. */
+  timelineName?: string
+  onClose: () => void
+}
+
+const TILE_TEAL = 'bg-[hsl(188_59%_38%/0.12)] text-primary'
+
+/**
+ * URL-safe slug for the feed filename. Calendar clients (Thunderbird
+ * included) default the new calendar's name from the URL's filename, so the
+ * link ends in a readable `<name>.ics` rather than the bare token hash. The
+ * server treats the filename as cosmetic — the token is the key.
+ */
+function slugify(name: string): string {
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+  return slug || 'calendar'
+}
+
+/** Builds the absolute https feed URL for a share token. */
+function feedURL(token: string, name: string): string {
+  return `${window.location.origin}/shares/${token}/${slugify(name)}.ics`
+}
+
+/** The webcal:// variant most calendar apps treat as "subscribe". */
+function webcalURL(token: string, name: string): string {
+  return feedURL(token, name).replace(/^https?:\/\//, 'webcal://')
+}
+
+// ── One feed row: label + toggle, expanding to the link when on ───────────────
+
+function FeedRow({
+  label,
+  member,
+  share,
+  busy,
+  onToggle,
+  onRegenerate,
+}: {
+  label: string
+  /** Set for member rows — renders the identity badge next to the label. */
+  member?: TeamMemberWithUser
+  /** The existing ICS share for this row, when the feed is on. */
+  share?: Share
+  busy: boolean
+  onToggle: () => void
+  onRegenerate: (shareId: string) => void
+}) {
+  const [copied, setCopied] = useState(false)
+  const on = Boolean(share)
+  const url = share ? feedURL(share.token, share.name ?? label) : null
+  const webcal = share ? webcalURL(share.token, share.name ?? label) : null
+
+  const copy = () => {
+    if (!url) return
+    void navigator.clipboard.writeText(url).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1600)
+    })
+  }
+
+  return (
+    <div className="overflow-hidden rounded-[var(--radius-md)] border border-border">
+      <div className="flex items-center gap-2.5 px-3 py-2.5">
+        {member ? (
+          <Badge
+            identity={{ color: resolveColorHex(member.color) || MEMBER_COLORS[0], icon: member.icon ?? '__name_1__' }}
+            name={member.displayName || 'Team member'}
+            size={26}
+            shape="circle"
+          />
+        ) : (
+          <div className={cn('flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
+            <CalendarDays size={14} strokeWidth={2.2} />
+          </div>
+        )}
+        <div className="flex-1 text-[13px] font-semibold text-foreground">{label}</div>
+        <button
+          onClick={onToggle}
+          role="switch"
+          aria-checked={on}
+          aria-label={`${label} feed`}
+          disabled={busy}
+          className={cn(
+            'relative h-[22px] w-10 shrink-0 cursor-pointer rounded-[var(--radius-full)] border-none p-0 transition-colors',
+            on ? 'bg-primary' : 'bg-border',
+          )}
+        >
+          <span className={cn(
+            'absolute top-[2px] h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-[left] duration-150',
+            on ? 'left-5' : 'left-[2px]',
+          )} />
+        </button>
+      </div>
+
+      {share && url && webcal && (
+        <div className="flex flex-col gap-2 border-t border-border bg-muted/40 px-3 py-2.5">
+          <div className="flex items-center gap-2">
+            <div className="flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12px] text-foreground">
+              <Link2 size={13} className="shrink-0 text-muted-foreground" strokeWidth={2} />
+              <span className="overflow-hidden text-ellipsis whitespace-nowrap">{url}</span>
+            </div>
+            <button
+              onClick={copy}
+              className={cn(
+                'flex shrink-0 items-center gap-[5px] rounded-[var(--radius-md)] border px-3 py-[7px] text-[12.5px] font-semibold transition-colors',
+                copied ? 'border-success bg-[hsl(145_63%_42%/0.12)] text-success' : 'border-border bg-card text-foreground',
+              )}
+            >
+              {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={2.2} />}
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
+            <span className="text-muted-foreground">Add to:</span>
+            <a
+              href={`https://calendar.google.com/calendar/render?cid=${encodeURIComponent(webcal)}`}
+              target="_blank"
+              rel="noreferrer"
+              className="font-semibold text-primary hover:underline"
+            >
+              Google
+            </a>
+            <a href={webcal} className="font-semibold text-primary hover:underline">
+              Apple
+            </a>
+            <a
+              href={`https://outlook.live.com/calendar/0/addfromweb?url=${encodeURIComponent(webcal)}&name=${encodeURIComponent(share.name ?? label)}`}
+              target="_blank"
+              rel="noreferrer"
+              className="font-semibold text-primary hover:underline"
+            >
+              Outlook
+            </a>
+            <button
+              onClick={() => onRegenerate(share.id)}
+              disabled={busy}
+              title="Replace the link — the old URL stops working immediately"
+              className="ml-auto flex cursor-pointer items-center gap-[5px] border-none bg-transparent p-0 text-[12px] font-semibold text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <RefreshCw size={12} strokeWidth={2} />
+              Regenerate link
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── The modal shell ────────────────────────────────────────────────────────────
+
+export default function CalendarShareModal({ teamId, timelineId, timelineName, onClose }: Props) {
+  const { data: allShares = [], isLoading } = useListShares(teamId, timelineId)
+  const { data: members = [] } = useTeamMembers(teamId)
+  const createShare = useCreateShare(teamId, timelineId)
+  const deleteShare = useDeleteShare(teamId, timelineId)
+  const regenerateShare = useRegenerateShare(teamId, timelineId)
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const icsShares = allShares.filter(s => s.kind === 'ics')
+  const timelineShare = icsShares.find(s => s.scope === 'timeline')
+  const memberShare = (memberId: string) =>
+    icsShares.find(s => s.scope === 'member' && s.memberId === memberId)
+
+  const busy = isLoading || createShare.isPending || deleteShare.isPending || regenerateShare.isPending
+
+  const toggleTimeline = () => {
+    if (busy) return
+    if (timelineShare) {
+      deleteShare.mutate(timelineShare.id)
+    } else {
+      createShare.mutate({ kind: 'ics', scope: 'timeline', name: `${timelineName ?? 'Timeline'} calendar feed` })
+    }
+  }
+
+  const toggleMember = (m: TeamMemberWithUser) => {
+    if (busy) return
+    const existing = memberShare(m.id)
+    if (existing) {
+      deleteShare.mutate(existing.id)
+    } else {
+      createShare.mutate({
+        kind: 'ics',
+        scope: 'member',
+        memberId: m.id,
+        name: `${m.displayName || 'Member'} calendar feed`,
+      })
+    }
+  }
+
+  return createPortal(
+    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]">
+      <div className="flex max-h-[88vh] w-[min(560px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]">
+        {/* Header */}
+        <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-[18px]">
+          <div className={cn('flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
+            <CalendarDays size={19} strokeWidth={2.2} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Share calendar</h2>
+            <div className="mt-0.5 text-[12.5px] text-muted-foreground">
+              {timelineName ? `${timelineName} · ` : ''}live read-only feeds — subscribe from Google, Apple, or Outlook
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
+          >
+            <X size={16} strokeWidth={2.2} />
+          </button>
+        </div>
+
+        {/* Body — one row per publishable feed */}
+        <div className="flex flex-1 flex-col gap-2 overflow-y-auto px-5 py-4">
+          <FeedRow
+            label="Whole timeline"
+            share={timelineShare}
+            busy={busy}
+            onToggle={toggleTimeline}
+            onRegenerate={id => regenerateShare.mutate(id)}
+          />
+
+          {members.length > 0 && (
+            <div className="mt-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Per member</div>
+          )}
+          {members.map(m => (
+            <FeedRow
+              key={m.id}
+              label={m.displayName || 'Team member'}
+              member={m}
+              share={memberShare(m.id)}
+              busy={busy}
+              onToggle={() => toggleMember(m)}
+              onRegenerate={id => regenerateShare.mutate(id)}
+            />
+          ))}
+
+          {(createShare.isError || deleteShare.isError || regenerateShare.isError) && (
+            <p className="text-[11px] text-destructive">Something went wrong. Please try again.</p>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="flex shrink-0 items-center gap-2.5 border-t border-border px-5 py-[13px]">
+          <div className="flex items-center gap-[7px] text-xs text-muted-foreground">
+            <Users size={14} strokeWidth={2} />
+            Public read-only · the link itself is the secret
+          </div>
+          <Button variant="outline" className="ml-auto" onClick={onClose}>Done</Button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+````
+
 ## File: packages/web/src/components/DarkModeToggle.tsx
 ````typescript
 import { Moon, Sun } from 'lucide-react'
@@ -45592,333 +45893,6 @@ func ParseFilename(name string) (t time.Time, trigger Trigger, ok bool) {
 }
 ````
 
-## File: packages/api/internal/backup/manager.go
-````go
-package backup
-
-import (
-	"context"
-	"errors"
-	"fmt"
-	"io/fs"
-	"log/slog"
-	"os"
-	"path/filepath"
-	"sort"
-	"sync"
-	"sync/atomic"
-	"time"
-)
-
-// Sentinel errors surfaced to the HTTP layer.
-var (
-	// ErrBackupInProgress is returned when a backup is requested while one
-	// is already running. One backup at a time, always.
-	ErrBackupInProgress = errors.New("a backup is already in progress")
-	// ErrNotFound is returned by Delete when the filename does not match
-	// the backup pattern or no such backup exists.
-	ErrNotFound = errors.New("backup not found")
-)
-
-// tempName is the in-progress copy's filename. It never matches
-// filenamePattern, so an interrupted backup is invisible to history and
-// retention, and is simply overwritten by the next run.
-const tempName = "draba-inprogress.tmp"
-
-// DefaultKeepLast is the retention count applied until a schedule config
-// says otherwise.
-const DefaultKeepLast = 14
-
-// Entry describes one backup file, as listed in history and returned from
-// a manual run. CreatedAt is the timestamp embedded in the filename — the
-// filename is the record.
-type Entry struct {
-	Filename  string    `json:"filename"`
-	SizeBytes int64     `json:"sizeBytes"`
-	CreatedAt time.Time `json:"createdAt"`
-	Trigger   Trigger   `json:"trigger"`
-}
-
-// DatabaseInfo reports facts about the live database file for the status
-// endpoint.
-type DatabaseInfo struct {
-	Driver       string     `json:"driver"`
-	Path         string     `json:"path"`
-	SizeBytes    int64      `json:"sizeBytes"`
-	WalSizeBytes int64      `json:"walSizeBytes"`
-	ModifiedAt   *time.Time `json:"modifiedAt"`
-}
-
-// DirInfo reports where backups land and whether that directory is
-// currently writable.
-type DirInfo struct {
-	Path     string `json:"path"`
-	Writable bool   `json:"writable"`
-}
-
-// Status is the aggregate state the admin status endpoint reports.
-type Status struct {
-	Database   DatabaseInfo `json:"database"`
-	BackupDir  DirInfo      `json:"backupDir"`
-	LastBackup *Entry       `json:"lastBackup"`
-	Health     string       `json:"health"`
-	Running    bool         `json:"running"`
-}
-
-// Health thresholds are fixed in v1: a backup younger than 24h is healthy,
-// older than 7 days (or absent) is critical, anything between is stale.
-const (
-	HealthOK       = "ok"
-	HealthStale    = "stale"
-	HealthCritical = "critical"
-)
-
-// HealthFor classifies backup freshness. last is the most recent backup's
-// timestamp, nil when no backup exists.
-func HealthFor(last *time.Time, now time.Time) string {
-	switch {
-	case last == nil:
-		return HealthCritical
-	case now.Sub(*last) < 24*time.Hour:
-		return HealthOK
-	case now.Sub(*last) <= 7*24*time.Hour:
-		return HealthStale
-	default:
-		return HealthCritical
-	}
-}
-
-// Manager owns the backup directory: it names, runs, verifies, lists,
-// deletes, and prunes backups, and enforces that only one backup runs at
-// a time.
-type Manager struct {
-	engine   Engine
-	dir      string
-	dbPath   string
-	keepLast atomic.Int32
-	running  atomic.Bool
-	// mu serializes runs; TryLock (not Lock) so a second caller gets an
-	// immediate ErrBackupInProgress instead of queueing.
-	mu sync.Mutex
-	// now is the clock, injectable in tests.
-	now func() time.Time
-}
-
-// NewManager returns a Manager writing backups of the database file at
-// dbPath into dir, using engine to produce and verify copies. Retention
-// starts at DefaultKeepLast.
-func NewManager(engine Engine, dir, dbPath string) *Manager {
-	m := &Manager{engine: engine, dir: dir, dbPath: dbPath, now: time.Now}
-	m.keepLast.Store(DefaultKeepLast)
-	return m
-}
-
-// SetKeepLast updates the retention count enforced after each successful
-// backup. Values below 1 are ignored.
-func (m *Manager) SetKeepLast(n int) {
-	if n >= 1 {
-		m.keepLast.Store(int32(n)) //nolint:gosec // bounded by schedule validation (1–365)
-	}
-}
-
-// Running reports whether a backup is currently executing.
-func (m *Manager) Running() bool { return m.running.Load() }
-
-// RunNow performs one backup synchronously: copy to a temp name, verify
-// the copy, rename to the final pattern-matching name, then sweep
-// retention. A failure at any step removes the partial file — a file that
-// looks like a backup always is one. Returns ErrBackupInProgress when
-// another backup is running.
-func (m *Manager) RunNow(ctx context.Context, trigger Trigger) (*Entry, error) {
-	if !m.mu.TryLock() {
-		return nil, ErrBackupInProgress
-	}
-	defer m.mu.Unlock()
-	m.running.Store(true)
-	defer m.running.Store(false)
-
-	if err := EnsureDir(m.dir); err != nil {
-		return nil, fmt.Errorf("backup dir: %w", err)
-	}
-
-	tmp := filepath.Join(m.dir, tempName)
-	// A stale temp file from a killed process would make VACUUM INTO fail.
-	_ = os.Remove(tmp)
-
-	if err := m.engine.Backup(ctx, tmp); err != nil {
-		_ = os.Remove(tmp)
-		return nil, fmt.Errorf("creating backup: %w", err)
-	}
-	if err := m.engine.Verify(ctx, tmp); err != nil {
-		_ = os.Remove(tmp)
-		return nil, fmt.Errorf("verifying backup: %w", err)
-	}
-
-	info, err := os.Stat(tmp)
-	if err != nil {
-		_ = os.Remove(tmp)
-		return nil, fmt.Errorf("inspecting backup: %w", err)
-	}
-
-	// Bump the timestamp until the name is free: two backups within the
-	// same second must not overwrite each other.
-	ts := m.now().UTC().Truncate(time.Second)
-	var final string
-	for {
-		final = filepath.Join(m.dir, FormatFilename(ts, trigger))
-		if _, err := os.Stat(final); errors.Is(err, fs.ErrNotExist) {
-			break
-		}
-		ts = ts.Add(time.Second)
-	}
-	if err := os.Rename(tmp, final); err != nil {
-		_ = os.Remove(tmp)
-		return nil, fmt.Errorf("finalizing backup: %w", err)
-	}
-
-	m.sweepRetention()
-
-	return &Entry{
-		Filename:  filepath.Base(final),
-		SizeBytes: info.Size(),
-		CreatedAt: ts,
-		Trigger:   trigger,
-	}, nil
-}
-
-// sweepRetention deletes the oldest pattern-matching backups beyond the
-// keep-last-N count. Sweep failures are logged, never propagated — the
-// backup that just succeeded is not undone by a cleanup problem.
-func (m *Manager) sweepRetention() {
-	keep := int(m.keepLast.Load())
-	entries, err := m.History()
-	if err != nil {
-		slog.Warn("backup: retention sweep skipped", "err", err)
-		return
-	}
-	if len(entries) <= keep {
-		return
-	}
-	for _, e := range entries[keep:] {
-		if err := os.Remove(filepath.Join(m.dir, e.Filename)); err != nil {
-			slog.Warn("backup: retention delete failed", "file", e.Filename, "err", err)
-		}
-	}
-}
-
-// History lists the backups in the directory, newest first. The filesystem
-// is the source of truth: files deleted out-of-band disappear, and files
-// that don't match the backup pattern are never listed. A missing directory
-// is an empty history, not an error.
-func (m *Manager) History() ([]Entry, error) {
-	dirents, err := os.ReadDir(m.dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return []Entry{}, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("reading backup dir: %w", err)
-	}
-
-	entries := []Entry{}
-	for _, d := range dirents {
-		if d.IsDir() {
-			continue
-		}
-		ts, trigger, ok := ParseFilename(d.Name())
-		if !ok {
-			continue
-		}
-		var size int64
-		if info, err := d.Info(); err == nil {
-			size = info.Size()
-		}
-		entries = append(entries, Entry{
-			Filename:  d.Name(),
-			SizeBytes: size,
-			CreatedAt: ts,
-			Trigger:   trigger,
-		})
-	}
-	sort.Slice(entries, func(i, j int) bool {
-		if !entries[i].CreatedAt.Equal(entries[j].CreatedAt) {
-			return entries[i].CreatedAt.After(entries[j].CreatedAt)
-		}
-		return entries[i].Filename > entries[j].Filename
-	})
-	return entries, nil
-}
-
-// Delete removes one backup by filename. The strict pattern match is the
-// path-traversal guard: nothing containing a separator (or any name this
-// package didn't create) can ever resolve to a deletable path. Returns
-// ErrNotFound for pattern mismatches and missing files alike.
-func (m *Manager) Delete(filename string) error {
-	if _, _, ok := ParseFilename(filename); !ok {
-		return ErrNotFound
-	}
-	err := os.Remove(filepath.Join(m.dir, filename))
-	if errors.Is(err, fs.ErrNotExist) {
-		return ErrNotFound
-	}
-	if err != nil {
-		return fmt.Errorf("deleting backup: %w", err)
-	}
-	return nil
-}
-
-// Status reports the live database file's stats, the backup directory's
-// writability, the most recent backup, and the derived health rating.
-func (m *Manager) Status() (*Status, error) {
-	st := &Status{
-		Database:  DatabaseInfo{Driver: "sqlite", Path: m.dbPath},
-		BackupDir: DirInfo{Path: m.dir, Writable: EnsureDir(m.dir) == nil},
-		Running:   m.Running(),
-	}
-
-	// Stat failures (e.g. an in-memory DSN in tests) leave sizes at zero
-	// rather than failing the whole status call.
-	if info, err := os.Stat(m.dbPath); err == nil {
-		st.Database.SizeBytes = info.Size()
-		mod := info.ModTime().UTC()
-		st.Database.ModifiedAt = &mod
-	}
-	if info, err := os.Stat(m.dbPath + "-wal"); err == nil {
-		st.Database.WalSizeBytes = info.Size()
-	}
-
-	history, err := m.History()
-	if err != nil {
-		return nil, err
-	}
-	var last *time.Time
-	if len(history) > 0 {
-		st.LastBackup = &history[0]
-		last = &history[0].CreatedAt
-	}
-	st.Health = HealthFor(last, m.now().UTC())
-	return st, nil
-}
-
-// EnsureDir creates dir if needed and probes that it is writable by
-// creating and removing a marker file. Called at startup (so a broken
-// volume mount is loud in the logs from boot) and before every run.
-func EnsureDir(dir string) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("creating %s: %w", dir, err)
-	}
-	probe := filepath.Join(dir, ".draba-writecheck")
-	f, err := os.Create(probe)
-	if err != nil {
-		return fmt.Errorf("%s is not writable: %w", dir, err)
-	}
-	_ = f.Close()
-	if err := os.Remove(probe); err != nil {
-		return fmt.Errorf("cleaning up write probe in %s: %w", dir, err)
-	}
-	return nil
-}
-````
-
 ## File: packages/api/internal/db/migrations/024_oidc_identity.sql
 ````sql
 -- Migration 024: OIDC / SSO identity support.
@@ -47892,6 +47866,129 @@ func parseDate(s string) (time.Time, error) {
 		return t, nil
 	}
 	return time.Parse("2006-01-02", s)
+}
+````
+
+## File: packages/api/internal/ics/ics.go
+````go
+// Package ics serializes activities into RFC 5545 iCalendar feeds for the
+// Phase 13.4 calendar share endpoint (GET /shares/{token}.ics). It implements
+// only the slice of the spec draba needs — all-day VEVENTs in a PUBLISH
+// calendar — rather than wrapping a general-purpose library.
+package ics
+
+import (
+	"strings"
+	"time"
+)
+
+// Event is one all-day calendar entry. Start and End are inclusive calendar
+// dates (draba's activity model, Phase 11.1.1); End is converted to the
+// RFC 5545 exclusive DTEND during serialization.
+type Event struct {
+	UID         string
+	Summary     string
+	Description string
+	// Categories become the CATEGORIES property (draba tags); clients that
+	// support it (Thunderbird, Apple Calendar) render them as event tags.
+	Categories []string
+	Start      time.Time
+	End        time.Time
+	// Stamp becomes DTSTAMP — the activity's last-modified time, which lets
+	// calendar clients detect changed events between polls.
+	Stamp time.Time
+}
+
+// Calendar renders a complete VCALENDAR document with CRLF line endings.
+// name becomes X-WR-CALNAME, the display name most clients adopt when the
+// user subscribes.
+func Calendar(name string, events []Event) string {
+	var b strings.Builder
+	writeLine(&b, "BEGIN:VCALENDAR")
+	writeLine(&b, "VERSION:2.0")
+	writeLine(&b, "PRODID:-//draba//draba//EN")
+	writeLine(&b, "CALSCALE:GREGORIAN")
+	writeLine(&b, "METHOD:PUBLISH")
+	// X-WR-CALNAME is the de-facto property older clients read; NAME is its
+	// standardized RFC 7986 successor. Emit both so every client that names
+	// the calendar from feed content gets the right answer.
+	writeLine(&b, "X-WR-CALNAME:"+escapeText(name))
+	writeLine(&b, "NAME:"+escapeText(name))
+	// Suggest an hourly poll to clients that honor a published refresh
+	// cadence (RFC 7986 REFRESH-INTERVAL; X-PUBLISHED-TTL for older ones).
+	writeLine(&b, "REFRESH-INTERVAL;VALUE=DURATION:PT1H")
+	writeLine(&b, "X-PUBLISHED-TTL:PT1H")
+	for i := range events {
+		writeEvent(&b, &events[i])
+	}
+	writeLine(&b, "END:VCALENDAR")
+	return b.String()
+}
+
+func writeEvent(b *strings.Builder, e *Event) {
+	writeLine(b, "BEGIN:VEVENT")
+	writeLine(b, "UID:"+escapeText(e.UID))
+	writeLine(b, "DTSTAMP:"+e.Stamp.UTC().Format("20060102T150405Z"))
+	writeLine(b, "DTSTART;VALUE=DATE:"+e.Start.UTC().Format("20060102"))
+	// RFC 5545 DTEND is exclusive: an event covering its inclusive end date
+	// must end at midnight of the following day.
+	writeLine(b, "DTEND;VALUE=DATE:"+e.End.UTC().AddDate(0, 0, 1).Format("20060102"))
+	writeLine(b, "SUMMARY:"+escapeText(e.Summary))
+	if e.Description != "" {
+		writeLine(b, "DESCRIPTION:"+escapeText(e.Description))
+	}
+	if len(e.Categories) > 0 {
+		// Commas separate list items here, so each value is escaped
+		// individually and joined with bare (unescaped) commas.
+		escaped := make([]string, len(e.Categories))
+		for i, c := range e.Categories {
+			escaped[i] = escapeText(c)
+		}
+		writeLine(b, "CATEGORIES:"+strings.Join(escaped, ","))
+	}
+	writeLine(b, "END:VEVENT")
+}
+
+// writeLine emits one content line, folded per RFC 5545 §3.1: lines longer
+// than 75 octets continue on the next line after a CRLF + single space.
+// Folding happens on rune boundaries so multi-byte UTF-8 sequences are never
+// split mid-character.
+func writeLine(b *strings.Builder, line string) {
+	const limit = 75
+	octets := 0
+	for _, r := range line {
+		rl := len(string(r))
+		if octets+rl > limit {
+			b.WriteString("\r\n ")
+			// The leading fold space counts against the next line's budget.
+			octets = 1
+		}
+		b.WriteRune(r)
+		octets += rl
+	}
+	b.WriteString("\r\n")
+}
+
+// escapeText escapes a value per RFC 5545 §3.3.11: backslash, semicolon, and
+// comma are backslash-escaped; newlines become literal "\n". A bare CR (legal
+// in JSON input) is folded into the newline escape, and any remaining C0/DEL
+// control characters are dropped — they are illegal in TEXT values, and a
+// lenient parser splitting lines on a stray CR could otherwise read injected
+// property lines out of user-controlled content.
+func escapeText(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, ";", `\;`)
+	s = strings.ReplaceAll(s, ",", `\,`)
+	s = strings.ReplaceAll(s, "\r\n", `\n`)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	s = strings.ReplaceAll(s, "\r", `\n`)
+	return strings.Map(func(r rune) rune {
+		// HTAB is the one control character TEXT permits.
+		if (r < 0x20 && r != '\t') || r == 0x7F {
+			return -1
+		}
+		return r
+	}, s)
 }
 ````
 
@@ -53496,307 +53593,6 @@ export default function ListToolbar({
 }
 ````
 
-## File: packages/web/src/components/CalendarShareModal.tsx
-````typescript
-/**
- * CalendarShareModal — manage the ICS calendar feeds for a timeline.
- *
- * Deliberately a different surface from ShareModal (Phase 13.4): a Calendar
- * share is not a frozen view snapshot but a live subscribable ICS feed. The
- * modal is a flat list of every feed the timeline can publish — the whole
- * timeline first, then one row per team member — each with an on/off toggle.
- * Toggling a row on creates that feed and reveals its URL (copy, one-click
- * subscribe links, regenerate); toggling off deletes it, killing the URL
- * immediately.
- *
- * All feeds are public read-only. There is no password option: calendar
- * clients cannot unlock a subscription URL interactively, so the unguessable
- * token is the secret and revocation is regenerate-or-toggle-off.
- */
-
-import { useEffect, useState } from 'react'
-import { createPortal } from 'react-dom'
-import {
-  CalendarDays, Link2, Copy, Check, RefreshCw, X, Users,
-} from 'lucide-react'
-import { useListShares, useCreateShare, useDeleteShare, useRegenerateShare } from '@/hooks/useShares'
-import { useTeamMembers } from '@/hooks/useTeamActivities'
-import { Badge } from '@/components/identity/Badge'
-import { resolveColorHex } from '@/components/identity/identity-constants'
-import { Button } from '@/components/ui/button'
-import { cn } from '@/lib/utils'
-import { MEMBER_COLORS } from '@/types'
-import type { components } from '@draba/shared'
-
-type Share = components['schemas']['Share']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-
-interface Props {
-  teamId: string
-  timelineId: string
-  /** Display name of the timeline, shown in the header subtitle and feed names. */
-  timelineName?: string
-  onClose: () => void
-}
-
-const TILE_TEAL = 'bg-[hsl(188_59%_38%/0.12)] text-primary'
-
-/**
- * URL-safe slug for the feed filename. Calendar clients (Thunderbird
- * included) default the new calendar's name from the URL's filename, so the
- * link ends in a readable `<name>.ics` rather than the bare token hash. The
- * server treats the filename as cosmetic — the token is the key.
- */
-function slugify(name: string): string {
-  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
-  return slug || 'calendar'
-}
-
-/** Builds the absolute https feed URL for a share token. */
-function feedURL(token: string, name: string): string {
-  return `${window.location.origin}/shares/${token}/${slugify(name)}.ics`
-}
-
-/** The webcal:// variant most calendar apps treat as "subscribe". */
-function webcalURL(token: string, name: string): string {
-  return feedURL(token, name).replace(/^https?:\/\//, 'webcal://')
-}
-
-// ── One feed row: label + toggle, expanding to the link when on ───────────────
-
-function FeedRow({
-  label,
-  member,
-  share,
-  busy,
-  onToggle,
-  onRegenerate,
-}: {
-  label: string
-  /** Set for member rows — renders the identity badge next to the label. */
-  member?: TeamMemberWithUser
-  /** The existing ICS share for this row, when the feed is on. */
-  share?: Share
-  busy: boolean
-  onToggle: () => void
-  onRegenerate: (shareId: string) => void
-}) {
-  const [copied, setCopied] = useState(false)
-  const on = Boolean(share)
-  const url = share ? feedURL(share.token, share.name ?? label) : null
-  const webcal = share ? webcalURL(share.token, share.name ?? label) : null
-
-  const copy = () => {
-    if (!url) return
-    void navigator.clipboard.writeText(url).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1600)
-    })
-  }
-
-  return (
-    <div className="overflow-hidden rounded-[var(--radius-md)] border border-border">
-      <div className="flex items-center gap-2.5 px-3 py-2.5">
-        {member ? (
-          <Badge
-            identity={{ color: resolveColorHex(member.color) || MEMBER_COLORS[0], icon: member.icon ?? '__name_1__' }}
-            name={member.displayName || 'Team member'}
-            size={26}
-            shape="circle"
-          />
-        ) : (
-          <div className={cn('flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
-            <CalendarDays size={14} strokeWidth={2.2} />
-          </div>
-        )}
-        <div className="flex-1 text-[13px] font-semibold text-foreground">{label}</div>
-        <button
-          onClick={onToggle}
-          role="switch"
-          aria-checked={on}
-          aria-label={`${label} feed`}
-          disabled={busy}
-          className={cn(
-            'relative h-[22px] w-10 shrink-0 cursor-pointer rounded-[var(--radius-full)] border-none p-0 transition-colors',
-            on ? 'bg-primary' : 'bg-border',
-          )}
-        >
-          <span className={cn(
-            'absolute top-[2px] h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-[left] duration-150',
-            on ? 'left-5' : 'left-[2px]',
-          )} />
-        </button>
-      </div>
-
-      {share && url && webcal && (
-        <div className="flex flex-col gap-2 border-t border-border bg-muted/40 px-3 py-2.5">
-          <div className="flex items-center gap-2">
-            <div className="flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12px] text-foreground">
-              <Link2 size={13} className="shrink-0 text-muted-foreground" strokeWidth={2} />
-              <span className="overflow-hidden text-ellipsis whitespace-nowrap">{url}</span>
-            </div>
-            <button
-              onClick={copy}
-              className={cn(
-                'flex shrink-0 items-center gap-[5px] rounded-[var(--radius-md)] border px-3 py-[7px] text-[12.5px] font-semibold transition-colors',
-                copied ? 'border-success bg-[hsl(145_63%_42%/0.12)] text-success' : 'border-border bg-card text-foreground',
-              )}
-            >
-              {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={2.2} />}
-              {copied ? 'Copied' : 'Copy'}
-            </button>
-          </div>
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
-            <span className="text-muted-foreground">Add to:</span>
-            <a
-              href={`https://calendar.google.com/calendar/render?cid=${encodeURIComponent(webcal)}`}
-              target="_blank"
-              rel="noreferrer"
-              className="font-semibold text-primary hover:underline"
-            >
-              Google
-            </a>
-            <a href={webcal} className="font-semibold text-primary hover:underline">
-              Apple
-            </a>
-            <a
-              href={`https://outlook.live.com/calendar/0/addfromweb?url=${encodeURIComponent(webcal)}&name=${encodeURIComponent(share.name ?? label)}`}
-              target="_blank"
-              rel="noreferrer"
-              className="font-semibold text-primary hover:underline"
-            >
-              Outlook
-            </a>
-            <button
-              onClick={() => onRegenerate(share.id)}
-              disabled={busy}
-              title="Replace the link — the old URL stops working immediately"
-              className="ml-auto flex cursor-pointer items-center gap-[5px] border-none bg-transparent p-0 text-[12px] font-semibold text-muted-foreground transition-colors hover:text-foreground"
-            >
-              <RefreshCw size={12} strokeWidth={2} />
-              Regenerate link
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── The modal shell ────────────────────────────────────────────────────────────
-
-export default function CalendarShareModal({ teamId, timelineId, timelineName, onClose }: Props) {
-  const { data: allShares = [], isLoading } = useListShares(teamId, timelineId)
-  const { data: members = [] } = useTeamMembers(teamId)
-  const createShare = useCreateShare(teamId, timelineId)
-  const deleteShare = useDeleteShare(teamId, timelineId)
-  const regenerateShare = useRegenerateShare(teamId, timelineId)
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-
-  const icsShares = allShares.filter(s => s.kind === 'ics')
-  const timelineShare = icsShares.find(s => s.scope === 'timeline')
-  const memberShare = (memberId: string) =>
-    icsShares.find(s => s.scope === 'member' && s.memberId === memberId)
-
-  const busy = isLoading || createShare.isPending || deleteShare.isPending || regenerateShare.isPending
-
-  const toggleTimeline = () => {
-    if (busy) return
-    if (timelineShare) {
-      deleteShare.mutate(timelineShare.id)
-    } else {
-      createShare.mutate({ kind: 'ics', scope: 'timeline', name: `${timelineName ?? 'Timeline'} calendar feed` })
-    }
-  }
-
-  const toggleMember = (m: TeamMemberWithUser) => {
-    if (busy) return
-    const existing = memberShare(m.id)
-    if (existing) {
-      deleteShare.mutate(existing.id)
-    } else {
-      createShare.mutate({
-        kind: 'ics',
-        scope: 'member',
-        memberId: m.id,
-        name: `${m.displayName || 'Member'} calendar feed`,
-      })
-    }
-  }
-
-  return createPortal(
-    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]">
-      <div className="flex max-h-[88vh] w-[min(560px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]">
-        {/* Header */}
-        <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-[18px]">
-          <div className={cn('flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
-            <CalendarDays size={19} strokeWidth={2.2} />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Share calendar</h2>
-            <div className="mt-0.5 text-[12.5px] text-muted-foreground">
-              {timelineName ? `${timelineName} · ` : ''}live read-only feeds — subscribe from Google, Apple, or Outlook
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
-          >
-            <X size={16} strokeWidth={2.2} />
-          </button>
-        </div>
-
-        {/* Body — one row per publishable feed */}
-        <div className="flex flex-1 flex-col gap-2 overflow-y-auto px-5 py-4">
-          <FeedRow
-            label="Whole timeline"
-            share={timelineShare}
-            busy={busy}
-            onToggle={toggleTimeline}
-            onRegenerate={id => regenerateShare.mutate(id)}
-          />
-
-          {members.length > 0 && (
-            <div className="mt-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Per member</div>
-          )}
-          {members.map(m => (
-            <FeedRow
-              key={m.id}
-              label={m.displayName || 'Team member'}
-              member={m}
-              share={memberShare(m.id)}
-              busy={busy}
-              onToggle={() => toggleMember(m)}
-              onRegenerate={id => regenerateShare.mutate(id)}
-            />
-          ))}
-
-          {(createShare.isError || deleteShare.isError || regenerateShare.isError) && (
-            <p className="text-[11px] text-destructive">Something went wrong. Please try again.</p>
-          )}
-        </div>
-
-        {/* Footer */}
-        <div className="flex shrink-0 items-center gap-2.5 border-t border-border px-5 py-[13px]">
-          <div className="flex items-center gap-[7px] text-xs text-muted-foreground">
-            <Users size={14} strokeWidth={2} />
-            Public read-only · the link itself is the secret
-          </div>
-          <Button variant="outline" className="ml-auto" onClick={onClose}>Done</Button>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  )
-}
-````
-
 ## File: packages/web/src/contexts/AuthContext.tsx
 ````typescript
 /**
@@ -57752,6 +57548,332 @@ func randomURLToken() (string, error) {
 }
 ````
 
+## File: packages/api/internal/backup/manager.go
+````go
+package backup
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"sort"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// Sentinel errors surfaced to the HTTP layer.
+var (
+	// ErrBackupInProgress is returned when a backup is requested while one
+	// is already running. One backup at a time, always.
+	ErrBackupInProgress = errors.New("a backup is already in progress")
+	// ErrNotFound is returned by Delete when the filename does not match
+	// the backup pattern or no such backup exists.
+	ErrNotFound = errors.New("backup not found")
+)
+
+// tempName is the in-progress copy's filename. It never matches
+// filenamePattern, so an interrupted backup is invisible to history and
+// retention, and is simply overwritten by the next run.
+const tempName = "draba-inprogress.tmp"
+
+// DefaultKeepLast is the retention count applied until a schedule config
+// says otherwise.
+const DefaultKeepLast = 14
+
+// Entry describes one backup file, as listed in history and returned from
+// a manual run. CreatedAt is the timestamp embedded in the filename — the
+// filename is the record.
+type Entry struct {
+	Filename  string    `json:"filename"`
+	SizeBytes int64     `json:"sizeBytes"`
+	CreatedAt time.Time `json:"createdAt"`
+	Trigger   Trigger   `json:"trigger"`
+}
+
+// DatabaseInfo reports facts about the live database file for the status
+// endpoint.
+type DatabaseInfo struct {
+	Driver       string     `json:"driver"`
+	Path         string     `json:"path"`
+	SizeBytes    int64      `json:"sizeBytes"`
+	WalSizeBytes int64      `json:"walSizeBytes"`
+	ModifiedAt   *time.Time `json:"modifiedAt"`
+}
+
+// DirInfo reports where backups land and whether that directory is
+// currently writable.
+type DirInfo struct {
+	Path     string `json:"path"`
+	Writable bool   `json:"writable"`
+}
+
+// Status is the aggregate state the admin status endpoint reports.
+type Status struct {
+	Database   DatabaseInfo `json:"database"`
+	BackupDir  DirInfo      `json:"backupDir"`
+	LastBackup *Entry       `json:"lastBackup"`
+	Health     string       `json:"health"`
+	Running    bool         `json:"running"`
+}
+
+// Health thresholds are fixed in v1: a backup younger than 24h is healthy,
+// older than 7 days (or absent) is critical, anything between is stale.
+const (
+	HealthOK       = "ok"
+	HealthStale    = "stale"
+	HealthCritical = "critical"
+)
+
+// HealthFor classifies backup freshness. last is the most recent backup's
+// timestamp, nil when no backup exists.
+func HealthFor(last *time.Time, now time.Time) string {
+	switch {
+	case last == nil:
+		return HealthCritical
+	case now.Sub(*last) < 24*time.Hour:
+		return HealthOK
+	case now.Sub(*last) <= 7*24*time.Hour:
+		return HealthStale
+	default:
+		return HealthCritical
+	}
+}
+
+// Manager owns the backup directory: it names, runs, verifies, lists,
+// deletes, and prunes backups, and enforces that only one backup runs at
+// a time.
+type Manager struct {
+	engine   Engine
+	dir      string
+	dbPath   string
+	keepLast int
+	running  atomic.Bool
+	// mu serializes runs; TryLock (not Lock) so a second caller gets an
+	// immediate ErrBackupInProgress instead of queueing.
+	mu sync.Mutex
+	// now is the clock, injectable in tests.
+	now func() time.Time
+}
+
+// NewManager returns a Manager writing backups of the database file at
+// dbPath into dir, using engine to produce and verify copies. Retention
+// keeps DefaultKeepLast files.
+func NewManager(engine Engine, dir, dbPath string) *Manager {
+	return &Manager{engine: engine, dir: dir, dbPath: dbPath, keepLast: DefaultKeepLast, now: time.Now}
+}
+
+// Running reports whether a backup is currently executing.
+func (m *Manager) Running() bool { return m.running.Load() }
+
+// RunNow performs one backup synchronously: copy to a temp name, verify
+// the copy, rename to the final pattern-matching name, then sweep
+// retention. A failure at any step removes the partial file — a file that
+// looks like a backup always is one. Returns ErrBackupInProgress when
+// another backup is running.
+func (m *Manager) RunNow(ctx context.Context, trigger Trigger) (*Entry, error) {
+	if !m.mu.TryLock() {
+		return nil, ErrBackupInProgress
+	}
+	defer m.mu.Unlock()
+	m.running.Store(true)
+	defer m.running.Store(false)
+
+	if err := EnsureDir(m.dir); err != nil {
+		return nil, fmt.Errorf("backup dir: %w", err)
+	}
+
+	tmp := filepath.Join(m.dir, tempName)
+	// A stale temp file from a killed process would make VACUUM INTO fail.
+	_ = os.Remove(tmp)
+
+	if err := m.engine.Backup(ctx, tmp); err != nil {
+		_ = os.Remove(tmp)
+		return nil, fmt.Errorf("creating backup: %w", err)
+	}
+	// The engine creates the copy with umask-default permissions; tighten to
+	// owner-only before the file gets its backup name (see EnsureDir on why).
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		_ = os.Remove(tmp)
+		return nil, fmt.Errorf("restricting backup permissions: %w", err)
+	}
+	if err := m.engine.Verify(ctx, tmp); err != nil {
+		_ = os.Remove(tmp)
+		return nil, fmt.Errorf("verifying backup: %w", err)
+	}
+
+	info, err := os.Stat(tmp)
+	if err != nil {
+		_ = os.Remove(tmp)
+		return nil, fmt.Errorf("inspecting backup: %w", err)
+	}
+
+	// Bump the timestamp until the name is free: two backups within the
+	// same second must not overwrite each other.
+	ts := m.now().UTC().Truncate(time.Second)
+	var final string
+	for {
+		final = filepath.Join(m.dir, FormatFilename(ts, trigger))
+		if _, err := os.Stat(final); errors.Is(err, fs.ErrNotExist) {
+			break
+		}
+		ts = ts.Add(time.Second)
+	}
+	if err := os.Rename(tmp, final); err != nil {
+		_ = os.Remove(tmp)
+		return nil, fmt.Errorf("finalizing backup: %w", err)
+	}
+
+	m.sweepRetention()
+
+	return &Entry{
+		Filename:  filepath.Base(final),
+		SizeBytes: info.Size(),
+		CreatedAt: ts,
+		Trigger:   trigger,
+	}, nil
+}
+
+// sweepRetention deletes the oldest pattern-matching backups beyond the
+// keep-last-N count. Sweep failures are logged, never propagated — the
+// backup that just succeeded is not undone by a cleanup problem.
+func (m *Manager) sweepRetention() {
+	keep := m.keepLast
+	entries, err := m.History()
+	if err != nil {
+		slog.Warn("backup: retention sweep skipped", "err", err)
+		return
+	}
+	if len(entries) <= keep {
+		return
+	}
+	for _, e := range entries[keep:] {
+		if err := os.Remove(filepath.Join(m.dir, e.Filename)); err != nil {
+			slog.Warn("backup: retention delete failed", "file", e.Filename, "err", err)
+		}
+	}
+}
+
+// History lists the backups in the directory, newest first. The filesystem
+// is the source of truth: files deleted out-of-band disappear, and files
+// that don't match the backup pattern are never listed. A missing directory
+// is an empty history, not an error.
+func (m *Manager) History() ([]Entry, error) {
+	dirents, err := os.ReadDir(m.dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return []Entry{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading backup dir: %w", err)
+	}
+
+	entries := []Entry{}
+	for _, d := range dirents {
+		if d.IsDir() {
+			continue
+		}
+		ts, trigger, ok := ParseFilename(d.Name())
+		if !ok {
+			continue
+		}
+		var size int64
+		if info, err := d.Info(); err == nil {
+			size = info.Size()
+		}
+		entries = append(entries, Entry{
+			Filename:  d.Name(),
+			SizeBytes: size,
+			CreatedAt: ts,
+			Trigger:   trigger,
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if !entries[i].CreatedAt.Equal(entries[j].CreatedAt) {
+			return entries[i].CreatedAt.After(entries[j].CreatedAt)
+		}
+		return entries[i].Filename > entries[j].Filename
+	})
+	return entries, nil
+}
+
+// Delete removes one backup by filename. The strict pattern match is the
+// path-traversal guard: nothing containing a separator (or any name this
+// package didn't create) can ever resolve to a deletable path. Returns
+// ErrNotFound for pattern mismatches and missing files alike.
+func (m *Manager) Delete(filename string) error {
+	if _, _, ok := ParseFilename(filename); !ok {
+		return ErrNotFound
+	}
+	err := os.Remove(filepath.Join(m.dir, filename))
+	if errors.Is(err, fs.ErrNotExist) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("deleting backup: %w", err)
+	}
+	return nil
+}
+
+// Status reports the live database file's stats, the backup directory's
+// writability, the most recent backup, and the derived health rating.
+func (m *Manager) Status() (*Status, error) {
+	st := &Status{
+		Database:  DatabaseInfo{Driver: "sqlite", Path: m.dbPath},
+		BackupDir: DirInfo{Path: m.dir, Writable: EnsureDir(m.dir) == nil},
+		Running:   m.Running(),
+	}
+
+	// Stat failures (e.g. an in-memory DSN in tests) leave sizes at zero
+	// rather than failing the whole status call.
+	if info, err := os.Stat(m.dbPath); err == nil {
+		st.Database.SizeBytes = info.Size()
+		mod := info.ModTime().UTC()
+		st.Database.ModifiedAt = &mod
+	}
+	if info, err := os.Stat(m.dbPath + "-wal"); err == nil {
+		st.Database.WalSizeBytes = info.Size()
+	}
+
+	history, err := m.History()
+	if err != nil {
+		return nil, err
+	}
+	var last *time.Time
+	if len(history) > 0 {
+		st.LastBackup = &history[0]
+		last = &history[0].CreatedAt
+	}
+	st.Health = HealthFor(last, m.now().UTC())
+	return st, nil
+}
+
+// EnsureDir creates dir if needed and probes that it is writable by
+// creating and removing a marker file. Called at startup (so a broken
+// volume mount is loud in the logs from boot) and before every run.
+func EnsureDir(dir string) error {
+	// 0700/0600 throughout: a backup is the full database — password hashes
+	// and encrypted credentials included — so nothing but the app's own user
+	// should be able to read it.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("creating %s: %w", dir, err)
+	}
+	probe := filepath.Join(dir, ".draba-writecheck")
+	f, err := os.Create(probe)
+	if err != nil {
+		return fmt.Errorf("%s is not writable: %w", dir, err)
+	}
+	_ = f.Close()
+	if err := os.Remove(probe); err != nil {
+		return fmt.Errorf("cleaning up write probe in %s: %w", dir, err)
+	}
+	return nil
+}
+````
+
 ## File: packages/api/internal/export/csv.go
 ````go
 package export
@@ -57984,129 +58106,6 @@ func WriteXLSXColumns(w io.Writer, rows []Row, columns []string) error {
 	}
 
 	return f.Write(w)
-}
-````
-
-## File: packages/api/internal/ics/ics.go
-````go
-// Package ics serializes activities into RFC 5545 iCalendar feeds for the
-// Phase 13.4 calendar share endpoint (GET /shares/{token}.ics). It implements
-// only the slice of the spec draba needs — all-day VEVENTs in a PUBLISH
-// calendar — rather than wrapping a general-purpose library.
-package ics
-
-import (
-	"strings"
-	"time"
-)
-
-// Event is one all-day calendar entry. Start and End are inclusive calendar
-// dates (draba's activity model, Phase 11.1.1); End is converted to the
-// RFC 5545 exclusive DTEND during serialization.
-type Event struct {
-	UID         string
-	Summary     string
-	Description string
-	// Categories become the CATEGORIES property (draba tags); clients that
-	// support it (Thunderbird, Apple Calendar) render them as event tags.
-	Categories []string
-	Start      time.Time
-	End        time.Time
-	// Stamp becomes DTSTAMP — the activity's last-modified time, which lets
-	// calendar clients detect changed events between polls.
-	Stamp time.Time
-}
-
-// Calendar renders a complete VCALENDAR document with CRLF line endings.
-// name becomes X-WR-CALNAME, the display name most clients adopt when the
-// user subscribes.
-func Calendar(name string, events []Event) string {
-	var b strings.Builder
-	writeLine(&b, "BEGIN:VCALENDAR")
-	writeLine(&b, "VERSION:2.0")
-	writeLine(&b, "PRODID:-//draba//draba//EN")
-	writeLine(&b, "CALSCALE:GREGORIAN")
-	writeLine(&b, "METHOD:PUBLISH")
-	// X-WR-CALNAME is the de-facto property older clients read; NAME is its
-	// standardized RFC 7986 successor. Emit both so every client that names
-	// the calendar from feed content gets the right answer.
-	writeLine(&b, "X-WR-CALNAME:"+escapeText(name))
-	writeLine(&b, "NAME:"+escapeText(name))
-	// Suggest an hourly poll to clients that honor a published refresh
-	// cadence (RFC 7986 REFRESH-INTERVAL; X-PUBLISHED-TTL for older ones).
-	writeLine(&b, "REFRESH-INTERVAL;VALUE=DURATION:PT1H")
-	writeLine(&b, "X-PUBLISHED-TTL:PT1H")
-	for i := range events {
-		writeEvent(&b, &events[i])
-	}
-	writeLine(&b, "END:VCALENDAR")
-	return b.String()
-}
-
-func writeEvent(b *strings.Builder, e *Event) {
-	writeLine(b, "BEGIN:VEVENT")
-	writeLine(b, "UID:"+escapeText(e.UID))
-	writeLine(b, "DTSTAMP:"+e.Stamp.UTC().Format("20060102T150405Z"))
-	writeLine(b, "DTSTART;VALUE=DATE:"+e.Start.UTC().Format("20060102"))
-	// RFC 5545 DTEND is exclusive: an event covering its inclusive end date
-	// must end at midnight of the following day.
-	writeLine(b, "DTEND;VALUE=DATE:"+e.End.UTC().AddDate(0, 0, 1).Format("20060102"))
-	writeLine(b, "SUMMARY:"+escapeText(e.Summary))
-	if e.Description != "" {
-		writeLine(b, "DESCRIPTION:"+escapeText(e.Description))
-	}
-	if len(e.Categories) > 0 {
-		// Commas separate list items here, so each value is escaped
-		// individually and joined with bare (unescaped) commas.
-		escaped := make([]string, len(e.Categories))
-		for i, c := range e.Categories {
-			escaped[i] = escapeText(c)
-		}
-		writeLine(b, "CATEGORIES:"+strings.Join(escaped, ","))
-	}
-	writeLine(b, "END:VEVENT")
-}
-
-// writeLine emits one content line, folded per RFC 5545 §3.1: lines longer
-// than 75 octets continue on the next line after a CRLF + single space.
-// Folding happens on rune boundaries so multi-byte UTF-8 sequences are never
-// split mid-character.
-func writeLine(b *strings.Builder, line string) {
-	const limit = 75
-	octets := 0
-	for _, r := range line {
-		rl := len(string(r))
-		if octets+rl > limit {
-			b.WriteString("\r\n ")
-			// The leading fold space counts against the next line's budget.
-			octets = 1
-		}
-		b.WriteRune(r)
-		octets += rl
-	}
-	b.WriteString("\r\n")
-}
-
-// escapeText escapes a value per RFC 5545 §3.3.11: backslash, semicolon, and
-// comma are backslash-escaped; newlines become literal "\n". A bare CR (legal
-// in JSON input) is folded into the newline escape, and any remaining C0/DEL
-// control characters are dropped — they are illegal in TEXT values, and a
-// lenient parser splitting lines on a stray CR could otherwise read injected
-// property lines out of user-controlled content.
-func escapeText(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, ";", `\;`)
-	s = strings.ReplaceAll(s, ",", `\,`)
-	s = strings.ReplaceAll(s, "\r\n", `\n`)
-	s = strings.ReplaceAll(s, "\n", `\n`)
-	s = strings.ReplaceAll(s, "\r", `\n`)
-	return strings.Map(func(r rune) rune {
-		// HTAB is the one control character TEXT permits.
-		if (r < 0x20 && r != '\t') || r == 0x7F {
-			return -1
-		}
-		return r
-	}, s)
 }
 ````
 
@@ -63165,230 +63164,6 @@ If bookmarkable/shareable print URLs are ever wanted, a real `/timelines/:id/pri
 - `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean.
 ````
 
-## File: packages/api/cmd/draba/main.go
-````go
-// Command draba is the API server entry point. It wires repositories,
-// the auth token service, and tier configuration into the HTTP server,
-// then listens for requests until the process is killed.
-package main
-
-import (
-	"context"
-	"fmt"
-	"io/fs"
-	"log/slog"
-	"net/http"
-	"os"
-	"strings"
-
-	"github.com/I0-1O/draba/packages/api/internal/api"
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/backup"
-	"github.com/I0-1O/draba/packages/api/internal/buildinfo"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-	sampledata "github.com/I0-1O/draba/packages/api/sample_data"
-	drabui "github.com/I0-1O/draba/packages/api/ui"
-)
-
-const banner = "\n" +
-	"      _           _\n" +
-	"     | |         | |\n" +
-	"   __| |_ __ __ _| |__   __ _\n" +
-	"  / _` | '__/ _` | '_ \\ / _` |\n" +
-	" | (_| | | | (_| | |_) | (_| |\n" +
-	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
-	"\n" +
-	"  see who's doing what, when.\n\n"
-
-func main() {
-	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
-		runResetPassword(os.Args[2:])
-		return
-	}
-
-	setupLogger()
-	fmt.Print(banner)
-	slog.Info("build", "commit", buildinfo.Short(), "built", buildinfo.Built)
-
-	port := getenv("DRABA_PORT", "8080")
-	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
-	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
-	if jwtSecret == "" {
-		slog.Error("DRABA_JWT_SECRET must be set")
-		os.Exit(1)
-	}
-
-	t, err := tier.Load()
-	if err != nil {
-		slog.Error("tier load failed", "err", err)
-		os.Exit(1)
-	}
-	l := t.Limits()
-	if l.MaxUsers == 0 {
-		slog.Info("tier", "tier", t)
-	} else {
-		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
-	}
-
-	database, err := db.Open(dsn)
-	if err != nil {
-		slog.Error("db: open failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: opened", "dsn", dsn)
-
-	if err := db.Migrate(database); err != nil {
-		slog.Error("db: migrate failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: migrations applied")
-
-	// Optional pre-launch convenience: seed the canonical sample dataset into an
-	// empty database so a freshly-wiped dev/test instance comes up populated.
-	// Gated by DRABA_SEED_SAMPLE_DATA and a no-op once the DB has any users — it
-	// must stay unset in any real deployment.
-	if os.Getenv("DRABA_SEED_SAMPLE_DATA") == "1" {
-		sql, err := sampledata.SQL()
-		if err != nil {
-			slog.Error("db: reading embedded sample data failed", "err", err)
-			os.Exit(1)
-		}
-		seeded, err := db.SeedSampleDataIfEmpty(database, sql)
-		if err != nil {
-			slog.Error("db: sample-data seed failed", "err", err)
-			os.Exit(1)
-		}
-		if seeded {
-			slog.Info("db: sample data seeded (database was empty)")
-		} else {
-			slog.Info("db: sample-data seed skipped (database already populated)")
-		}
-	}
-
-	users := db.NewUserRepo(database)
-	invites := db.NewInviteRepo(database)
-	teams := db.NewTeamRepo(database)
-	activityRepo := db.NewActivityRepo(database)
-	timelineRepo := db.NewTimelineRepo(database)
-	savedFilterRepo := db.NewSavedFilterRepo(database)
-	preferenceRepo := db.NewUserPreferenceRepo(database)
-	apiTokenRepo := db.NewAPITokenRepo(database)
-	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
-	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
-	statusRepo := db.NewStatusRepo(database)
-	tagRepo := db.NewTagRepo(database)
-	shareRepo := db.NewShareRepo(database)
-	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
-	tokens := auth.NewTokenService(jwtSecret)
-
-	bus := events.NewBus()
-	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
-		_, err := teams.GetMember(teamID, userID)
-		return err
-	})
-	go hub.Run()
-	slog.Info("ws: hub running")
-
-	if mods := tier.Registered(); len(mods) > 0 {
-		slog.Info("modules loaded", "count", len(mods))
-	}
-
-	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagRepo, shareRepo, m, tokens, t, bus, hub)
-
-	// Backup subsystem (Phase 16). An unwritable backup dir is loud at boot
-	// but not fatal — the status endpoint reports it and runs fail cleanly,
-	// so a misconfigured volume never blocks the app itself from serving.
-	backupDir := getenv("DRABA_BACKUP_DIR", "/data/backups")
-	if err := backup.EnsureDir(backupDir); err != nil {
-		slog.Warn("backup: directory not writable; backups will fail until fixed", "dir", backupDir, "err", err)
-	} else {
-		slog.Info("backup: directory ready", "dir", backupDir)
-	}
-	srv.WithBackup(backup.NewManager(backup.NewSQLiteEngine(database), backupDir, dsn))
-
-	// Wire up the embedded React SPA when a production build is present.
-	// In dev the static/ directory only has .gitkeep so this is a no-op.
-	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
-		if _, err := sub.Open("index.html"); err == nil {
-			srv.WithUI(sub)
-			slog.Info("ui: serving embedded SPA")
-		}
-	}
-
-	// Optional SSO. OIDC is disabled unless DRABA_OIDC_ISSUER is set. When it
-	// is, discovery runs against the issuer at startup; a failure here is fatal
-	// so a broken SSO setup is caught at boot rather than presenting users a
-	// dead login button. The client secret is read once and never leaves the
-	// process.
-	oidcSvc, err := auth.NewOIDCService(context.Background(), &auth.OIDCConfig{
-		Issuer:       os.Getenv("DRABA_OIDC_ISSUER"),
-		ClientID:     os.Getenv("DRABA_OIDC_CLIENT_ID"),
-		ClientSecret: os.Getenv("DRABA_OIDC_CLIENT_SECRET"),
-		RedirectURL:  oidcRedirectURL(),
-	})
-	if err != nil {
-		slog.Error("oidc: configuration failed", "err", err)
-		os.Exit(1)
-	}
-	if oidcSvc != nil {
-		// Auto-provisioning defaults ON (first SSO login creates the account),
-		// matching the password-register bootstrap. Set DRABA_OIDC_AUTO_CREATE=0
-		// to require accounts be pre-created before SSO login is allowed.
-		autoCreate := os.Getenv("DRABA_OIDC_AUTO_CREATE") != "0"
-		srv.WithOIDC(oidcSvc, autoCreate)
-		slog.Info("oidc: SSO enabled", "issuer", os.Getenv("DRABA_OIDC_ISSUER"), "autoCreate", autoCreate)
-	}
-
-	slog.Info("listening", "port", port)
-	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
-		slog.Error("server error", "err", err)
-		os.Exit(1)
-	}
-}
-
-// oidcRedirectURL returns the OIDC callback URL the IdP must redirect back to.
-// It honours an explicit DRABA_OIDC_REDIRECT_URL override, otherwise derives it
-// from DRABA_BASE_URL so a single base-URL setting covers both the app and the
-// SSO callback.
-func oidcRedirectURL() string {
-	if v := os.Getenv("DRABA_OIDC_REDIRECT_URL"); v != "" {
-		return v
-	}
-	if os.Getenv("DRABA_OIDC_ISSUER") == "" {
-		return "" // SSO disabled; no redirect needed.
-	}
-	return strings.TrimRight(getenv("DRABA_BASE_URL", "http://localhost:8080"), "/") + "/auth/oidc/callback"
-}
-
-// setupLogger initialises the global slog logger. Level is controlled by
-// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
-// All output goes to stdout so Docker captures it in `docker logs`.
-func setupLogger() {
-	level := slog.LevelInfo
-	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
-}
-
-// getenv returns the env var value or fallback when unset/empty.
-func getenv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-````
-
 ## File: packages/api/internal/api/export_handler.go
 ````go
 package api
@@ -63694,6 +63469,328 @@ func buildTimelineExportICS(timeline *models.Timeline, acts []*models.Activity, 
 
 	events := activitiesToICSEvents(acts, memberName, tagName, statusName, true)
 	return ics.Calendar(timeline.Name, events)
+}
+````
+
+## File: packages/api/internal/api/share_ics_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/ics"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// ── In-memory ICS feed cache ──────────────────────────────────────────────────
+//
+// Mirrors shareCache, but stores the rendered text/calendar payload. Calendar
+// clients poll on their own cadence (minutes to hours), so the same short TTL
+// keeps feeds near-live while absorbing aggressive pollers.
+
+type icsCacheEntry struct {
+	builtAt time.Time
+	payload string
+}
+
+type icsFeedCache struct {
+	mu      sync.RWMutex
+	entries map[string]*icsCacheEntry
+	ttl     time.Duration
+}
+
+func newICSFeedCache(ttl time.Duration) *icsFeedCache {
+	return &icsFeedCache{entries: make(map[string]*icsCacheEntry), ttl: ttl}
+}
+
+func (c *icsFeedCache) get(token string) (string, bool) {
+	c.mu.RLock()
+	e, ok := c.entries[token]
+	c.mu.RUnlock()
+	if !ok || time.Since(e.builtAt) > c.ttl {
+		return "", false
+	}
+	return e.payload, true
+}
+
+func (c *icsFeedCache) set(token, payload string) {
+	c.mu.Lock()
+	c.entries[token] = &icsCacheEntry{builtAt: time.Now(), payload: payload}
+	c.mu.Unlock()
+}
+
+func (c *icsFeedCache) invalidate(token string) {
+	c.mu.Lock()
+	delete(c.entries, token)
+	c.mu.Unlock()
+}
+
+// ── Handlers ──────────────────────────────────────────────────────────────────
+
+// serveICSFeed handles GET /shares/{token}.ics — the public, unauthenticated
+// calendar feed. It is dispatched from handleGetShareProjection when the token
+// path value carries the .ics suffix (Go 1.22 mux wildcards span the whole
+// segment, so the suffix arrives inside {token}).
+//
+// The feed serves live data scoped server-side to the share's timeline — or,
+// for member feeds, to one member's assigned activities. There is no password
+// gate: calendar clients cannot unlock interactively, so the unguessable token
+// is the secret and revocation is rotate-or-delete.
+func (s *Server) serveICSFeed(w http.ResponseWriter, r *http.Request, token string) {
+	share, err := s.shares.GetByToken(token)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
+		return
+	}
+	// A view share is not a feed — 404 rather than leaking that the token
+	// exists in another mode.
+	if share.Kind != models.ShareKindICS {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return
+	}
+	if share.RevokedAt != nil {
+		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
+		return
+	}
+	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
+		writeError(w, http.StatusGone, "GONE", "this share has expired")
+		return
+	}
+
+	// Archived timeline → the feed stops serving (Phase 13.5). 404, not 410:
+	// unarchiving must resurrect the feed, and 410 makes calendar clients
+	// drop the subscription for good. Checked before the cache read so
+	// archiving takes effect immediately.
+	if !s.shareTimelineLive(w, share) {
+		return
+	}
+
+	body, ok := s.icsCache.get(token)
+	if !ok {
+		body, err = s.buildICSFeed(share)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build calendar feed")
+			return
+		}
+		s.icsCache.set(token, body)
+	}
+
+	go func() { _ = s.shares.RecordView(share.ID) }()
+	w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
+	// no-store: the token is the secret and rotate/delete is the only kill
+	// switch for a feed, so a revoked URL must not keep serving from browser
+	// or proxy caches. Server-side load is already absorbed by icsCache.
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write([]byte(body))
+}
+
+// buildICSFeed renders the iCalendar document for an ICS share. Scope is
+// hard-locked server-side: the timeline comes from the share row, and member
+// feeds drop every activity the member is not assigned to before
+// serialization.
+//
+// Each VEVENT projects the activity's display fields: status (+ percent
+// complete), assignee display names, and tag names go into DESCRIPTION (and
+// tags into CATEGORIES); whole-timeline feeds also append assignee names to
+// SUMMARY so the month grid shows who owns what. Member display names are the
+// only person-identifying field a feed may carry — never emails, user IDs, or
+// roles.
+func (s *Server) buildICSFeed(share *models.Share) (string, error) {
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		return "", err
+	}
+
+	acts, err := s.activities.ListByTimeline(share.TimelineID, nil, nil, false)
+	if err != nil {
+		return "", err
+	}
+
+	// Display-name / tag / status lookups for the event field projection.
+	statuses, err := s.statuses.ListStatuses(share.TimelineID)
+	if err != nil {
+		return "", err
+	}
+	statusName := make(map[string]string, len(statuses))
+	for _, st := range statuses {
+		statusName[st.ID] = st.Name
+	}
+	members, err := s.teams.ListMembers(timeline.TeamID)
+	if err != nil {
+		return "", err
+	}
+	memberName := make(map[string]string, len(members))
+	for _, m := range members {
+		if m.DisplayName != "" {
+			memberName[m.ID] = m.DisplayName
+		}
+	}
+	tags, err := s.tags.ListByTeam(timeline.TeamID)
+	if err != nil {
+		return "", err
+	}
+	tagName := make(map[string]string, len(tags))
+	for _, tg := range tags {
+		tagName[tg.ID] = tg.Name
+	}
+
+	memberScoped := share.Scope != nil && *share.Scope == models.ShareScopeMember && share.MemberID != nil
+
+	name := timeline.Name
+	if memberScoped {
+		filtered := acts[:0]
+		for _, a := range acts {
+			for _, id := range a.AssignedMemberIDs {
+				if id == *share.MemberID {
+					filtered = append(filtered, a)
+					break
+				}
+			}
+		}
+		acts = filtered
+
+		if n, ok := memberName[*share.MemberID]; ok {
+			name = timeline.Name + " — " + n
+		}
+	}
+
+	// A member feed is one person's calendar — repeating their name on every
+	// event is noise. The whole-timeline feed is the team overview, where
+	// who-owns-what belongs in the month grid.
+	events := activitiesToICSEvents(acts, memberName, tagName, statusName, !memberScoped)
+	return ics.Calendar(name, events), nil
+}
+
+// activitiesToICSEvents projects activities into iCalendar VEVENTs. Each
+// event's DESCRIPTION carries structured field lines (status + percent
+// complete, assignee display names, tag names) followed by the free-text
+// activity description; CATEGORIES carries tag names. If
+// includeAssigneesInSummary is set, assignee names are appended to SUMMARY.
+func activitiesToICSEvents(acts []*models.Activity, memberName, tagName, statusName map[string]string, includeAssigneesInSummary bool) []ics.Event {
+	events := make([]ics.Event, 0, len(acts))
+	for _, a := range acts {
+		assignees := make([]string, 0, len(a.AssignedMemberIDs))
+		for _, id := range a.AssignedMemberIDs {
+			if n, ok := memberName[id]; ok {
+				assignees = append(assignees, n)
+			}
+		}
+		tagNames := make([]string, 0, len(a.TagIDs))
+		for _, id := range a.TagIDs {
+			if n, ok := tagName[id]; ok {
+				tagNames = append(tagNames, n)
+			}
+		}
+
+		summary := a.Title
+		if includeAssigneesInSummary && len(assignees) > 0 {
+			summary += " — " + strings.Join(assignees, ", ")
+		}
+
+		// Structured field lines first, then a blank line, then the
+		// free-text activity description.
+		meta := make([]string, 0, 3)
+		if a.StatusID != nil {
+			if n, ok := statusName[*a.StatusID]; ok {
+				line := "Status: " + n
+				if a.PercentComplete != nil {
+					line += fmt.Sprintf(" (%d%%)", *a.PercentComplete)
+				}
+				meta = append(meta, line)
+			}
+		} else if a.PercentComplete != nil {
+			meta = append(meta, fmt.Sprintf("Progress: %d%%", *a.PercentComplete))
+		}
+		if len(assignees) > 0 {
+			meta = append(meta, "Assigned: "+strings.Join(assignees, ", "))
+		}
+		if len(tagNames) > 0 {
+			meta = append(meta, "Tags: "+strings.Join(tagNames, ", "))
+		}
+		desc := strings.Join(meta, "\n")
+		if a.Description != nil && *a.Description != "" {
+			if desc != "" {
+				desc += "\n\n"
+			}
+			desc += *a.Description
+		}
+
+		events = append(events, ics.Event{
+			UID:         a.ID + "@draba",
+			Summary:     summary,
+			Description: desc,
+			Categories:  tagNames,
+			Start:       a.StartAt,
+			End:         a.EndAt,
+			Stamp:       a.UpdatedAt,
+		})
+	}
+	return events
+}
+
+// handleGetShareICSNamed handles GET /shares/{token}/{file}. The file segment
+// must end in .ics but is otherwise cosmetic: most calendar clients
+// (Thunderbird included) default the new calendar's name from the URL's
+// filename, so the modal links carry a readable slug (e.g. .../sales-kick-off.ics).
+// The token alone is authoritative.
+func (s *Server) handleGetShareICSNamed(w http.ResponseWriter, r *http.Request) {
+	if !strings.HasSuffix(r.PathValue("file"), ".ics") {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return
+	}
+	s.serveICSFeed(w, r, r.PathValue("token"))
+}
+
+// handleRegenerateShare handles POST /shares/{id}/regenerate. It rotates the
+// share's token, immediately invalidating the old URL — the revocation story
+// for ICS feeds, which cannot carry a password. It works for view shares too
+// (rotating is strictly safer than nothing), and any member of the timeline's
+// team may do it, consistent with PATCH/DELETE.
+func (s *Server) handleRegenerateShare(w http.ResponseWriter, r *http.Request) {
+	shareID := r.PathValue("id")
+
+	share, err := s.shares.GetByID(shareID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	oldToken := share.Token
+	share.Token = newToken()
+	if err := s.shares.RotateToken(share.ID, share.Token); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to regenerate share link")
+		return
+	}
+
+	// Kill both caches for the dead token so it stops serving immediately.
+	s.shareCache.invalidate(oldToken)
+	s.icsCache.invalidate(oldToken)
+
+	writeJSON(w, http.StatusOK, share)
 }
 ````
 
@@ -64834,325 +64931,227 @@ export function buildCalendarHtml(
 }
 ````
 
-## File: packages/api/internal/api/share_ics_handler.go
+## File: packages/api/cmd/draba/main.go
 ````go
-package api
+// Command draba is the API server entry point. It wires repositories,
+// the auth token service, and tier configuration into the HTTP server,
+// then listens for requests until the process is killed.
+package main
 
 import (
-	"database/sql"
-	"errors"
+	"context"
 	"fmt"
+	"io/fs"
+	"log/slog"
 	"net/http"
+	"os"
 	"strings"
-	"sync"
-	"time"
 
-	"github.com/I0-1O/draba/packages/api/internal/ics"
-	"github.com/I0-1O/draba/packages/api/internal/models"
+	"github.com/I0-1O/draba/packages/api/internal/api"
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/backup"
+	"github.com/I0-1O/draba/packages/api/internal/buildinfo"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+	sampledata "github.com/I0-1O/draba/packages/api/sample_data"
+	drabui "github.com/I0-1O/draba/packages/api/ui"
 )
 
-// ── In-memory ICS feed cache ──────────────────────────────────────────────────
-//
-// Mirrors shareCache, but stores the rendered text/calendar payload. Calendar
-// clients poll on their own cadence (minutes to hours), so the same short TTL
-// keeps feeds near-live while absorbing aggressive pollers.
+const banner = "\n" +
+	"      _           _\n" +
+	"     | |         | |\n" +
+	"   __| |_ __ __ _| |__   __ _\n" +
+	"  / _` | '__/ _` | '_ \\ / _` |\n" +
+	" | (_| | | | (_| | |_) | (_| |\n" +
+	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
+	"\n" +
+	"  see who's doing what, when.\n\n"
 
-type icsCacheEntry struct {
-	builtAt time.Time
-	payload string
-}
-
-type icsFeedCache struct {
-	mu      sync.RWMutex
-	entries map[string]*icsCacheEntry
-	ttl     time.Duration
-}
-
-func newICSFeedCache(ttl time.Duration) *icsFeedCache {
-	return &icsFeedCache{entries: make(map[string]*icsCacheEntry), ttl: ttl}
-}
-
-func (c *icsFeedCache) get(token string) (string, bool) {
-	c.mu.RLock()
-	e, ok := c.entries[token]
-	c.mu.RUnlock()
-	if !ok || time.Since(e.builtAt) > c.ttl {
-		return "", false
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
+		runResetPassword(os.Args[2:])
+		return
 	}
-	return e.payload, true
-}
 
-func (c *icsFeedCache) set(token, payload string) {
-	c.mu.Lock()
-	c.entries[token] = &icsCacheEntry{builtAt: time.Now(), payload: payload}
-	c.mu.Unlock()
-}
+	setupLogger()
+	fmt.Print(banner)
+	slog.Info("build", "commit", buildinfo.Short(), "built", buildinfo.Built)
 
-func (c *icsFeedCache) invalidate(token string) {
-	c.mu.Lock()
-	delete(c.entries, token)
-	c.mu.Unlock()
-}
+	port := getenv("DRABA_PORT", "8080")
+	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
+	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
+	if jwtSecret == "" {
+		slog.Error("DRABA_JWT_SECRET must be set")
+		os.Exit(1)
+	}
 
-// ── Handlers ──────────────────────────────────────────────────────────────────
-
-// serveICSFeed handles GET /shares/{token}.ics — the public, unauthenticated
-// calendar feed. It is dispatched from handleGetShareProjection when the token
-// path value carries the .ics suffix (Go 1.22 mux wildcards span the whole
-// segment, so the suffix arrives inside {token}).
-//
-// The feed serves live data scoped server-side to the share's timeline — or,
-// for member feeds, to one member's assigned activities. There is no password
-// gate: calendar clients cannot unlock interactively, so the unguessable token
-// is the secret and revocation is rotate-or-delete.
-func (s *Server) serveICSFeed(w http.ResponseWriter, r *http.Request, token string) {
-	share, err := s.shares.GetByToken(token)
+	t, err := tier.Load()
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
-		return
+		slog.Error("tier load failed", "err", err)
+		os.Exit(1)
 	}
-	// A view share is not a feed — 404 rather than leaking that the token
-	// exists in another mode.
-	if share.Kind != models.ShareKindICS {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-		return
-	}
-	if share.RevokedAt != nil {
-		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
-		return
-	}
-	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
-		writeError(w, http.StatusGone, "GONE", "this share has expired")
-		return
+	l := t.Limits()
+	if l.MaxUsers == 0 {
+		slog.Info("tier", "tier", t)
+	} else {
+		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
 	}
 
-	// Archived timeline → the feed stops serving (Phase 13.5). 404, not 410:
-	// unarchiving must resurrect the feed, and 410 makes calendar clients
-	// drop the subscription for good. Checked before the cache read so
-	// archiving takes effect immediately.
-	if !s.shareTimelineLive(w, share) {
-		return
+	database, err := db.Open(dsn)
+	if err != nil {
+		slog.Error("db: open failed", "err", err)
+		os.Exit(1)
 	}
+	slog.Info("db: opened", "dsn", dsn)
 
-	body, ok := s.icsCache.get(token)
-	if !ok {
-		body, err = s.buildICSFeed(share)
+	if err := db.Migrate(database); err != nil {
+		slog.Error("db: migrate failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: migrations applied")
+
+	// Optional pre-launch convenience: seed the canonical sample dataset into an
+	// empty database so a freshly-wiped dev/test instance comes up populated.
+	// Gated by DRABA_SEED_SAMPLE_DATA and a no-op once the DB has any users — it
+	// must stay unset in any real deployment.
+	if os.Getenv("DRABA_SEED_SAMPLE_DATA") == "1" {
+		sql, err := sampledata.SQL()
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build calendar feed")
-			return
+			slog.Error("db: reading embedded sample data failed", "err", err)
+			os.Exit(1)
 		}
-		s.icsCache.set(token, body)
+		seeded, err := db.SeedSampleDataIfEmpty(database, sql)
+		if err != nil {
+			slog.Error("db: sample-data seed failed", "err", err)
+			os.Exit(1)
+		}
+		if seeded {
+			slog.Info("db: sample data seeded (database was empty)")
+		} else {
+			slog.Info("db: sample-data seed skipped (database already populated)")
+		}
 	}
 
-	go func() { _ = s.shares.RecordView(share.ID) }()
-	w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
-	// no-store: the token is the secret and rotate/delete is the only kill
-	// switch for a feed, so a revoked URL must not keep serving from browser
-	// or proxy caches. Server-side load is already absorbed by icsCache.
-	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write([]byte(body))
+	users := db.NewUserRepo(database)
+	invites := db.NewInviteRepo(database)
+	teams := db.NewTeamRepo(database)
+	activityRepo := db.NewActivityRepo(database)
+	timelineRepo := db.NewTimelineRepo(database)
+	savedFilterRepo := db.NewSavedFilterRepo(database)
+	preferenceRepo := db.NewUserPreferenceRepo(database)
+	apiTokenRepo := db.NewAPITokenRepo(database)
+	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
+	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
+	statusRepo := db.NewStatusRepo(database)
+	tagRepo := db.NewTagRepo(database)
+	shareRepo := db.NewShareRepo(database)
+	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
+	tokens := auth.NewTokenService(jwtSecret)
+
+	bus := events.NewBus()
+	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
+		_, err := teams.GetMember(teamID, userID)
+		return err
+	})
+	go hub.Run()
+	slog.Info("ws: hub running")
+
+	if mods := tier.Registered(); len(mods) > 0 {
+		slog.Info("modules loaded", "count", len(mods))
+	}
+
+	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagRepo, shareRepo, m, tokens, t, bus, hub)
+
+	// An unwritable backup dir is loud at boot but not fatal — the status
+	// endpoint reports it and runs fail cleanly, so a misconfigured volume
+	// never blocks the app itself from serving.
+	backupDir := getenv("DRABA_BACKUP_DIR", "/data/backups")
+	if err := backup.EnsureDir(backupDir); err != nil {
+		slog.Warn("backup: directory not writable; backups will fail until fixed", "dir", backupDir, "err", err)
+	} else {
+		slog.Info("backup: directory ready", "dir", backupDir)
+	}
+	srv.WithBackup(backup.NewManager(backup.NewSQLiteEngine(database), backupDir, dsn))
+
+	// Wire up the embedded React SPA when a production build is present.
+	// In dev the static/ directory only has .gitkeep so this is a no-op.
+	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
+		if _, err := sub.Open("index.html"); err == nil {
+			srv.WithUI(sub)
+			slog.Info("ui: serving embedded SPA")
+		}
+	}
+
+	// Optional SSO. OIDC is disabled unless DRABA_OIDC_ISSUER is set. When it
+	// is, discovery runs against the issuer at startup; a failure here is fatal
+	// so a broken SSO setup is caught at boot rather than presenting users a
+	// dead login button. The client secret is read once and never leaves the
+	// process.
+	oidcSvc, err := auth.NewOIDCService(context.Background(), &auth.OIDCConfig{
+		Issuer:       os.Getenv("DRABA_OIDC_ISSUER"),
+		ClientID:     os.Getenv("DRABA_OIDC_CLIENT_ID"),
+		ClientSecret: os.Getenv("DRABA_OIDC_CLIENT_SECRET"),
+		RedirectURL:  oidcRedirectURL(),
+	})
+	if err != nil {
+		slog.Error("oidc: configuration failed", "err", err)
+		os.Exit(1)
+	}
+	if oidcSvc != nil {
+		// Auto-provisioning defaults ON (first SSO login creates the account),
+		// matching the password-register bootstrap. Set DRABA_OIDC_AUTO_CREATE=0
+		// to require accounts be pre-created before SSO login is allowed.
+		autoCreate := os.Getenv("DRABA_OIDC_AUTO_CREATE") != "0"
+		srv.WithOIDC(oidcSvc, autoCreate)
+		slog.Info("oidc: SSO enabled", "issuer", os.Getenv("DRABA_OIDC_ISSUER"), "autoCreate", autoCreate)
+	}
+
+	slog.Info("listening", "port", port)
+	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
+		slog.Error("server error", "err", err)
+		os.Exit(1)
+	}
 }
 
-// buildICSFeed renders the iCalendar document for an ICS share. Scope is
-// hard-locked server-side: the timeline comes from the share row, and member
-// feeds drop every activity the member is not assigned to before
-// serialization.
-//
-// Each VEVENT projects the activity's display fields: status (+ percent
-// complete), assignee display names, and tag names go into DESCRIPTION (and
-// tags into CATEGORIES); whole-timeline feeds also append assignee names to
-// SUMMARY so the month grid shows who owns what. Member display names are the
-// only person-identifying field a feed may carry — never emails, user IDs, or
-// roles.
-func (s *Server) buildICSFeed(share *models.Share) (string, error) {
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if err != nil {
-		return "", err
+// oidcRedirectURL returns the OIDC callback URL the IdP must redirect back to.
+// It honours an explicit DRABA_OIDC_REDIRECT_URL override, otherwise derives it
+// from DRABA_BASE_URL so a single base-URL setting covers both the app and the
+// SSO callback.
+func oidcRedirectURL() string {
+	if v := os.Getenv("DRABA_OIDC_REDIRECT_URL"); v != "" {
+		return v
 	}
-
-	acts, err := s.activities.ListByTimeline(share.TimelineID, nil, nil, false)
-	if err != nil {
-		return "", err
+	if os.Getenv("DRABA_OIDC_ISSUER") == "" {
+		return "" // SSO disabled; no redirect needed.
 	}
-
-	// Display-name / tag / status lookups for the event field projection.
-	statuses, err := s.statuses.ListStatuses(share.TimelineID)
-	if err != nil {
-		return "", err
-	}
-	statusName := make(map[string]string, len(statuses))
-	for _, st := range statuses {
-		statusName[st.ID] = st.Name
-	}
-	members, err := s.teams.ListMembers(timeline.TeamID)
-	if err != nil {
-		return "", err
-	}
-	memberName := make(map[string]string, len(members))
-	for _, m := range members {
-		if m.DisplayName != "" {
-			memberName[m.ID] = m.DisplayName
-		}
-	}
-	tags, err := s.tags.ListByTeam(timeline.TeamID)
-	if err != nil {
-		return "", err
-	}
-	tagName := make(map[string]string, len(tags))
-	for _, tg := range tags {
-		tagName[tg.ID] = tg.Name
-	}
-
-	memberScoped := share.Scope != nil && *share.Scope == models.ShareScopeMember && share.MemberID != nil
-
-	name := timeline.Name
-	if memberScoped {
-		filtered := acts[:0]
-		for _, a := range acts {
-			for _, id := range a.AssignedMemberIDs {
-				if id == *share.MemberID {
-					filtered = append(filtered, a)
-					break
-				}
-			}
-		}
-		acts = filtered
-
-		if n, ok := memberName[*share.MemberID]; ok {
-			name = timeline.Name + " — " + n
-		}
-	}
-
-	// A member feed is one person's calendar — repeating their name on every
-	// event is noise. The whole-timeline feed is the team overview, where
-	// who-owns-what belongs in the month grid.
-	events := activitiesToICSEvents(acts, memberName, tagName, statusName, !memberScoped)
-	return ics.Calendar(name, events), nil
+	return strings.TrimRight(getenv("DRABA_BASE_URL", "http://localhost:8080"), "/") + "/auth/oidc/callback"
 }
 
-// activitiesToICSEvents projects activities into iCalendar VEVENTs. Each
-// event's DESCRIPTION carries structured field lines (status + percent
-// complete, assignee display names, tag names) followed by the free-text
-// activity description; CATEGORIES carries tag names. If
-// includeAssigneesInSummary is set, assignee names are appended to SUMMARY.
-func activitiesToICSEvents(acts []*models.Activity, memberName, tagName, statusName map[string]string, includeAssigneesInSummary bool) []ics.Event {
-	events := make([]ics.Event, 0, len(acts))
-	for _, a := range acts {
-		assignees := make([]string, 0, len(a.AssignedMemberIDs))
-		for _, id := range a.AssignedMemberIDs {
-			if n, ok := memberName[id]; ok {
-				assignees = append(assignees, n)
-			}
-		}
-		tagNames := make([]string, 0, len(a.TagIDs))
-		for _, id := range a.TagIDs {
-			if n, ok := tagName[id]; ok {
-				tagNames = append(tagNames, n)
-			}
-		}
-
-		summary := a.Title
-		if includeAssigneesInSummary && len(assignees) > 0 {
-			summary += " — " + strings.Join(assignees, ", ")
-		}
-
-		// Structured field lines first, then a blank line, then the
-		// free-text activity description.
-		meta := make([]string, 0, 3)
-		if a.StatusID != nil {
-			if n, ok := statusName[*a.StatusID]; ok {
-				line := "Status: " + n
-				if a.PercentComplete != nil {
-					line += fmt.Sprintf(" (%d%%)", *a.PercentComplete)
-				}
-				meta = append(meta, line)
-			}
-		} else if a.PercentComplete != nil {
-			meta = append(meta, fmt.Sprintf("Progress: %d%%", *a.PercentComplete))
-		}
-		if len(assignees) > 0 {
-			meta = append(meta, "Assigned: "+strings.Join(assignees, ", "))
-		}
-		if len(tagNames) > 0 {
-			meta = append(meta, "Tags: "+strings.Join(tagNames, ", "))
-		}
-		desc := strings.Join(meta, "\n")
-		if a.Description != nil && *a.Description != "" {
-			if desc != "" {
-				desc += "\n\n"
-			}
-			desc += *a.Description
-		}
-
-		events = append(events, ics.Event{
-			UID:         a.ID + "@draba",
-			Summary:     summary,
-			Description: desc,
-			Categories:  tagNames,
-			Start:       a.StartAt,
-			End:         a.EndAt,
-			Stamp:       a.UpdatedAt,
-		})
+// setupLogger initialises the global slog logger. Level is controlled by
+// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
+// All output goes to stdout so Docker captures it in `docker logs`.
+func setupLogger() {
+	level := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
 	}
-	return events
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
 }
 
-// handleGetShareICSNamed handles GET /shares/{token}/{file}. The file segment
-// must end in .ics but is otherwise cosmetic: most calendar clients
-// (Thunderbird included) default the new calendar's name from the URL's
-// filename, so the modal links carry a readable slug (e.g. .../sales-kick-off.ics).
-// The token alone is authoritative.
-func (s *Server) handleGetShareICSNamed(w http.ResponseWriter, r *http.Request) {
-	if !strings.HasSuffix(r.PathValue("file"), ".ics") {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-		return
+// getenv returns the env var value or fallback when unset/empty.
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
 	}
-	s.serveICSFeed(w, r, r.PathValue("token"))
-}
-
-// handleRegenerateShare handles POST /shares/{id}/regenerate. It rotates the
-// share's token, immediately invalidating the old URL — the revocation story
-// for ICS feeds, which cannot carry a password. It works for view shares too
-// (rotating is strictly safer than nothing), and any member of the timeline's
-// team may do it, consistent with PATCH/DELETE.
-func (s *Server) handleRegenerateShare(w http.ResponseWriter, r *http.Request) {
-	shareID := r.PathValue("id")
-
-	share, err := s.shares.GetByID(shareID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	oldToken := share.Token
-	share.Token = newToken()
-	if err := s.shares.RotateToken(share.ID, share.Token); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to regenerate share link")
-		return
-	}
-
-	// Kill both caches for the dead token so it stops serving immediately.
-	s.shareCache.invalidate(oldToken)
-	s.icsCache.invalidate(oldToken)
-
-	writeJSON(w, http.StatusOK, share)
+	return fallback
 }
 ````
 
@@ -65785,8 +65784,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
 	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
 
-	// Backup admin routes (Phase 16.1). Registered only when the backup
-	// manager is wired so tests without a backup dir skip the surface.
+	// Backup admin routes are registered only when the backup manager is
+	// wired, so tests without a backup dir skip the surface.
 	if s.backup != nil {
 		mux.HandleFunc("GET /admin/backup/status", chain(s.handleGetBackupStatus, s.authMiddleware))
 		mux.HandleFunc("POST /admin/backup", chain(s.handlePostBackup, s.authMiddleware))
@@ -67542,21 +67541,8 @@ export interface components {
              */
             health: "ok" | "stale" | "critical";
             running: boolean;
-            /** @description Null until the Phase 16.2 scheduler lands (and when scheduling is off). */
-            schedule?: components["schemas"]["BackupSchedule"] | null;
-        };
-        /** @description Preset-based backup schedule (Phase 16.2). Stored as one instance_settings JSON value. */
-        BackupSchedule: {
-            /** @enum {string} */
-            preset: "off" | "hourly" | "every6h" | "every12h" | "daily" | "weekly";
-            /** @description HH:MM (UTC), for daily and weekly presets. */
-            time?: string;
-            /**
-             * @description Weekly preset only.
-             * @enum {string}
-             */
-            day?: "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
-            keepLast: number;
+            /** @description Reserved for the backup scheduler; always null until that ships (and when scheduling is off). */
+            schedule?: Record<string, never> | null;
         };
         Team: {
             id: string;
@@ -71355,7 +71341,7 @@ openapi: "3.0.3"
 
 info:
   title: draba API
-  description: Team coordination API — Phases 2–10.4.5 (auth, teams, events, timelines, tags).
+  description: Team coordination API — auth, teams, timelines, activities, tags, shares, import, and admin operations.
   version: "1.0.0"
 
 servers:
@@ -71545,30 +71531,9 @@ components:
         running:
           type: boolean
         schedule:
-          allOf:
-            - $ref: '#/components/schemas/BackupSchedule'
+          type: object
           nullable: true
-          description: Null until the Phase 16.2 scheduler lands (and when scheduling is off).
-
-    BackupSchedule:
-      type: object
-      description: Preset-based backup schedule (Phase 16.2). Stored as one instance_settings JSON value.
-      required: [preset, keepLast]
-      properties:
-        preset:
-          type: string
-          enum: [off, hourly, every6h, every12h, daily, weekly]
-        time:
-          type: string
-          description: HH:MM (UTC), for daily and weekly presets.
-        day:
-          type: string
-          enum: [mon, tue, wed, thu, fri, sat, sun]
-          description: Weekly preset only.
-        keepLast:
-          type: integer
-          minimum: 1
-          maximum: 365
+          description: Reserved for the backup scheduler; always null until that ships (and when scheduling is off).
 
     Team:
       type: object
@@ -79054,12 +79019,13 @@ _Planned 2026-07-08 — see [docs/plans/phase-16-backup.md](plans/phase-16-backu
 - [x] `POST /admin/backup` — synchronous run-now; `201` + entry, `409 BACKUP_IN_PROGRESS` under guard, no leftover file on failure
 - [x] `GET /admin/backup/history` — directory scan, pattern-filtered, newest first; foreign files never listed
 - [x] `DELETE /admin/backup/{filename}` — exact pattern match as the path-traversal guard; `404`/`204`
-- [x] OpenAPI: `BackupStatus`, `BackupEntry`, `BackupSchedule`; regenerate TS types
-- [x] Tests: vacuum under concurrent writes, verify-failure cleanup, filename round-trip + foreign-file exclusion + traversal rejection, retention sweep, concurrency guard, status shape
+- [x] OpenAPI: `BackupStatus`, `BackupEntry`; regenerate TS types (`BackupSchedule` deferred to 16.2 per the 2026-07-09 review — `schedule` is a nullable stub until then)
+- [x] Tests: vacuum under concurrent writes, verify-failure cleanup, filename round-trip + foreign-file exclusion + traversal rejection, retention sweep, concurrency guard, status shape (incl. unwritable dir)
+- [x] `/review-phase 16.1` (2026-07-09): 0 blockers; fixes applied — 0700/0600 backup permissions, `SetKeepLast` removed (plain field until 16.2), schedule schema deferred, phase-tag comments dropped
 
 **16.2 Server — scheduler, retention-in-anger, failure notification:**
 - [ ] `internal/backup.Scheduler`: preset → next-run computation (injected clock), timer loop, config-change recompute, skip-while-running; no catch-up for missed windows (v1)
-- [ ] `GET`/`PUT /admin/backup/schedule` — presets `off|hourly|every6h|every12h|daily@HH:MM|weekly@day+HH:MM` + `keepLast` 1–365, validated; one `instance_settings` JSON key; response echoes `nextRunAt`
+- [ ] `GET`/`PUT /admin/backup/schedule` — presets `off|hourly|every6h|every12h|daily@HH:MM|weekly@day+HH:MM` + `keepLast` 1–365, validated; one `instance_settings` JSON key; response echoes `nextRunAt`; add the `BackupSchedule` OpenAPI schema (deferred from 16.1) + a `Manager` retention setter (`SetKeepLast` was removed in the 16.1 review as caller-less)
 - [ ] Default-on for instances with no stored config: daily 02:00, keep-last-14
 - [ ] `backup.completed` / `backup.failed` bus events (instance-scoped, not team-broadcast); failure consumer emails superadmins via existing mailer, silent no-op without SMTP config
 - [ ] `main.go` wiring: `backup.Manager` + `go scheduler.Run(ctx)` beside the WS hub
@@ -81000,6 +80966,19 @@ Adds i18n infrastructure and ships the first non-English locale. The "Default la
 ## File: docs/log.md
 ````markdown
 # Development Log
+
+---
+
+## 2026-07-09 — /review-phase 16.1 + fixes
+- Four parallel review agents (scope, security, conventions, test coverage) over the 16.1 diff (`3c738cc..HEAD`, repomap excluded): **0 blockers**, 4 suggestions, 8 nits. Security fundamentals confirmed clean: superadmin gating on all four routes, full-anchor filename regex as the delete traversal guard, `VACUUM INTO ?` bound parameter, no secrets in the diff.
+- All suggestions fixed same session:
+  - **Backup permissions tightened** — backup dir now `0700` (was `0755`) and each copy is `chmod 0600` right after `VACUUM INTO` (umask default was ~`0644`); a backup is the full DB, password hashes included. Chmod failure aborts the run and removes the partial (`manager.go`).
+  - **`BackupSchedule` schema pulled from `openapi.yaml`** — 16.2 surface that landed early; `BackupStatus.schedule` is now a bare nullable-object stub. TS types regenerated.
+  - **`Manager.SetKeepLast` removed** — no production caller until the 16.2 scheduler; `keepLast` is a plain field set to `DefaultKeepLast` in `NewManager` (tests set it directly, same package).
+  - **`writable:false` covered** — new `TestManager_StatusReportsUnwritableDir` occupies the write-probe name with a directory, which fails the probe portably (Windows ignores permission bits).
+- Comment nits fixed: phase-tag comments dropped from `server.go` route registration and `main.go` backup wiring (git's job, per skills/go-comments.md); `openapi.yaml` `info.description` de-staled by dropping the phase range entirely.
+- Accepted as-is (recorded, not changed): `POST /admin/backup` 500 returns `err.Error()` (superadmin-only, accepted 2026-07-09); handler `schedule: nil` + `TriggerScheduled` constant stay (deliberate shape/pattern stability for 16.2); remaining handler 500-path and `HealthStale`-through-endpoint test gaps judged low-value.
+- Checks: `golangci-lint run` 0 issues; `go test ./...` all pass; `pnpm --filter shared generate && lint` clean.
 
 ---
 
