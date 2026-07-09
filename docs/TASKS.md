@@ -1308,12 +1308,13 @@ _Planned 2026-07-08 — see [docs/plans/phase-16-backup.md](plans/phase-16-backu
 - [x] `POST /admin/backup` — synchronous run-now; `201` + entry, `409 BACKUP_IN_PROGRESS` under guard, no leftover file on failure
 - [x] `GET /admin/backup/history` — directory scan, pattern-filtered, newest first; foreign files never listed
 - [x] `DELETE /admin/backup/{filename}` — exact pattern match as the path-traversal guard; `404`/`204`
-- [x] OpenAPI: `BackupStatus`, `BackupEntry`, `BackupSchedule`; regenerate TS types
-- [x] Tests: vacuum under concurrent writes, verify-failure cleanup, filename round-trip + foreign-file exclusion + traversal rejection, retention sweep, concurrency guard, status shape
+- [x] OpenAPI: `BackupStatus`, `BackupEntry`; regenerate TS types (`BackupSchedule` deferred to 16.2 per the 2026-07-09 review — `schedule` is a nullable stub until then)
+- [x] Tests: vacuum under concurrent writes, verify-failure cleanup, filename round-trip + foreign-file exclusion + traversal rejection, retention sweep, concurrency guard, status shape (incl. unwritable dir)
+- [x] `/review-phase 16.1` (2026-07-09): 0 blockers; fixes applied — 0700/0600 backup permissions, `SetKeepLast` removed (plain field until 16.2), schedule schema deferred, phase-tag comments dropped
 
 **16.2 Server — scheduler, retention-in-anger, failure notification:**
 - [ ] `internal/backup.Scheduler`: preset → next-run computation (injected clock), timer loop, config-change recompute, skip-while-running; no catch-up for missed windows (v1)
-- [ ] `GET`/`PUT /admin/backup/schedule` — presets `off|hourly|every6h|every12h|daily@HH:MM|weekly@day+HH:MM` + `keepLast` 1–365, validated; one `instance_settings` JSON key; response echoes `nextRunAt`
+- [ ] `GET`/`PUT /admin/backup/schedule` — presets `off|hourly|every6h|every12h|daily@HH:MM|weekly@day+HH:MM` + `keepLast` 1–365, validated; one `instance_settings` JSON key; response echoes `nextRunAt`; add the `BackupSchedule` OpenAPI schema (deferred from 16.1) + a `Manager` retention setter (`SetKeepLast` was removed in the 16.1 review as caller-less)
 - [ ] Default-on for instances with no stored config: daily 02:00, keep-last-14
 - [ ] `backup.completed` / `backup.failed` bus events (instance-scoped, not team-broadcast); failure consumer emails superadmins via existing mailer, silent no-op without SMTP config
 - [ ] `main.go` wiring: `backup.Manager` + `go scheduler.Run(ctx)` beside the WS hub

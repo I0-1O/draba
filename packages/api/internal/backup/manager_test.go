@@ -168,7 +168,7 @@ func TestManager_BackupFailureRemovesPartialFile(t *testing.T) {
 func TestManager_RetentionSweep(t *testing.T) {
 	dir := t.TempDir()
 	m := NewManager(&fakeEngine{}, dir, "unused")
-	m.SetKeepLast(2)
+	m.keepLast = 2
 
 	// A foreign file the admin dropped in must survive every sweep.
 	foreign := filepath.Join(dir, "pre-upgrade.db")
@@ -294,6 +294,19 @@ func TestManager_Status(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, st.LastBackup)
 	assert.Equal(t, HealthOK, st.Health)
+}
+
+func TestManager_StatusReportsUnwritableDir(t *testing.T) {
+	dir := t.TempDir()
+	// Occupying the probe's name with a directory makes the write probe fail
+	// on every OS, without resorting to permission bits (which don't restrict
+	// on Windows).
+	require.NoError(t, os.Mkdir(filepath.Join(dir, ".draba-writecheck"), 0o700))
+	m := NewManager(&fakeEngine{}, dir, "unused")
+
+	st, err := m.Status()
+	require.NoError(t, err)
+	assert.False(t, st.BackupDir.Writable)
 }
 
 func TestHealthFor_Thresholds(t *testing.T) {

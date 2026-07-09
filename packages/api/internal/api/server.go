@@ -186,8 +186,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
 	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
 
-	// Backup admin routes (Phase 16.1). Registered only when the backup
-	// manager is wired so tests without a backup dir skip the surface.
+	// Backup admin routes are registered only when the backup manager is
+	// wired, so tests without a backup dir skip the surface.
 	if s.backup != nil {
 		mux.HandleFunc("GET /admin/backup/status", chain(s.handleGetBackupStatus, s.authMiddleware))
 		mux.HandleFunc("POST /admin/backup", chain(s.handlePostBackup, s.authMiddleware))

@@ -2,6 +2,19 @@
 
 ---
 
+## 2026-07-09 — /review-phase 16.1 + fixes
+- Four parallel review agents (scope, security, conventions, test coverage) over the 16.1 diff (`3c738cc..HEAD`, repomap excluded): **0 blockers**, 4 suggestions, 8 nits. Security fundamentals confirmed clean: superadmin gating on all four routes, full-anchor filename regex as the delete traversal guard, `VACUUM INTO ?` bound parameter, no secrets in the diff.
+- All suggestions fixed same session:
+  - **Backup permissions tightened** — backup dir now `0700` (was `0755`) and each copy is `chmod 0600` right after `VACUUM INTO` (umask default was ~`0644`); a backup is the full DB, password hashes included. Chmod failure aborts the run and removes the partial (`manager.go`).
+  - **`BackupSchedule` schema pulled from `openapi.yaml`** — 16.2 surface that landed early; `BackupStatus.schedule` is now a bare nullable-object stub. TS types regenerated.
+  - **`Manager.SetKeepLast` removed** — no production caller until the 16.2 scheduler; `keepLast` is a plain field set to `DefaultKeepLast` in `NewManager` (tests set it directly, same package).
+  - **`writable:false` covered** — new `TestManager_StatusReportsUnwritableDir` occupies the write-probe name with a directory, which fails the probe portably (Windows ignores permission bits).
+- Comment nits fixed: phase-tag comments dropped from `server.go` route registration and `main.go` backup wiring (git's job, per skills/go-comments.md); `openapi.yaml` `info.description` de-staled by dropping the phase range entirely.
+- Accepted as-is (recorded, not changed): `POST /admin/backup` 500 returns `err.Error()` (superadmin-only, accepted 2026-07-09); handler `schedule: nil` + `TriggerScheduled` constant stay (deliberate shape/pattern stability for 16.2); remaining handler 500-path and `HealthStale`-through-endpoint test gaps judged low-value.
+- Checks: `golangci-lint run` 0 issues; `go test ./...` all pass; `pnpm --filter shared generate && lint` clean.
+
+---
+
 ## 2026-07-09 — /test-phase 16.1
 - Subagents run: static-check, unit-test (Go + Vitest), schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: all pass (8/8; ws-smoke live portion clean-skipped — no WS client on the dev box, covered by `TestHub_*` unit tests per precedent. docs/TESTING.md still has no Phase 15/16 sections, so 16.1 assertions were sourced from ROADMAP/plan §16.1 + the 2026-07-08 log entry — backfill remains 15.3/16.3 scope)

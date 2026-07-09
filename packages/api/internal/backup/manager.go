@@ -99,7 +99,7 @@ type Manager struct {
 	engine   Engine
 	dir      string
 	dbPath   string
-	keepLast atomic.Int32
+	keepLast int
 	running  atomic.Bool
 	// mu serializes runs; TryLock (not Lock) so a second caller gets an
 	// immediate ErrBackupInProgress instead of queueing.
@@ -110,19 +110,9 @@ type Manager struct {
 
 // NewManager returns a Manager writing backups of the database file at
 // dbPath into dir, using engine to produce and verify copies. Retention
-// starts at DefaultKeepLast.
+// keeps DefaultKeepLast files.
 func NewManager(engine Engine, dir, dbPath string) *Manager {
-	m := &Manager{engine: engine, dir: dir, dbPath: dbPath, now: time.Now}
-	m.keepLast.Store(DefaultKeepLast)
-	return m
-}
-
-// SetKeepLast updates the retention count enforced after each successful
-// backup. Values below 1 are ignored.
-func (m *Manager) SetKeepLast(n int) {
-	if n >= 1 {
-		m.keepLast.Store(int32(n)) //nolint:gosec // bounded by schedule validation (1–365)
-	}
+	return &Manager{engine: engine, dir: dir, dbPath: dbPath, keepLast: DefaultKeepLast, now: time.Now}
 }
 
 // Running reports whether a backup is currently executing.
@@ -152,6 +142,12 @@ func (m *Manager) RunNow(ctx context.Context, trigger Trigger) (*Entry, error) {
 	if err := m.engine.Backup(ctx, tmp); err != nil {
 		_ = os.Remove(tmp)
 		return nil, fmt.Errorf("creating backup: %w", err)
+	}
+	// The engine creates the copy with umask-default permissions; tighten to
+	// owner-only before the file gets its backup name (see EnsureDir on why).
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		_ = os.Remove(tmp)
+		return nil, fmt.Errorf("restricting backup permissions: %w", err)
 	}
 	if err := m.engine.Verify(ctx, tmp); err != nil {
 		_ = os.Remove(tmp)
@@ -194,7 +190,7 @@ func (m *Manager) RunNow(ctx context.Context, trigger Trigger) (*Entry, error) {
 // keep-last-N count. Sweep failures are logged, never propagated — the
 // backup that just succeeded is not undone by a cleanup problem.
 func (m *Manager) sweepRetention() {
-	keep := int(m.keepLast.Load())
+	keep := m.keepLast
 	entries, err := m.History()
 	if err != nil {
 		slog.Warn("backup: retention sweep skipped", "err", err)
@@ -307,7 +303,10 @@ func (m *Manager) Status() (*Status, error) {
 // creating and removing a marker file. Called at startup (so a broken
 // volume mount is loud in the logs from boot) and before every run.
 func EnsureDir(dir string) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 0700/0600 throughout: a backup is the full database — password hashes
+	// and encrypted credentials included — so nothing but the app's own user
+	// should be able to read it.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating %s: %w", dir, err)
 	}
 	probe := filepath.Join(dir, ".draba-writecheck")

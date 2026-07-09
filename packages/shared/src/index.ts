@@ -1515,21 +1515,8 @@ export interface components {
              */
             health: "ok" | "stale" | "critical";
             running: boolean;
-            /** @description Null until the Phase 16.2 scheduler lands (and when scheduling is off). */
-            schedule?: components["schemas"]["BackupSchedule"] | null;
-        };
-        /** @description Preset-based backup schedule (Phase 16.2). Stored as one instance_settings JSON value. */
-        BackupSchedule: {
-            /** @enum {string} */
-            preset: "off" | "hourly" | "every6h" | "every12h" | "daily" | "weekly";
-            /** @description HH:MM (UTC), for daily and weekly presets. */
-            time?: string;
-            /**
-             * @description Weekly preset only.
-             * @enum {string}
-             */
-            day?: "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
-            keepLast: number;
+            /** @description Reserved for the backup scheduler; always null until that ships (and when scheduling is off). */
+            schedule?: Record<string, never> | null;
         };
         Team: {
             id: string;

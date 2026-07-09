@@ -130,9 +130,9 @@ func main() {
 
 	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagRepo, shareRepo, m, tokens, t, bus, hub)
 
-	// Backup subsystem (Phase 16). An unwritable backup dir is loud at boot
-	// but not fatal — the status endpoint reports it and runs fail cleanly,
-	// so a misconfigured volume never blocks the app itself from serving.
+	// An unwritable backup dir is loud at boot but not fatal — the status
+	// endpoint reports it and runs fail cleanly, so a misconfigured volume
+	// never blocks the app itself from serving.
 	backupDir := getenv("DRABA_BACKUP_DIR", "/data/backups")
 	if err := backup.EnsureDir(backupDir); err != nil {
 		slog.Warn("backup: directory not writable; backups will fail until fixed", "dir", backupDir, "err", err)

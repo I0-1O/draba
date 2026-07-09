@@ -2,7 +2,7 @@ openapi: "3.0.3"
 
 info:
   title: draba API
-  description: Team coordination API — Phases 2–10.4.5 (auth, teams, events, timelines, tags).
+  description: Team coordination API — auth, teams, timelines, activities, tags, shares, import, and admin operations.
   version: "1.0.0"
 
 servers:
@@ -192,30 +192,9 @@ components:
         running:
           type: boolean
         schedule:
-          allOf:
-            - $ref: '#/components/schemas/BackupSchedule'
+          type: object
           nullable: true
-          description: Null until the Phase 16.2 scheduler lands (and when scheduling is off).
-
-    BackupSchedule:
-      type: object
-      description: Preset-based backup schedule (Phase 16.2). Stored as one instance_settings JSON value.
-      required: [preset, keepLast]
-      properties:
-        preset:
-          type: string
-          enum: [off, hourly, every6h, every12h, daily, weekly]
-        time:
-          type: string
-          description: HH:MM (UTC), for daily and weekly presets.
-        day:
-          type: string
-          enum: [mon, tue, wed, thu, fri, sat, sun]
-          description: Weekly preset only.
-        keepLast:
-          type: integer
-          minimum: 1
-          maximum: 365
+          description: Reserved for the backup scheduler; always null until that ships (and when scheduling is off).
 
     Team:
       type: object
