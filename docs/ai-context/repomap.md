@@ -15861,6 +15861,57 @@ ALTER TABLE shares ADD COLUMN scope TEXT;
 ALTER TABLE shares ADD COLUMN member_id TEXT REFERENCES team_members(id) ON DELETE CASCADE;
 ````
 
+## File: packages/api/internal/db/migrations/023_share_created_by_nullable.sql
+````sql
+-- Migration 023: make shares.created_by nullable.
+--
+-- A superadmin may manage a team they hold no team_members row in;
+-- requireTeamMember passes them through with a synthetic member whose ID is
+-- "". Share creation wrote that empty string into the NOT NULL created_by FK
+-- and blew up with a constraint failure (500). A NULL created_by now means
+-- "created by a superadmin outside the team" — the UI already falls back to
+-- a generic creator label when the member lookup misses.
+--
+-- SQLite cannot drop NOT NULL in place, so this is a standard table rebuild.
+
+CREATE TABLE shares_new (
+  id             TEXT PRIMARY KEY,
+  timeline_id    TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE,
+  token          TEXT NOT NULL UNIQUE,
+  view_type      TEXT NOT NULL DEFAULT 'gantt',
+  view_config    TEXT NOT NULL DEFAULT '{}',
+  password_hash  TEXT,
+  expires_at     DATETIME,
+  created_by     TEXT REFERENCES team_members(id),
+  created_at     DATETIME NOT NULL,
+  last_viewed_at DATETIME,
+  view_count     INTEGER NOT NULL DEFAULT 0,
+  revoked_at     DATETIME,
+  name           TEXT,
+  description    TEXT,
+  kind           TEXT NOT NULL DEFAULT 'view',
+  scope          TEXT,
+  member_id      TEXT REFERENCES team_members(id) ON DELETE CASCADE
+);
+
+INSERT INTO shares_new (
+  id, timeline_id, token, view_type, view_config, password_hash, expires_at,
+  created_by, created_at, last_viewed_at, view_count, revoked_at, name,
+  description, kind, scope, member_id
+)
+SELECT
+  id, timeline_id, token, view_type, view_config, password_hash, expires_at,
+  created_by, created_at, last_viewed_at, view_count, revoked_at, name,
+  description, kind, scope, member_id
+FROM shares;
+
+DROP TABLE shares;
+ALTER TABLE shares_new RENAME TO shares;
+
+CREATE INDEX idx_shares_timeline_id ON shares(timeline_id);
+CREATE INDEX idx_shares_token       ON shares(token);
+````
+
 ## File: packages/api/internal/db/api_token_repo.go
 ````go
 package db
@@ -45868,57 +45919,6 @@ func EnsureDir(dir string) error {
 }
 ````
 
-## File: packages/api/internal/db/migrations/023_share_created_by_nullable.sql
-````sql
--- Migration 023: make shares.created_by nullable.
---
--- A superadmin may manage a team they hold no team_members row in;
--- requireTeamMember passes them through with a synthetic member whose ID is
--- "". Share creation wrote that empty string into the NOT NULL created_by FK
--- and blew up with a constraint failure (500). A NULL created_by now means
--- "created by a superadmin outside the team" — the UI already falls back to
--- a generic creator label when the member lookup misses.
---
--- SQLite cannot drop NOT NULL in place, so this is a standard table rebuild.
-
-CREATE TABLE shares_new (
-  id             TEXT PRIMARY KEY,
-  timeline_id    TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE,
-  token          TEXT NOT NULL UNIQUE,
-  view_type      TEXT NOT NULL DEFAULT 'gantt',
-  view_config    TEXT NOT NULL DEFAULT '{}',
-  password_hash  TEXT,
-  expires_at     DATETIME,
-  created_by     TEXT REFERENCES team_members(id),
-  created_at     DATETIME NOT NULL,
-  last_viewed_at DATETIME,
-  view_count     INTEGER NOT NULL DEFAULT 0,
-  revoked_at     DATETIME,
-  name           TEXT,
-  description    TEXT,
-  kind           TEXT NOT NULL DEFAULT 'view',
-  scope          TEXT,
-  member_id      TEXT REFERENCES team_members(id) ON DELETE CASCADE
-);
-
-INSERT INTO shares_new (
-  id, timeline_id, token, view_type, view_config, password_hash, expires_at,
-  created_by, created_at, last_viewed_at, view_count, revoked_at, name,
-  description, kind, scope, member_id
-)
-SELECT
-  id, timeline_id, token, view_type, view_config, password_hash, expires_at,
-  created_by, created_at, last_viewed_at, view_count, revoked_at, name,
-  description, kind, scope, member_id
-FROM shares;
-
-DROP TABLE shares;
-ALTER TABLE shares_new RENAME TO shares;
-
-CREATE INDEX idx_shares_timeline_id ON shares(timeline_id);
-CREATE INDEX idx_shares_token       ON shares(token);
-````
-
 ## File: packages/api/internal/db/migrations/024_oidc_identity.sql
 ````sql
 -- Migration 024: OIDC / SSO identity support.
@@ -53496,6 +53496,307 @@ export default function ListToolbar({
 }
 ````
 
+## File: packages/web/src/components/CalendarShareModal.tsx
+````typescript
+/**
+ * CalendarShareModal — manage the ICS calendar feeds for a timeline.
+ *
+ * Deliberately a different surface from ShareModal (Phase 13.4): a Calendar
+ * share is not a frozen view snapshot but a live subscribable ICS feed. The
+ * modal is a flat list of every feed the timeline can publish — the whole
+ * timeline first, then one row per team member — each with an on/off toggle.
+ * Toggling a row on creates that feed and reveals its URL (copy, one-click
+ * subscribe links, regenerate); toggling off deletes it, killing the URL
+ * immediately.
+ *
+ * All feeds are public read-only. There is no password option: calendar
+ * clients cannot unlock a subscription URL interactively, so the unguessable
+ * token is the secret and revocation is regenerate-or-toggle-off.
+ */
+
+import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
+import {
+  CalendarDays, Link2, Copy, Check, RefreshCw, X, Users,
+} from 'lucide-react'
+import { useListShares, useCreateShare, useDeleteShare, useRegenerateShare } from '@/hooks/useShares'
+import { useTeamMembers } from '@/hooks/useTeamActivities'
+import { Badge } from '@/components/identity/Badge'
+import { resolveColorHex } from '@/components/identity/identity-constants'
+import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
+import { MEMBER_COLORS } from '@/types'
+import type { components } from '@draba/shared'
+
+type Share = components['schemas']['Share']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+
+interface Props {
+  teamId: string
+  timelineId: string
+  /** Display name of the timeline, shown in the header subtitle and feed names. */
+  timelineName?: string
+  onClose: () => void
+}
+
+const TILE_TEAL = 'bg-[hsl(188_59%_38%/0.12)] text-primary'
+
+/**
+ * URL-safe slug for the feed filename. Calendar clients (Thunderbird
+ * included) default the new calendar's name from the URL's filename, so the
+ * link ends in a readable `<name>.ics` rather than the bare token hash. The
+ * server treats the filename as cosmetic — the token is the key.
+ */
+function slugify(name: string): string {
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+  return slug || 'calendar'
+}
+
+/** Builds the absolute https feed URL for a share token. */
+function feedURL(token: string, name: string): string {
+  return `${window.location.origin}/shares/${token}/${slugify(name)}.ics`
+}
+
+/** The webcal:// variant most calendar apps treat as "subscribe". */
+function webcalURL(token: string, name: string): string {
+  return feedURL(token, name).replace(/^https?:\/\//, 'webcal://')
+}
+
+// ── One feed row: label + toggle, expanding to the link when on ───────────────
+
+function FeedRow({
+  label,
+  member,
+  share,
+  busy,
+  onToggle,
+  onRegenerate,
+}: {
+  label: string
+  /** Set for member rows — renders the identity badge next to the label. */
+  member?: TeamMemberWithUser
+  /** The existing ICS share for this row, when the feed is on. */
+  share?: Share
+  busy: boolean
+  onToggle: () => void
+  onRegenerate: (shareId: string) => void
+}) {
+  const [copied, setCopied] = useState(false)
+  const on = Boolean(share)
+  const url = share ? feedURL(share.token, share.name ?? label) : null
+  const webcal = share ? webcalURL(share.token, share.name ?? label) : null
+
+  const copy = () => {
+    if (!url) return
+    void navigator.clipboard.writeText(url).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1600)
+    })
+  }
+
+  return (
+    <div className="overflow-hidden rounded-[var(--radius-md)] border border-border">
+      <div className="flex items-center gap-2.5 px-3 py-2.5">
+        {member ? (
+          <Badge
+            identity={{ color: resolveColorHex(member.color) || MEMBER_COLORS[0], icon: member.icon ?? '__name_1__' }}
+            name={member.displayName || 'Team member'}
+            size={26}
+            shape="circle"
+          />
+        ) : (
+          <div className={cn('flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
+            <CalendarDays size={14} strokeWidth={2.2} />
+          </div>
+        )}
+        <div className="flex-1 text-[13px] font-semibold text-foreground">{label}</div>
+        <button
+          onClick={onToggle}
+          role="switch"
+          aria-checked={on}
+          aria-label={`${label} feed`}
+          disabled={busy}
+          className={cn(
+            'relative h-[22px] w-10 shrink-0 cursor-pointer rounded-[var(--radius-full)] border-none p-0 transition-colors',
+            on ? 'bg-primary' : 'bg-border',
+          )}
+        >
+          <span className={cn(
+            'absolute top-[2px] h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-[left] duration-150',
+            on ? 'left-5' : 'left-[2px]',
+          )} />
+        </button>
+      </div>
+
+      {share && url && webcal && (
+        <div className="flex flex-col gap-2 border-t border-border bg-muted/40 px-3 py-2.5">
+          <div className="flex items-center gap-2">
+            <div className="flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12px] text-foreground">
+              <Link2 size={13} className="shrink-0 text-muted-foreground" strokeWidth={2} />
+              <span className="overflow-hidden text-ellipsis whitespace-nowrap">{url}</span>
+            </div>
+            <button
+              onClick={copy}
+              className={cn(
+                'flex shrink-0 items-center gap-[5px] rounded-[var(--radius-md)] border px-3 py-[7px] text-[12.5px] font-semibold transition-colors',
+                copied ? 'border-success bg-[hsl(145_63%_42%/0.12)] text-success' : 'border-border bg-card text-foreground',
+              )}
+            >
+              {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={2.2} />}
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
+            <span className="text-muted-foreground">Add to:</span>
+            <a
+              href={`https://calendar.google.com/calendar/render?cid=${encodeURIComponent(webcal)}`}
+              target="_blank"
+              rel="noreferrer"
+              className="font-semibold text-primary hover:underline"
+            >
+              Google
+            </a>
+            <a href={webcal} className="font-semibold text-primary hover:underline">
+              Apple
+            </a>
+            <a
+              href={`https://outlook.live.com/calendar/0/addfromweb?url=${encodeURIComponent(webcal)}&name=${encodeURIComponent(share.name ?? label)}`}
+              target="_blank"
+              rel="noreferrer"
+              className="font-semibold text-primary hover:underline"
+            >
+              Outlook
+            </a>
+            <button
+              onClick={() => onRegenerate(share.id)}
+              disabled={busy}
+              title="Replace the link — the old URL stops working immediately"
+              className="ml-auto flex cursor-pointer items-center gap-[5px] border-none bg-transparent p-0 text-[12px] font-semibold text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <RefreshCw size={12} strokeWidth={2} />
+              Regenerate link
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── The modal shell ────────────────────────────────────────────────────────────
+
+export default function CalendarShareModal({ teamId, timelineId, timelineName, onClose }: Props) {
+  const { data: allShares = [], isLoading } = useListShares(teamId, timelineId)
+  const { data: members = [] } = useTeamMembers(teamId)
+  const createShare = useCreateShare(teamId, timelineId)
+  const deleteShare = useDeleteShare(teamId, timelineId)
+  const regenerateShare = useRegenerateShare(teamId, timelineId)
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const icsShares = allShares.filter(s => s.kind === 'ics')
+  const timelineShare = icsShares.find(s => s.scope === 'timeline')
+  const memberShare = (memberId: string) =>
+    icsShares.find(s => s.scope === 'member' && s.memberId === memberId)
+
+  const busy = isLoading || createShare.isPending || deleteShare.isPending || regenerateShare.isPending
+
+  const toggleTimeline = () => {
+    if (busy) return
+    if (timelineShare) {
+      deleteShare.mutate(timelineShare.id)
+    } else {
+      createShare.mutate({ kind: 'ics', scope: 'timeline', name: `${timelineName ?? 'Timeline'} calendar feed` })
+    }
+  }
+
+  const toggleMember = (m: TeamMemberWithUser) => {
+    if (busy) return
+    const existing = memberShare(m.id)
+    if (existing) {
+      deleteShare.mutate(existing.id)
+    } else {
+      createShare.mutate({
+        kind: 'ics',
+        scope: 'member',
+        memberId: m.id,
+        name: `${m.displayName || 'Member'} calendar feed`,
+      })
+    }
+  }
+
+  return createPortal(
+    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]">
+      <div className="flex max-h-[88vh] w-[min(560px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]">
+        {/* Header */}
+        <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-[18px]">
+          <div className={cn('flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
+            <CalendarDays size={19} strokeWidth={2.2} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Share calendar</h2>
+            <div className="mt-0.5 text-[12.5px] text-muted-foreground">
+              {timelineName ? `${timelineName} · ` : ''}live read-only feeds — subscribe from Google, Apple, or Outlook
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
+          >
+            <X size={16} strokeWidth={2.2} />
+          </button>
+        </div>
+
+        {/* Body — one row per publishable feed */}
+        <div className="flex flex-1 flex-col gap-2 overflow-y-auto px-5 py-4">
+          <FeedRow
+            label="Whole timeline"
+            share={timelineShare}
+            busy={busy}
+            onToggle={toggleTimeline}
+            onRegenerate={id => regenerateShare.mutate(id)}
+          />
+
+          {members.length > 0 && (
+            <div className="mt-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Per member</div>
+          )}
+          {members.map(m => (
+            <FeedRow
+              key={m.id}
+              label={m.displayName || 'Team member'}
+              member={m}
+              share={memberShare(m.id)}
+              busy={busy}
+              onToggle={() => toggleMember(m)}
+              onRegenerate={id => regenerateShare.mutate(id)}
+            />
+          ))}
+
+          {(createShare.isError || deleteShare.isError || regenerateShare.isError) && (
+            <p className="text-[11px] text-destructive">Something went wrong. Please try again.</p>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="flex shrink-0 items-center gap-2.5 border-t border-border px-5 py-[13px]">
+          <div className="flex items-center gap-[7px] text-xs text-muted-foreground">
+            <Users size={14} strokeWidth={2} />
+            Public read-only · the link itself is the secret
+          </div>
+          <Button variant="outline" className="ml-auto" onClick={onClose}>Done</Button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+````
+
 ## File: packages/web/src/contexts/AuthContext.tsx
 ````typescript
 /**
@@ -56480,6 +56781,776 @@ Messy-file corpus e2e (European CSV, Excel dates, mixed formats, dupes, unknown 
 - `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean; `pnpm --filter web test` passes
 ````
 
+## File: packages/api/internal/api/share_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/filters"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// unlockMaxAttempts caps password-unlock attempts per client IP per hour. The
+// limit is per-share-independent (keyed on IP only) so cycling tokens cannot
+// multiply an attacker's budget.
+const unlockMaxAttempts = 10
+
+// ── In-memory share cache ─────────────────────────────────────────────────────
+
+type shareCacheEntry struct {
+	builtAt time.Time
+	payload models.ShareProjection
+}
+
+// shareCache is a lightweight TTL cache keyed by share token. It avoids a DB
+// hit on every warm request. The TTL is read from DRABA_SHARE_CACHE_TTL at
+// startup (default 60s); a PATCH or DELETE invalidates the entry immediately.
+type shareCache struct {
+	mu      sync.RWMutex
+	entries map[string]*shareCacheEntry
+	ttl     time.Duration
+}
+
+func newShareCache() *shareCache {
+	ttl := 60 * time.Second
+	if v := os.Getenv("DRABA_SHARE_CACHE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			ttl = d
+		}
+	}
+	return &shareCache{entries: make(map[string]*shareCacheEntry), ttl: ttl}
+}
+
+func (c *shareCache) get(token string) (*models.ShareProjection, bool) {
+	c.mu.RLock()
+	e, ok := c.entries[token]
+	c.mu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	if time.Since(e.builtAt) > c.ttl {
+		return nil, false
+	}
+	p := e.payload
+	return &p, true
+}
+
+func (c *shareCache) set(token string, p *models.ShareProjection) {
+	c.mu.Lock()
+	c.entries[token] = &shareCacheEntry{builtAt: time.Now(), payload: *p}
+	c.mu.Unlock()
+}
+
+func (c *shareCache) invalidate(token string) {
+	c.mu.Lock()
+	delete(c.entries, token)
+	c.mu.Unlock()
+}
+
+// ── viewConfig sub-types ──────────────────────────────────────────────────────
+
+// viewConfigJSON is the shape stored in shares.view_config. The filter field
+// is evaluated server-side by the Go filter engine; the other fields are
+// forwarded to the client as-is so the public viewer can apply them.
+//
+// columns carries the List view's column visibility snapshot — it drives the
+// "notes" projection nuance below (and lets the public viewer render exactly
+// the columns the share creator chose).
+type viewConfigJSON struct {
+	Filter  *filters.FilterDefinition `json:"filter,omitempty"`
+	Columns []shareColumnConfig       `json:"columns,omitempty"`
+}
+
+type shareColumnConfig struct {
+	ID      string `json:"id"`
+	Visible bool   `json:"visible"`
+}
+
+// ── Handlers ──────────────────────────────────────────────────────────────────
+
+// handleGetShareProjection handles GET /shares/{token}. No authentication is
+// required. It is the public data gateway: the scope is hard-locked to the
+// single timeline referenced by the share row; no client-supplied selector can
+// widen it.
+func (s *Server) handleGetShareProjection(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+
+	// GET /shares/{token}.ics — Go 1.22 mux wildcards span the whole path
+	// segment, so the ICS feed's .ics suffix arrives inside {token}; dispatch
+	// it to the calendar-feed handler (Phase 13.4).
+	if strings.HasSuffix(token, ".ics") {
+		s.serveICSFeed(w, r, strings.TrimSuffix(token, ".ics"))
+		return
+	}
+
+	// ── 1. Resolve the share row ──────────────────────────────────────────────
+	share, err := s.shares.GetByToken(token)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
+		return
+	}
+
+	// An ICS feed is only reachable through the .ics endpoint. Serving it as a
+	// JSON projection would expose the whole timeline for member-scoped feeds
+	// (the projection has no member filter), so the kinds never cross over.
+	if share.Kind != models.ShareKindView {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return
+	}
+
+	// Phase 13.4 — revocation / expiry handled here (fields exist in schema now).
+	if share.RevokedAt != nil {
+		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
+		return
+	}
+	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
+		writeError(w, http.StatusGone, "GONE", "this share has expired")
+		return
+	}
+
+	// Archived timeline → its shares stop serving (Phase 13.5). Checked on
+	// every request — before the cache read — so archiving takes effect
+	// immediately regardless of a warm projection cache.
+	if !s.shareTimelineLive(w, share) {
+		return
+	}
+
+	// Password gate (Phase 13.2). A locked share serves no data without a valid
+	// view token — obtained by exchanging the password at POST /shares/{token}/unlock.
+	// NOTE: this check must stay above the cache read. PATCH invalidates the cache
+	// entry immediately (see handleUpdateShare), so a newly-added password_hash is
+	// never served from a stale cache. Moving the check below the cache read would
+	// silently bypass the password gate for the TTL window. The 401 body carries no
+	// projection data — only the passwordRequired signal the viewer needs.
+	if share.PasswordHash != nil {
+		vt := bearerToken(r)
+		if vt == "" || s.tokens.ValidateShareViewToken(vt, share.ID) != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]bool{"passwordRequired": true})
+			return
+		}
+	}
+
+	// ── 2. Serve from cache if warm ───────────────────────────────────────────
+	if proj, ok := s.shareCache.get(token); ok {
+		go func() { _ = s.shares.RecordView(share.ID) }()
+		writeJSON(w, http.StatusOK, proj)
+		return
+	}
+
+	// ── 3. Build projection (cache miss) ─────────────────────────────────────
+	proj, err := s.buildShareProjection(share)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build share projection")
+		return
+	}
+
+	s.shareCache.set(token, proj)
+	go func() { _ = s.shares.RecordView(share.ID) }()
+	writeJSON(w, http.StatusOK, proj)
+}
+
+// shareTimelineLive loads the share's timeline and reports whether it is
+// servable on the public surface, writing the error response when it is not.
+// An archived timeline answers 404, not 410: archiving is reversible —
+// unarchiving must resurrect existing links — and 410 tells calendar clients
+// to drop a subscription permanently. 404 also matches handleCreateShare's
+// archived-timeline response without leaking archive state.
+func (s *Server) shareTimelineLive(w http.ResponseWriter, share *models.Share) bool {
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if errors.Is(err, sql.ErrNoRows) {
+		// A share row outliving a hard-deleted timeline answers the same 404 as
+		// every other dead-share case — a 500 here would be a state oracle on
+		// the public surface.
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return false
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
+		return false
+	}
+	if timeline.ArchivedAt != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return false
+	}
+	return true
+}
+
+// buildShareProjection assembles the full ShareProjection for a share.
+// The scope is hard-locked to share.TimelineID; the caller cannot supply a
+// different timeline ID. Filter evaluation runs in Go before any data leaves
+// the server.
+func (s *Server) buildShareProjection(share *models.Share) (*models.ShareProjection, error) {
+	// Get timeline — using the share's TimelineID, never a client-supplied value.
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get all non-archived activities for this timeline.
+	acts, err := s.activities.ListByTimeline(share.TimelineID, nil, nil, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get statuses and tags for filter context + projection.
+	statuses, err := s.statuses.ListStatuses(share.TimelineID)
+	if err != nil {
+		return nil, err
+	}
+	tags, err := s.tags.ListByTeam(timeline.TeamID)
+	if err != nil {
+		return nil, err
+	}
+	members, err := s.teams.ListMembers(timeline.TeamID)
+	if err != nil {
+		return nil, err
+	}
+	team, err := s.teams.GetByID(timeline.TeamID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse the frozen filter from view_config and evaluate it server-side.
+	var vc viewConfigJSON
+	if share.ViewConfig != "" && share.ViewConfig != "{}" {
+		_ = json.Unmarshal([]byte(share.ViewConfig), &vc)
+	}
+
+	var filteredActs []*models.Activity
+	if vc.Filter != nil && len(vc.Filter.Conditions) > 0 {
+		// Build filter context.
+		statusesByTL := map[string][]models.Status{share.TimelineID: {}}
+		for _, st := range statuses {
+			statusesByTL[share.TimelineID] = append(statusesByTL[share.TimelineID], *st)
+		}
+		modelTags := make([]models.Tag, 0, len(tags))
+		for _, t := range tags {
+			modelTags = append(modelTags, *t)
+		}
+		ctx := &filters.FilterContext{
+			StatusesByTimelineID: statusesByTL,
+			Tags:                 modelTags,
+		}
+		for _, a := range acts {
+			if filters.MatchesFilter(a, vc.Filter, ctx) {
+				filteredActs = append(filteredActs, a)
+			}
+		}
+	} else {
+		filteredActs = acts
+	}
+
+	// Build referenced-entity sets (prune to what surviving activities reference).
+	usedMemberIDs := make(map[string]bool)
+	usedStatusIDs := make(map[string]bool)
+	usedTagIDs := make(map[string]bool)
+	for _, a := range filteredActs {
+		for _, id := range a.AssignedMemberIDs {
+			usedMemberIDs[id] = true
+		}
+		if a.StatusID != nil {
+			usedStatusIDs[*a.StatusID] = true
+		}
+		for _, id := range a.TagIDs {
+			usedTagIDs[id] = true
+		}
+	}
+
+	// notes is included only for List shares whose creator left the Notes
+	// column visible — the only projection nuance beyond scope-locking and
+	// field-pruning (Phase 13.3 exit criteria).
+	notesEnabled := false
+	if share.ViewType == "list" {
+		for _, c := range vc.Columns {
+			if c.ID == "notes" && c.Visible {
+				notesEnabled = true
+				break
+			}
+		}
+	}
+
+	// Build PublicActivity slice.
+	pubActivities := make([]models.PublicActivity, 0, len(filteredActs))
+	for _, a := range filteredActs {
+		pub := models.PublicActivity{
+			ID:                a.ID,
+			Title:             a.Title,
+			Description:       a.Description,
+			Icon:              a.Icon,
+			Color:             a.Color,
+			StartAt:           a.StartAt,
+			EndAt:             a.EndAt,
+			AllDay:            a.AllDay,
+			StatusID:          a.StatusID,
+			ParentActivityID:  a.ParentActivityID,
+			PercentComplete:   a.PercentComplete,
+			AssignedMemberIDs: a.AssignedMemberIDs,
+			TagIDs:            a.TagIDs,
+		}
+		if notesEnabled {
+			pub.Notes = a.Notes
+		}
+		if pub.AssignedMemberIDs == nil {
+			pub.AssignedMemberIDs = []string{}
+		}
+		if pub.TagIDs == nil {
+			pub.TagIDs = []string{}
+		}
+		pubActivities = append(pubActivities, pub)
+	}
+
+	// Build PublicMember slice — never email/role/userId.
+	pubMembers := make([]models.PublicMember, 0)
+	for _, m := range members {
+		if !usedMemberIDs[m.ID] {
+			continue
+		}
+		name := m.DisplayName
+		if name == "" {
+			// The register endpoint requires a non-empty displayName, so this
+			// branch only fires for rows migrated from older data. Never fall
+			// back to the email address — this response is public and
+			// unauthenticated.
+			name = "Team member"
+		}
+		pubMembers = append(pubMembers, models.PublicMember{
+			ID:          m.ID,
+			DisplayName: name,
+			Color:       m.Color,
+			Icon:        m.Icon,
+		})
+	}
+
+	// Prune statuses to referenced ones — except for Kanban shares, where
+	// every status is a column regardless of whether it currently holds any
+	// activities (mirrors the in-app board, which always renders one column
+	// per timeline status). Pruning there would silently drop empty columns
+	// that anonymous viewers would otherwise see, e.g. an empty "Deferred"
+	// column that's still meaningful to the team.
+	pubStatuses := make([]models.Status, 0)
+	for _, st := range statuses {
+		if share.ViewType == "kanban" || usedStatusIDs[st.ID] {
+			pubStatuses = append(pubStatuses, *st)
+		}
+	}
+
+	// Prune tags to referenced ones.
+	pubTags := make([]models.Tag, 0)
+	for _, tg := range tags {
+		if usedTagIDs[tg.ID] {
+			pubTags = append(pubTags, *tg)
+		}
+	}
+
+	// Build the public share — only the fields anonymous callers need.
+	// Operational telemetry (view_count, last_viewed_at) and internal fields
+	// (created_by, revoked_at) are excluded from the public response.
+	pubShare := models.PublicShare{
+		ID:         share.ID,
+		TimelineID: share.TimelineID,
+		Token:      share.Token,
+		Name:       share.Name,
+		ViewType:   share.ViewType,
+		ViewConfig: share.ViewConfig,
+		CreatedAt:  share.CreatedAt,
+		ExpiresAt:  share.ExpiresAt,
+	}
+	proj := &models.ShareProjection{
+		Share:    pubShare,
+		TeamName: team.Name,
+		Timeline: models.PublicTimeline{
+			ID:        timeline.ID,
+			Name:      timeline.Name,
+			Color:     timeline.Color,
+			Icon:      timeline.Icon,
+			StartDate: timeline.StartDate,
+			EndDate:   timeline.EndDate,
+		},
+		Members:    pubMembers,
+		Statuses:   pubStatuses,
+		Tags:       pubTags,
+		Activities: pubActivities,
+	}
+	return proj, nil
+}
+
+// handleCreateShare handles POST /timelines/{id}/shares. The caller must be a
+// member of the timeline's team. The share captures the current view config.
+func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("id")
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+	if timeline.ArchivedAt != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
+	if !ok {
+		return
+	}
+
+	var req createShareBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if req.Kind == "" {
+		req.Kind = models.ShareKindView
+	}
+	if req.Kind != models.ShareKindView && req.Kind != models.ShareKindICS {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "kind must be 'view' or 'ics'")
+		return
+	}
+	if req.ViewType == "" {
+		req.ViewType = "gantt"
+	}
+	if req.ViewConfig == "" {
+		req.ViewConfig = "{}"
+	}
+
+	now := time.Now().UTC()
+	share := &models.Share{
+		ID:          newID(),
+		TimelineID:  timelineID,
+		Token:       newToken(),
+		Kind:        req.Kind,
+		Name:        req.Name,
+		Description: req.Description,
+		ViewType:    req.ViewType,
+		ViewConfig:  req.ViewConfig,
+		CreatedAt:   now,
+		ViewCount:   0,
+	}
+	// A superadmin managing a team they're not in arrives as a synthetic
+	// member with an empty ID (see requireTeamMember); created_by stays NULL
+	// for them rather than violating the team_members FK.
+	if member.ID != "" {
+		share.CreatedBy = &member.ID
+	}
+
+	if req.Kind == models.ShareKindICS {
+		// An ICS feed has no view semantics and no password — the token is the
+		// secret (calendar clients cannot unlock interactively). Scope is the
+		// only configuration: the whole timeline, or one member's assignments.
+		if req.Password != nil && strings.TrimSpace(*req.Password) != "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "ICS feeds cannot be password protected")
+			return
+		}
+		if req.Scope != models.ShareScopeTimeline && req.Scope != models.ShareScopeMember {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "scope must be 'timeline' or 'member' for ICS shares")
+			return
+		}
+		share.Scope = &req.Scope
+		share.ViewType = "calendar"
+		share.ViewConfig = "{}"
+		if req.Scope == models.ShareScopeMember {
+			if req.MemberID == nil || *req.MemberID == "" {
+				writeError(w, http.StatusBadRequest, "BAD_REQUEST", "memberId is required for member-scoped ICS shares")
+				return
+			}
+			// The member must belong to this timeline's team — a feed must not
+			// be creatable for an arbitrary member ID from another team.
+			feedMember, err := s.teams.GetMemberByID(*req.MemberID)
+			if err != nil || feedMember.TeamID != timeline.TeamID {
+				writeError(w, http.StatusBadRequest, "BAD_REQUEST", "memberId does not belong to this timeline's team")
+				return
+			}
+			share.MemberID = req.MemberID
+		}
+	}
+
+	// Optional password protection (view shares only). An empty/whitespace
+	// string means "no password" — the field stays NULL and the share is open.
+	if req.Kind == models.ShareKindView && req.Password != nil && strings.TrimSpace(*req.Password) != "" {
+		hash, err := auth.HashPassword(*req.Password)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to secure share")
+			return
+		}
+		share.PasswordHash = &hash
+	}
+
+	if err := s.shares.Create(share); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create share")
+		return
+	}
+
+	// Surface the derived flag in the create response (the repo sets it on reads).
+	share.Protected = share.PasswordHash != nil
+	writeJSON(w, http.StatusCreated, share)
+}
+
+// handleListShares handles GET /teams/{id}/timelines/{timelineId}/shares.
+// Only team members with access to the timeline may list its shares.
+func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	shares, err := s.shares.ListByTimeline(timelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list shares")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, shares)
+}
+
+// handleUpdateShare handles PATCH /shares/{id}. Any member of the timeline's
+// team may update it (shares are read-only projections — no creator/admin gate).
+func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
+	shareID := r.PathValue("id")
+
+	share, err := s.shares.GetByID(shareID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	// Any member of the timeline's team may manage its shares. A share is a
+	// read-only projection that can never mutate app data, so there is no
+	// creator/admin gate (Phase 13.2 re-sequencing decision).
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	var req patchShareBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Name != nil {
+		share.Name = req.Name
+	}
+	if req.Description != nil {
+		share.Description = req.Description
+	}
+	if req.ViewType != nil {
+		share.ViewType = *req.ViewType
+	}
+	if req.ViewConfig != nil {
+		share.ViewConfig = *req.ViewConfig
+	}
+	// Password: nil leaves it unchanged; an empty string clears protection; a
+	// non-empty string sets/replaces it. ICS feeds can never carry one —
+	// calendar clients have no interactive unlock.
+	if req.Password != nil && share.Kind == models.ShareKindICS && strings.TrimSpace(*req.Password) != "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "ICS feeds cannot be password protected")
+		return
+	}
+	if req.Password != nil {
+		if strings.TrimSpace(*req.Password) == "" {
+			share.PasswordHash = nil
+		} else {
+			hash, err := auth.HashPassword(*req.Password)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to secure share")
+				return
+			}
+			share.PasswordHash = &hash
+		}
+	}
+
+	if err := s.shares.Update(share); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update share")
+		return
+	}
+
+	// Invalidate caches so the next public request picks up the new config.
+	s.shareCache.invalidate(share.Token)
+	s.icsCache.invalidate(share.Token)
+
+	// Refresh the derived flag — the password may have just been set/cleared.
+	share.Protected = share.PasswordHash != nil
+	writeJSON(w, http.StatusOK, share)
+}
+
+// handleDeleteShare handles DELETE /shares/{id}. Any member of the timeline's
+// team may delete it (see handleUpdateShare).
+func (s *Server) handleDeleteShare(w http.ResponseWriter, r *http.Request) {
+	shareID := r.PathValue("id")
+
+	share, err := s.shares.GetByID(shareID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	// Any member of the timeline's team may delete its shares — no creator/admin
+	// gate (see handleUpdateShare).
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	if err := s.shares.Delete(shareID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete share")
+		return
+	}
+
+	s.shareCache.invalidate(share.Token)
+	s.icsCache.invalidate(share.Token)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleUnlockShare handles POST /shares/{token}/unlock. It is public (no auth
+// middleware): an anonymous viewer exchanges the share password for a
+// short-lived view token, which they then present on GET /shares/{token}.
+// Attempts are rate-limited per client IP to blunt brute-force guessing.
+func (s *Server) handleUnlockShare(w http.ResponseWriter, r *http.Request) {
+	if !s.unlockLimiter.allow(clientIP(r)) {
+		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "too many unlock attempts; try again later")
+		return
+	}
+
+	token := r.PathValue("token")
+
+	share, err := s.shares.GetByToken(token)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
+		return
+	}
+
+	// Mirror the GET gateway's revocation/expiry checks so a dead share cannot
+	// be unlocked.
+	if share.RevokedAt != nil {
+		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
+		return
+	}
+	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
+		writeError(w, http.StatusGone, "GONE", "this share has expired")
+		return
+	}
+	// ICS feeds are never password protected; mirror the projection gateway's
+	// 404 rather than confirming the token exists in another mode.
+	if share.Kind != models.ShareKindView {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return
+	}
+	// Mirror the GET gateway's archived-timeline 404 (Phase 13.5) — a dead
+	// share must not be unlockable, and the check precedes NOT_PROTECTED so an
+	// archived timeline reveals nothing about its shares' protection state.
+	if !s.shareTimelineLive(w, share) {
+		return
+	}
+	if share.PasswordHash == nil {
+		writeError(w, http.StatusBadRequest, "NOT_PROTECTED", "this share is not password protected")
+		return
+	}
+
+	var req unlockShareBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if auth.CheckPassword(*share.PasswordHash, req.Password) != nil {
+		writeError(w, http.StatusUnauthorized, "INVALID_PASSWORD", "incorrect password")
+		return
+	}
+
+	viewToken, err := s.tokens.IssueShareViewToken(share.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to issue view token")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"token": viewToken})
+}
+
+// bearerToken extracts a Bearer credential from the Authorization header, or
+// returns "" when absent or malformed.
+func bearerToken(r *http.Request) string {
+	header := r.Header.Get("Authorization")
+	if !strings.HasPrefix(header, "Bearer ") {
+		return ""
+	}
+	return strings.TrimPrefix(header, "Bearer ")
+}
+
+// ── Request bodies ────────────────────────────────────────────────────────────
+
+type createShareBody struct {
+	Kind        string  `json:"kind,omitempty"`
+	Scope       string  `json:"scope,omitempty"`
+	MemberID    *string `json:"memberId,omitempty"`
+	Name        *string `json:"name,omitempty"`
+	Description *string `json:"description,omitempty"`
+	ViewType    string  `json:"viewType"`
+	ViewConfig  string  `json:"viewConfig"`
+	Password    *string `json:"password,omitempty"`
+}
+
+type patchShareBody struct {
+	Name        *string `json:"name,omitempty"`
+	Description *string `json:"description,omitempty"`
+	ViewType    *string `json:"viewType,omitempty"`
+	ViewConfig  *string `json:"viewConfig,omitempty"`
+	Password    *string `json:"password,omitempty"`
+}
+
+type unlockShareBody struct {
+	Password string `json:"password"`
+}
+````
+
 ## File: packages/api/internal/auth/oidc.go
 ````go
 // OIDC / SSO support. This file is the ONLY place draba talks to an external
@@ -57616,6 +58687,448 @@ func decodeCP1252(data []byte) []byte {
 		}
 	}
 	return []byte(b.String())
+}
+````
+
+## File: packages/api/internal/models/models.go
+````go
+// Package models holds the domain types shared across the API, db,
+// and event-bus packages. These types are persisted directly via sqlx
+// (db tags) and serialised on the wire (json tags); changing tags is a
+// schema change.
+package models
+
+import "time"
+
+// Activity is a scheduled item of work belonging to a Timeline. ArchivedAt is
+// non-nil when the activity is soft-deleted; list endpoints exclude archived
+// activities by default.
+//
+// AssignedMemberIDs is not stored on the activities table; it is populated by
+// the repository from activity_assignments after every list query.
+//
+// GoogleEventID and CaldavUID are preserved as-is — they identify the
+// corresponding records in external calendar systems (VEVENT identifiers).
+type Activity struct {
+	ID                string     `db:"id"                  json:"id"`
+	TimelineID        string     `db:"timeline_id"         json:"timelineId"`
+	Title             string     `db:"title"               json:"title"`
+	Description       *string    `db:"description"         json:"description,omitempty"`
+	Notes             *string    `db:"notes"               json:"notes,omitempty"`
+	Icon              *string    `db:"icon"                json:"icon,omitempty"`
+	Color             *string    `db:"color"               json:"color,omitempty"`
+	StartAt           time.Time  `db:"start_at"            json:"startAt"`
+	EndAt             time.Time  `db:"end_at"              json:"endAt"`
+	AllDay            bool       `db:"all_day"             json:"allDay"`
+	StatusID          *string    `db:"status_id"           json:"statusId,omitempty"`
+	ParentActivityID  *string    `db:"parent_activity_id"  json:"parentActivityId,omitempty"`
+	PercentComplete   *int       `db:"percent_complete"    json:"percentComplete,omitempty"`
+	Location          *string    `db:"location"            json:"location,omitempty"`
+	URL               *string    `db:"url"                 json:"url,omitempty"`
+	Rrule             *string    `db:"rrule"               json:"rrule,omitempty"`
+	CaldavUID         *string    `db:"caldav_uid"          json:"caldavUid,omitempty"`
+	GoogleEventID     *string    `db:"google_event_id"     json:"googleEventId,omitempty"`
+	CreatedBy         string     `db:"created_by"          json:"createdBy"`
+	CreatedAt         time.Time  `db:"created_at"          json:"createdAt"`
+	UpdatedAt         time.Time  `db:"updated_at"          json:"updatedAt"`
+	ArchivedAt        *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
+	AssignedMemberIDs []string   `db:"-"                   json:"assignedMemberIds"`
+	TagIDs            []string   `db:"-"                   json:"tagIds"`
+}
+
+// TeamMemberWithUser joins a TeamMember row with its associated User so
+// callers receive display names and emails in a single query. Participants
+// (no user account) have empty email and avatar; their display_name comes
+// from team_members.display_name via COALESCE in the query.
+type TeamMemberWithUser struct {
+	TeamMember
+	Email       string  `db:"email"        json:"email"`
+	DisplayName string  `db:"display_name" json:"displayName"`
+	AvatarURL   *string `db:"avatar_url"   json:"avatarUrl,omitempty"`
+}
+
+// User is an authenticated account. PasswordHash is omitted from JSON
+// to avoid leaking it through any handler that returns a User.
+// ArchivedAt is non-nil when the account is inactivated; login is rejected
+// for archived users. Color and Icon are user-level identity fields (migration
+// 010); they propagate to team_members rows for the user when changed.
+//
+// AuthProvider, OIDCIssuer, and OIDCSubject are added in migration 024. A
+// local user has AuthProvider "local" and a non-nil PasswordHash. An OIDC
+// (SSO) user has AuthProvider "oidc", a nil PasswordHash, and a non-nil
+// (OIDCIssuer, OIDCSubject) pair identifying them at the external IdP.
+type User struct {
+	ID           string     `db:"id"             json:"id"`
+	Email        string     `db:"email"          json:"email"`
+	PasswordHash *string    `db:"password_hash"  json:"-"`
+	DisplayName  string     `db:"display_name"   json:"displayName"`
+	AvatarURL    *string    `db:"avatar_url"     json:"avatarUrl,omitempty"`
+	Color        *string    `db:"color"          json:"color,omitempty"`
+	Icon         *string    `db:"icon"           json:"icon,omitempty"`
+	IsSuperadmin bool       `db:"is_superadmin"  json:"isSuperadmin"`
+	AuthProvider string     `db:"auth_provider"  json:"authProvider"`
+	OIDCIssuer   *string    `db:"oidc_issuer"    json:"-"`
+	OIDCSubject  *string    `db:"oidc_subject"   json:"-"`
+	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
+	UpdatedAt    time.Time  `db:"updated_at"     json:"updatedAt"`
+	ArchivedAt   *time.Time `db:"archived_at"    json:"archivedAt,omitempty"`
+}
+
+// Team is a workspace that groups users and their scheduled work. Color and
+// Icon are identity fields added in migration 006; both are nullable until
+// explicitly set by an admin. Description, Notes, and ArchivedAt are added in
+// migration 008; ArchivedAt is non-nil when the team is soft-deleted.
+// InviteLinkToken is a stable, reusable token added in migration 009; when
+// non-nil it can be used by anyone to join the team during registration.
+type Team struct {
+	ID              string     `db:"id"                  json:"id"`
+	Name            string     `db:"name"                json:"name"`
+	Slug            string     `db:"slug"                json:"slug"`
+	Description     *string    `db:"description"         json:"description,omitempty"`
+	Notes           *string    `db:"notes"               json:"notes,omitempty"`
+	Color           *string    `db:"color"               json:"color,omitempty"`
+	Icon            *string    `db:"icon"                json:"icon,omitempty"`
+	InviteLinkToken *string    `db:"invite_link_token"   json:"inviteLinkToken,omitempty"`
+	CreatedAt       time.Time  `db:"created_at"          json:"createdAt"`
+	UpdatedAt       time.Time  `db:"updated_at"          json:"updatedAt"`
+	ArchivedAt      *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
+}
+
+// TeamMember is the join row that puts a person in a Team. UserID is nil
+// for login-less Participants; DisplayName is populated for them instead.
+// Role is the team-level role: "admin" or "member". Color and Icon are
+// identity fields (migration 006); Color stores a color ID (e.g. "teal").
+// ArchivedAt is non-nil when the member is inactivated (migration 009);
+// inactivated members lose access but their data and assignments are preserved.
+type TeamMember struct {
+	ID          string     `db:"id"           json:"id"`
+	TeamID      string     `db:"team_id"      json:"teamId"`
+	UserID      *string    `db:"user_id"      json:"userId,omitempty"`
+	DisplayName *string    `db:"display_name" json:"displayName,omitempty"`
+	Role        string     `db:"role"         json:"role"`
+	Color       *string    `db:"color"        json:"color,omitempty"`
+	Icon        *string    `db:"icon"         json:"icon,omitempty"`
+	JoinedAt    time.Time  `db:"joined_at"    json:"joinedAt"`
+	ArchivedAt  *time.Time `db:"archived_at"  json:"archivedAt,omitempty"`
+}
+
+// MemberStats holds computed activity and timeline counts for a member.
+// All counts are date-relative and scoped to activities the member is assigned to.
+type MemberStats struct {
+	ActiveTimelines    int `json:"activeTimelines"`
+	ArchivedTimelines  int `json:"archivedTimelines"`
+	PastDue            int `json:"pastDue"`
+	Running            int `json:"running"`
+	Upcoming           int `json:"upcoming"`
+	Unscheduled        int `json:"unscheduled"`
+	ArchivedActivities int `json:"archivedActivities"`
+}
+
+// MemberDetail combines a TeamMemberWithUser with computed stats and the
+// member's full list of team memberships. Returned by GET /teams/:id/members/:memberId.
+// UserArchivedAt reflects users.archived_at (account-level deactivation), distinct
+// from ArchivedAt which is team_members.archived_at (membership-level inactivation).
+type MemberDetail struct {
+	TeamMemberWithUser
+	Stats          MemberStats          `json:"stats"`
+	Teams          []TeamMemberWithUser `json:"teams"`
+	Deletable      bool                 `json:"deletable"`
+	UserArchivedAt *time.Time           `json:"userArchivedAt,omitempty"`
+}
+
+// Timeline is a named date range over a team's events. It is not a data
+// container — it is a view over a team's events for a given date window.
+// Access is governed by timeline_access + team role; share_token allows
+// unauthenticated read access via a stable public URL. Color and Icon are
+// identity fields (migration 006). Description and Notes are free-text fields
+// added in migration 013.
+type Timeline struct {
+	ID          string     `db:"id"          json:"id"`
+	TeamID      string     `db:"team_id"     json:"teamId"`
+	Name        string     `db:"name"        json:"name"`
+	Description *string    `db:"description" json:"description,omitempty"`
+	Notes       *string    `db:"notes"       json:"notes,omitempty"`
+	StartDate   string     `db:"start_date"  json:"startDate"`
+	EndDate     string     `db:"end_date"    json:"endDate"`
+	Color       *string    `db:"color"       json:"color,omitempty"`
+	Icon        *string    `db:"icon"        json:"icon,omitempty"`
+	ShareToken  string     `db:"share_token" json:"shareToken"`
+	IcalToken   string     `db:"ical_token"  json:"icalToken"`
+	CreatedBy   string     `db:"created_by"  json:"createdBy"`
+	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
+	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
+	// ShareCount is a derived count of the timeline's active (non-revoked,
+	// non-expired) share links — view shares and ICS feeds alike. Populated by
+	// the repo read queries; it backs the timeline tile's share chip (13.5).
+	ShareCount int `db:"share_count" json:"shareCount"`
+}
+
+// SavedFilter is a user-owned, team-scoped named filter spec. Definition is
+// an opaque JSON string interpreted by the client; the server treats it as
+// arbitrary text and only validates that it parses as JSON.
+type SavedFilter struct {
+	ID           string    `db:"id"             json:"id"`
+	TeamID       string    `db:"team_id"        json:"teamId"`
+	UserID       string    `db:"user_id"        json:"userId"`
+	Name         string    `db:"name"           json:"name"`
+	Definition   string    `db:"definition"     json:"definition"`
+	IsTeamFilter bool      `db:"is_team_filter" json:"isTeamFilter"`
+	CreatedAt    time.Time `db:"created_at"     json:"createdAt"`
+	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
+}
+
+// UserPreference stores a single key/value setting for a user, optionally
+// scoped to a timeline. TimelineID is “” for global preferences so the
+// UNIQUE(user_id, timeline_id, key) DB constraint works without NULL handling.
+// Serialised JSON omits TimelineID when empty so callers see null for global prefs.
+type UserPreference struct {
+	ID         string    `db:"id"          json:"id"`
+	UserID     string    `db:"user_id"     json:"userId"`
+	TimelineID string    `db:"timeline_id" json:"timelineId,omitempty"`
+	Key        string    `db:"key"         json:"key"`
+	Value      string    `db:"value"       json:"value"`
+	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+}
+
+// APIToken is a long-lived Bearer credential a user issues for programmatic
+// access. token_hash stores SHA-256(rawToken); the raw value is shown to the
+// caller only once on creation. RevokedAt is non-nil when the token has been
+// revoked; revoked tokens are not deleted so listing remains stable.
+type APIToken struct {
+	ID         string     `db:"id"           json:"id"`
+	UserID     string     `db:"user_id"      json:"userId"`
+	Name       string     `db:"name"         json:"name"`
+	TokenHash  string     `db:"token_hash"   json:"-"`
+	Scope      string     `db:"scope"        json:"scope"`
+	LastUsedAt *time.Time `db:"last_used_at" json:"lastUsedAt,omitempty"`
+	CreatedAt  time.Time  `db:"created_at"   json:"createdAt"`
+	RevokedAt  *time.Time `db:"revoked_at"   json:"revokedAt,omitempty"`
+}
+
+// InstanceSetting stores a single instance-level configuration value.
+// SMTP config and defaults live here. The value column is plain text;
+// the mailer package handles decryption of the SMTP password field.
+type InstanceSetting struct {
+	Key       string    `db:"key"        json:"key"`
+	Value     string    `db:"value"      json:"value"`
+	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
+}
+
+// PasswordResetToken is a single-use token for the forgot-password flow.
+// TokenHash stores SHA-256 of the raw token; the raw value is sent by email
+// and never stored. UsedAt is set when the token is consumed.
+type PasswordResetToken struct {
+	ID        string     `db:"id"         json:"id"`
+	UserID    string     `db:"user_id"    json:"userId"`
+	TokenHash string     `db:"token_hash" json:"-"`
+	ExpiresAt time.Time  `db:"expires_at" json:"expiresAt"`
+	UsedAt    *time.Time `db:"used_at"    json:"usedAt,omitempty"`
+	CreatedAt time.Time  `db:"created_at" json:"createdAt"`
+}
+
+// AdminUserRow is a flat view of a user for the admin users list. It includes
+// the user's fields plus the count of active team memberships.
+type AdminUserRow struct {
+	User
+	TeamCount int `db:"team_count" json:"teamCount"`
+}
+
+// Valid Share.Kind and Share.Scope values.
+const (
+	ShareKindView      = "view"
+	ShareKindICS       = "ics"
+	ShareScopeTimeline = "timeline"
+	ShareScopeMember   = "member"
+)
+
+// Share is a public read-only link scoped to one timeline. Kind discriminates
+// the two flavors (migration 022): "view" shares freeze one view configuration
+// and are served as a web snapshot at /s/{token}; "ics" shares are live
+// subscribable calendar feeds served at GET /shares/{token}.ics. ICS shares
+// carry Scope ("timeline" | "member") + MemberID and never a view config,
+// filter, or password — the unguessable token is their only secret.
+// PasswordHash is set only when a view share requires a password (Phase 13.2);
+// ExpiresAt and RevokedAt support lifecycle management (Phase 13.4/13.5).
+type Share struct {
+	ID           string     `db:"id"             json:"id"`
+	TimelineID   string     `db:"timeline_id"    json:"timelineId"`
+	Token        string     `db:"token"          json:"token"`
+	Kind         string     `db:"kind"           json:"kind"`
+	Scope        *string    `db:"scope"          json:"scope,omitempty"`
+	MemberID     *string    `db:"member_id"      json:"memberId,omitempty"`
+	Name         *string    `db:"name"           json:"name,omitempty"`
+	Description  *string    `db:"description"    json:"description,omitempty"`
+	ViewType     string     `db:"view_type"      json:"viewType"`
+	ViewConfig   string     `db:"view_config"    json:"viewConfig"`
+	PasswordHash *string    `db:"password_hash"  json:"-"`
+	ExpiresAt    *time.Time `db:"expires_at"     json:"expiresAt,omitempty"`
+	// CreatedBy is nil when the share was created by a superadmin who holds
+	// no team_members row in the timeline's team (migration 023).
+	CreatedBy    *string    `db:"created_by"     json:"createdBy,omitempty"`
+	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
+	LastViewedAt *time.Time `db:"last_viewed_at" json:"lastViewedAt,omitempty"`
+	ViewCount    int        `db:"view_count"     json:"viewCount"`
+	RevokedAt    *time.Time `db:"revoked_at"     json:"revokedAt,omitempty"`
+	// Protected is a derived, read-only flag (password_hash is never serialized).
+	// It is populated by the repo read methods so clients can show a lock badge
+	// without ever seeing the hash.
+	Protected bool `db:"-" json:"protected"`
+}
+
+// PublicMember is the safe projection of a team member for public share
+// responses. It exposes only display fields — never email, role, or user_id.
+type PublicMember struct {
+	ID          string  `json:"id"`
+	DisplayName string  `json:"displayName"`
+	Color       *string `json:"color,omitempty"`
+	Icon        *string `json:"icon,omitempty"`
+}
+
+// PublicActivity is the safe projection of an activity for public share
+// responses. It includes standard display fields but omits notes (unless
+// explicitly included for List shares with Notes enabled), caldav/google
+// identifiers, and any internal fields.
+type PublicActivity struct {
+	ID                string    `json:"id"`
+	Title             string    `json:"title"`
+	Description       *string   `json:"description,omitempty"`
+	Notes             *string   `json:"notes,omitempty"`
+	Icon              *string   `json:"icon,omitempty"`
+	Color             *string   `json:"color,omitempty"`
+	StartAt           time.Time `json:"startAt"`
+	EndAt             time.Time `json:"endAt"`
+	AllDay            bool      `json:"allDay"`
+	StatusID          *string   `json:"statusId,omitempty"`
+	ParentActivityID  *string   `json:"parentActivityId,omitempty"`
+	PercentComplete   *int      `json:"percentComplete,omitempty"`
+	AssignedMemberIDs []string  `json:"assignedMemberIds"`
+	TagIDs            []string  `json:"tagIds"`
+}
+
+// PublicTimeline is the safe timeline projection for share responses.
+type PublicTimeline struct {
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	Color     *string `json:"color,omitempty"`
+	Icon      *string `json:"icon,omitempty"`
+	StartDate string  `json:"startDate"`
+	EndDate   string  `json:"endDate"`
+}
+
+// PublicShare is the safe projection of a share row for the unauthenticated
+// gateway response. It omits operational telemetry (view_count, last_viewed_at)
+// and internal fields (created_by, revoked_at) that must not reach anonymous callers.
+type PublicShare struct {
+	ID         string     `json:"id"`
+	TimelineID string     `json:"timelineId"`
+	Token      string     `json:"token"`
+	Name       *string    `json:"name,omitempty"`
+	ViewType   string     `json:"viewType"`
+	ViewConfig string     `json:"viewConfig"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	ExpiresAt  *time.Time `json:"expiresAt,omitempty"`
+}
+
+// ShareProjection is the full aggregate returned by GET /shares/{token}.
+// It contains all data the public viewer needs to render the configured view.
+type ShareProjection struct {
+	Share      PublicShare      `json:"share"`
+	Timeline   PublicTimeline   `json:"timeline"`
+	TeamName   string           `json:"teamName"`
+	Members    []PublicMember   `json:"members"`
+	Statuses   []Status         `json:"statuses"`
+	Tags       []Tag            `json:"tags"`
+	Activities []PublicActivity `json:"activities"`
+}
+
+// RevokeUserResult summarizes the outcome of POST /users/:id/revoke.
+// The three counters let the caller show a meaningful summary in the UI.
+type RevokeUserResult struct {
+	AccountDeactivated     bool `json:"accountDeactivated"`
+	MembershipsInactivated int  `json:"membershipsInactivated"`
+	MembershipsRemoved     int  `json:"membershipsRemoved"`
+}
+
+// StatusTemplate is a reusable named preset of statuses owned by a team.
+// When a timeline is created the team's chosen template's items are copied
+// into live Status rows for that timeline.
+type StatusTemplate struct {
+	ID          string    `db:"id"          json:"id"`
+	TeamID      string    `db:"team_id"     json:"teamId"`
+	Name        string    `db:"name"        json:"name"`
+	Description *string   `db:"description" json:"description,omitempty"`
+	Position    int       `db:"position"    json:"position"`
+	CreatedBy   string    `db:"created_by"  json:"createdBy"`
+	CreatedAt   time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time `db:"updated_at"  json:"updatedAt"`
+	// Items is populated by the repository when listing templates.
+	Items []StatusTemplateItem `db:"-" json:"items"`
+}
+
+// StatusTemplateItem is one status value within a StatusTemplate.
+type StatusTemplateItem struct {
+	ID         string  `db:"id"          json:"id"`
+	TemplateID string  `db:"template_id" json:"templateId"`
+	Name       string  `db:"name"        json:"name"`
+	Color      string  `db:"color"       json:"color"`
+	Icon       *string `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool    `db:"is_closed"   json:"isClosed"`
+	Position   int     `db:"position"    json:"position"`
+}
+
+// Status is a live status value on a specific timeline. Rows are copied from a
+// StatusTemplate's items when the timeline is created and then evolve independently.
+type Status struct {
+	ID         string    `db:"id"          json:"id"`
+	TimelineID string    `db:"timeline_id" json:"timelineId"`
+	Name       string    `db:"name"        json:"name"`
+	Color      string    `db:"color"       json:"color"`
+	Icon       *string   `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool      `db:"is_closed"   json:"isClosed"`
+	Position   int       `db:"position"    json:"position"`
+	CreatedAt  time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+}
+
+// TimelineAccessEntry is a single timeline access grant joined with the team
+// member's display info. Returned by GET /teams/:id/timelines/:timelineId/access.
+type TimelineAccessEntry struct {
+	TimelineID   string  `db:"timeline_id"    json:"timelineId"`
+	TeamMemberID string  `db:"team_member_id" json:"teamMemberId"`
+	Role         string  `db:"role"           json:"role"`
+	DisplayName  string  `db:"display_name"   json:"displayName"`
+	Email        string  `db:"email"          json:"email"`
+	Color        *string `db:"color"          json:"color,omitempty"`
+	Icon         *string `db:"icon"           json:"icon,omitempty"`
+	UserID       *string `db:"user_id"        json:"userId,omitempty"`
+}
+
+// Tag is a team-scoped label that can be applied to activities. Tags are
+// normalized: a team_id+name pair is unique, enabling rename-all and
+// name-based filter matching across timelines.
+type Tag struct {
+	ID        string    `db:"id"         json:"id"`
+	TeamID    string    `db:"team_id"    json:"teamId"`
+	Name      string    `db:"name"       json:"name"`
+	Color     *string   `db:"color"      json:"color,omitempty"`
+	CreatedBy string    `db:"created_by" json:"createdBy"`
+	CreatedAt time.Time `db:"created_at" json:"createdAt"`
+}
+
+// Invite is a single-use token that grants an email address the right to
+// join a Team. AcceptedAt is non-nil once consumed; expired or accepted
+// invites are rejected by the registration handler.
+type Invite struct {
+	ID         string     `db:"id"          json:"id"`
+	TeamID     string     `db:"team_id"     json:"teamId"`
+	Email      string     `db:"email"       json:"email"`
+	Token      string     `db:"token"       json:"token"`
+	Role       string     `db:"role"        json:"role"`
+	InvitedBy  string     `db:"invited_by"  json:"invitedBy"`
+	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
+	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
+	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
 }
 ````
 
@@ -59503,307 +61016,6 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImpo
       )}
     </div>
   );
-}
-````
-
-## File: packages/web/src/components/CalendarShareModal.tsx
-````typescript
-/**
- * CalendarShareModal — manage the ICS calendar feeds for a timeline.
- *
- * Deliberately a different surface from ShareModal (Phase 13.4): a Calendar
- * share is not a frozen view snapshot but a live subscribable ICS feed. The
- * modal is a flat list of every feed the timeline can publish — the whole
- * timeline first, then one row per team member — each with an on/off toggle.
- * Toggling a row on creates that feed and reveals its URL (copy, one-click
- * subscribe links, regenerate); toggling off deletes it, killing the URL
- * immediately.
- *
- * All feeds are public read-only. There is no password option: calendar
- * clients cannot unlock a subscription URL interactively, so the unguessable
- * token is the secret and revocation is regenerate-or-toggle-off.
- */
-
-import { useEffect, useState } from 'react'
-import { createPortal } from 'react-dom'
-import {
-  CalendarDays, Link2, Copy, Check, RefreshCw, X, Users,
-} from 'lucide-react'
-import { useListShares, useCreateShare, useDeleteShare, useRegenerateShare } from '@/hooks/useShares'
-import { useTeamMembers } from '@/hooks/useTeamActivities'
-import { Badge } from '@/components/identity/Badge'
-import { resolveColorHex } from '@/components/identity/identity-constants'
-import { Button } from '@/components/ui/button'
-import { cn } from '@/lib/utils'
-import { MEMBER_COLORS } from '@/types'
-import type { components } from '@draba/shared'
-
-type Share = components['schemas']['Share']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-
-interface Props {
-  teamId: string
-  timelineId: string
-  /** Display name of the timeline, shown in the header subtitle and feed names. */
-  timelineName?: string
-  onClose: () => void
-}
-
-const TILE_TEAL = 'bg-[hsl(188_59%_38%/0.12)] text-primary'
-
-/**
- * URL-safe slug for the feed filename. Calendar clients (Thunderbird
- * included) default the new calendar's name from the URL's filename, so the
- * link ends in a readable `<name>.ics` rather than the bare token hash. The
- * server treats the filename as cosmetic — the token is the key.
- */
-function slugify(name: string): string {
-  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
-  return slug || 'calendar'
-}
-
-/** Builds the absolute https feed URL for a share token. */
-function feedURL(token: string, name: string): string {
-  return `${window.location.origin}/shares/${token}/${slugify(name)}.ics`
-}
-
-/** The webcal:// variant most calendar apps treat as "subscribe". */
-function webcalURL(token: string, name: string): string {
-  return feedURL(token, name).replace(/^https?:\/\//, 'webcal://')
-}
-
-// ── One feed row: label + toggle, expanding to the link when on ───────────────
-
-function FeedRow({
-  label,
-  member,
-  share,
-  busy,
-  onToggle,
-  onRegenerate,
-}: {
-  label: string
-  /** Set for member rows — renders the identity badge next to the label. */
-  member?: TeamMemberWithUser
-  /** The existing ICS share for this row, when the feed is on. */
-  share?: Share
-  busy: boolean
-  onToggle: () => void
-  onRegenerate: (shareId: string) => void
-}) {
-  const [copied, setCopied] = useState(false)
-  const on = Boolean(share)
-  const url = share ? feedURL(share.token, share.name ?? label) : null
-  const webcal = share ? webcalURL(share.token, share.name ?? label) : null
-
-  const copy = () => {
-    if (!url) return
-    void navigator.clipboard.writeText(url).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1600)
-    })
-  }
-
-  return (
-    <div className="overflow-hidden rounded-[var(--radius-md)] border border-border">
-      <div className="flex items-center gap-2.5 px-3 py-2.5">
-        {member ? (
-          <Badge
-            identity={{ color: resolveColorHex(member.color) || MEMBER_COLORS[0], icon: member.icon ?? '__name_1__' }}
-            name={member.displayName || 'Team member'}
-            size={26}
-            shape="circle"
-          />
-        ) : (
-          <div className={cn('flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
-            <CalendarDays size={14} strokeWidth={2.2} />
-          </div>
-        )}
-        <div className="flex-1 text-[13px] font-semibold text-foreground">{label}</div>
-        <button
-          onClick={onToggle}
-          role="switch"
-          aria-checked={on}
-          aria-label={`${label} feed`}
-          disabled={busy}
-          className={cn(
-            'relative h-[22px] w-10 shrink-0 cursor-pointer rounded-[var(--radius-full)] border-none p-0 transition-colors',
-            on ? 'bg-primary' : 'bg-border',
-          )}
-        >
-          <span className={cn(
-            'absolute top-[2px] h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-[left] duration-150',
-            on ? 'left-5' : 'left-[2px]',
-          )} />
-        </button>
-      </div>
-
-      {share && url && webcal && (
-        <div className="flex flex-col gap-2 border-t border-border bg-muted/40 px-3 py-2.5">
-          <div className="flex items-center gap-2">
-            <div className="flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12px] text-foreground">
-              <Link2 size={13} className="shrink-0 text-muted-foreground" strokeWidth={2} />
-              <span className="overflow-hidden text-ellipsis whitespace-nowrap">{url}</span>
-            </div>
-            <button
-              onClick={copy}
-              className={cn(
-                'flex shrink-0 items-center gap-[5px] rounded-[var(--radius-md)] border px-3 py-[7px] text-[12.5px] font-semibold transition-colors',
-                copied ? 'border-success bg-[hsl(145_63%_42%/0.12)] text-success' : 'border-border bg-card text-foreground',
-              )}
-            >
-              {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={2.2} />}
-              {copied ? 'Copied' : 'Copy'}
-            </button>
-          </div>
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
-            <span className="text-muted-foreground">Add to:</span>
-            <a
-              href={`https://calendar.google.com/calendar/render?cid=${encodeURIComponent(webcal)}`}
-              target="_blank"
-              rel="noreferrer"
-              className="font-semibold text-primary hover:underline"
-            >
-              Google
-            </a>
-            <a href={webcal} className="font-semibold text-primary hover:underline">
-              Apple
-            </a>
-            <a
-              href={`https://outlook.live.com/calendar/0/addfromweb?url=${encodeURIComponent(webcal)}&name=${encodeURIComponent(share.name ?? label)}`}
-              target="_blank"
-              rel="noreferrer"
-              className="font-semibold text-primary hover:underline"
-            >
-              Outlook
-            </a>
-            <button
-              onClick={() => onRegenerate(share.id)}
-              disabled={busy}
-              title="Replace the link — the old URL stops working immediately"
-              className="ml-auto flex cursor-pointer items-center gap-[5px] border-none bg-transparent p-0 text-[12px] font-semibold text-muted-foreground transition-colors hover:text-foreground"
-            >
-              <RefreshCw size={12} strokeWidth={2} />
-              Regenerate link
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── The modal shell ────────────────────────────────────────────────────────────
-
-export default function CalendarShareModal({ teamId, timelineId, timelineName, onClose }: Props) {
-  const { data: allShares = [], isLoading } = useListShares(teamId, timelineId)
-  const { data: members = [] } = useTeamMembers(teamId)
-  const createShare = useCreateShare(teamId, timelineId)
-  const deleteShare = useDeleteShare(teamId, timelineId)
-  const regenerateShare = useRegenerateShare(teamId, timelineId)
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-
-  const icsShares = allShares.filter(s => s.kind === 'ics')
-  const timelineShare = icsShares.find(s => s.scope === 'timeline')
-  const memberShare = (memberId: string) =>
-    icsShares.find(s => s.scope === 'member' && s.memberId === memberId)
-
-  const busy = isLoading || createShare.isPending || deleteShare.isPending || regenerateShare.isPending
-
-  const toggleTimeline = () => {
-    if (busy) return
-    if (timelineShare) {
-      deleteShare.mutate(timelineShare.id)
-    } else {
-      createShare.mutate({ kind: 'ics', scope: 'timeline', name: `${timelineName ?? 'Timeline'} calendar feed` })
-    }
-  }
-
-  const toggleMember = (m: TeamMemberWithUser) => {
-    if (busy) return
-    const existing = memberShare(m.id)
-    if (existing) {
-      deleteShare.mutate(existing.id)
-    } else {
-      createShare.mutate({
-        kind: 'ics',
-        scope: 'member',
-        memberId: m.id,
-        name: `${m.displayName || 'Member'} calendar feed`,
-      })
-    }
-  }
-
-  return createPortal(
-    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]">
-      <div className="flex max-h-[88vh] w-[min(560px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]">
-        {/* Header */}
-        <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-[18px]">
-          <div className={cn('flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
-            <CalendarDays size={19} strokeWidth={2.2} />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Share calendar</h2>
-            <div className="mt-0.5 text-[12.5px] text-muted-foreground">
-              {timelineName ? `${timelineName} · ` : ''}live read-only feeds — subscribe from Google, Apple, or Outlook
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
-          >
-            <X size={16} strokeWidth={2.2} />
-          </button>
-        </div>
-
-        {/* Body — one row per publishable feed */}
-        <div className="flex flex-1 flex-col gap-2 overflow-y-auto px-5 py-4">
-          <FeedRow
-            label="Whole timeline"
-            share={timelineShare}
-            busy={busy}
-            onToggle={toggleTimeline}
-            onRegenerate={id => regenerateShare.mutate(id)}
-          />
-
-          {members.length > 0 && (
-            <div className="mt-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Per member</div>
-          )}
-          {members.map(m => (
-            <FeedRow
-              key={m.id}
-              label={m.displayName || 'Team member'}
-              member={m}
-              share={memberShare(m.id)}
-              busy={busy}
-              onToggle={() => toggleMember(m)}
-              onRegenerate={id => regenerateShare.mutate(id)}
-            />
-          ))}
-
-          {(createShare.isError || deleteShare.isError || regenerateShare.isError) && (
-            <p className="text-[11px] text-destructive">Something went wrong. Please try again.</p>
-          )}
-        </div>
-
-        {/* Footer */}
-        <div className="flex shrink-0 items-center gap-2.5 border-t border-border px-5 py-[13px]">
-          <div className="flex items-center gap-[7px] text-xs text-muted-foreground">
-            <Users size={14} strokeWidth={2} />
-            Public read-only · the link itself is the secret
-          </div>
-          <Button variant="outline" className="ml-auto" onClick={onClose}>Done</Button>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  )
 }
 ````
 
@@ -62482,1218 +63694,6 @@ func buildTimelineExportICS(timeline *models.Timeline, acts []*models.Activity, 
 
 	events := activitiesToICSEvents(acts, memberName, tagName, statusName, true)
 	return ics.Calendar(timeline.Name, events)
-}
-````
-
-## File: packages/api/internal/api/share_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"os"
-	"strings"
-	"sync"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/filters"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// unlockMaxAttempts caps password-unlock attempts per client IP per hour. The
-// limit is per-share-independent (keyed on IP only) so cycling tokens cannot
-// multiply an attacker's budget.
-const unlockMaxAttempts = 10
-
-// ── In-memory share cache ─────────────────────────────────────────────────────
-
-type shareCacheEntry struct {
-	builtAt time.Time
-	payload models.ShareProjection
-}
-
-// shareCache is a lightweight TTL cache keyed by share token. It avoids a DB
-// hit on every warm request. The TTL is read from DRABA_SHARE_CACHE_TTL at
-// startup (default 60s); a PATCH or DELETE invalidates the entry immediately.
-type shareCache struct {
-	mu      sync.RWMutex
-	entries map[string]*shareCacheEntry
-	ttl     time.Duration
-}
-
-func newShareCache() *shareCache {
-	ttl := 60 * time.Second
-	if v := os.Getenv("DRABA_SHARE_CACHE_TTL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			ttl = d
-		}
-	}
-	return &shareCache{entries: make(map[string]*shareCacheEntry), ttl: ttl}
-}
-
-func (c *shareCache) get(token string) (*models.ShareProjection, bool) {
-	c.mu.RLock()
-	e, ok := c.entries[token]
-	c.mu.RUnlock()
-	if !ok {
-		return nil, false
-	}
-	if time.Since(e.builtAt) > c.ttl {
-		return nil, false
-	}
-	p := e.payload
-	return &p, true
-}
-
-func (c *shareCache) set(token string, p *models.ShareProjection) {
-	c.mu.Lock()
-	c.entries[token] = &shareCacheEntry{builtAt: time.Now(), payload: *p}
-	c.mu.Unlock()
-}
-
-func (c *shareCache) invalidate(token string) {
-	c.mu.Lock()
-	delete(c.entries, token)
-	c.mu.Unlock()
-}
-
-// ── viewConfig sub-types ──────────────────────────────────────────────────────
-
-// viewConfigJSON is the shape stored in shares.view_config. The filter field
-// is evaluated server-side by the Go filter engine; the other fields are
-// forwarded to the client as-is so the public viewer can apply them.
-//
-// columns carries the List view's column visibility snapshot — it drives the
-// "notes" projection nuance below (and lets the public viewer render exactly
-// the columns the share creator chose).
-type viewConfigJSON struct {
-	Filter  *filters.FilterDefinition `json:"filter,omitempty"`
-	Columns []shareColumnConfig       `json:"columns,omitempty"`
-}
-
-type shareColumnConfig struct {
-	ID      string `json:"id"`
-	Visible bool   `json:"visible"`
-}
-
-// ── Handlers ──────────────────────────────────────────────────────────────────
-
-// handleGetShareProjection handles GET /shares/{token}. No authentication is
-// required. It is the public data gateway: the scope is hard-locked to the
-// single timeline referenced by the share row; no client-supplied selector can
-// widen it.
-func (s *Server) handleGetShareProjection(w http.ResponseWriter, r *http.Request) {
-	token := r.PathValue("token")
-
-	// GET /shares/{token}.ics — Go 1.22 mux wildcards span the whole path
-	// segment, so the ICS feed's .ics suffix arrives inside {token}; dispatch
-	// it to the calendar-feed handler (Phase 13.4).
-	if strings.HasSuffix(token, ".ics") {
-		s.serveICSFeed(w, r, strings.TrimSuffix(token, ".ics"))
-		return
-	}
-
-	// ── 1. Resolve the share row ──────────────────────────────────────────────
-	share, err := s.shares.GetByToken(token)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
-		return
-	}
-
-	// An ICS feed is only reachable through the .ics endpoint. Serving it as a
-	// JSON projection would expose the whole timeline for member-scoped feeds
-	// (the projection has no member filter), so the kinds never cross over.
-	if share.Kind != models.ShareKindView {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-		return
-	}
-
-	// Phase 13.4 — revocation / expiry handled here (fields exist in schema now).
-	if share.RevokedAt != nil {
-		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
-		return
-	}
-	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
-		writeError(w, http.StatusGone, "GONE", "this share has expired")
-		return
-	}
-
-	// Archived timeline → its shares stop serving (Phase 13.5). Checked on
-	// every request — before the cache read — so archiving takes effect
-	// immediately regardless of a warm projection cache.
-	if !s.shareTimelineLive(w, share) {
-		return
-	}
-
-	// Password gate (Phase 13.2). A locked share serves no data without a valid
-	// view token — obtained by exchanging the password at POST /shares/{token}/unlock.
-	// NOTE: this check must stay above the cache read. PATCH invalidates the cache
-	// entry immediately (see handleUpdateShare), so a newly-added password_hash is
-	// never served from a stale cache. Moving the check below the cache read would
-	// silently bypass the password gate for the TTL window. The 401 body carries no
-	// projection data — only the passwordRequired signal the viewer needs.
-	if share.PasswordHash != nil {
-		vt := bearerToken(r)
-		if vt == "" || s.tokens.ValidateShareViewToken(vt, share.ID) != nil {
-			writeJSON(w, http.StatusUnauthorized, map[string]bool{"passwordRequired": true})
-			return
-		}
-	}
-
-	// ── 2. Serve from cache if warm ───────────────────────────────────────────
-	if proj, ok := s.shareCache.get(token); ok {
-		go func() { _ = s.shares.RecordView(share.ID) }()
-		writeJSON(w, http.StatusOK, proj)
-		return
-	}
-
-	// ── 3. Build projection (cache miss) ─────────────────────────────────────
-	proj, err := s.buildShareProjection(share)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build share projection")
-		return
-	}
-
-	s.shareCache.set(token, proj)
-	go func() { _ = s.shares.RecordView(share.ID) }()
-	writeJSON(w, http.StatusOK, proj)
-}
-
-// shareTimelineLive loads the share's timeline and reports whether it is
-// servable on the public surface, writing the error response when it is not.
-// An archived timeline answers 404, not 410: archiving is reversible —
-// unarchiving must resurrect existing links — and 410 tells calendar clients
-// to drop a subscription permanently. 404 also matches handleCreateShare's
-// archived-timeline response without leaking archive state.
-func (s *Server) shareTimelineLive(w http.ResponseWriter, share *models.Share) bool {
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if errors.Is(err, sql.ErrNoRows) {
-		// A share row outliving a hard-deleted timeline answers the same 404 as
-		// every other dead-share case — a 500 here would be a state oracle on
-		// the public surface.
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-		return false
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
-		return false
-	}
-	if timeline.ArchivedAt != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-		return false
-	}
-	return true
-}
-
-// buildShareProjection assembles the full ShareProjection for a share.
-// The scope is hard-locked to share.TimelineID; the caller cannot supply a
-// different timeline ID. Filter evaluation runs in Go before any data leaves
-// the server.
-func (s *Server) buildShareProjection(share *models.Share) (*models.ShareProjection, error) {
-	// Get timeline — using the share's TimelineID, never a client-supplied value.
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get all non-archived activities for this timeline.
-	acts, err := s.activities.ListByTimeline(share.TimelineID, nil, nil, false)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get statuses and tags for filter context + projection.
-	statuses, err := s.statuses.ListStatuses(share.TimelineID)
-	if err != nil {
-		return nil, err
-	}
-	tags, err := s.tags.ListByTeam(timeline.TeamID)
-	if err != nil {
-		return nil, err
-	}
-	members, err := s.teams.ListMembers(timeline.TeamID)
-	if err != nil {
-		return nil, err
-	}
-	team, err := s.teams.GetByID(timeline.TeamID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Parse the frozen filter from view_config and evaluate it server-side.
-	var vc viewConfigJSON
-	if share.ViewConfig != "" && share.ViewConfig != "{}" {
-		_ = json.Unmarshal([]byte(share.ViewConfig), &vc)
-	}
-
-	var filteredActs []*models.Activity
-	if vc.Filter != nil && len(vc.Filter.Conditions) > 0 {
-		// Build filter context.
-		statusesByTL := map[string][]models.Status{share.TimelineID: {}}
-		for _, st := range statuses {
-			statusesByTL[share.TimelineID] = append(statusesByTL[share.TimelineID], *st)
-		}
-		modelTags := make([]models.Tag, 0, len(tags))
-		for _, t := range tags {
-			modelTags = append(modelTags, *t)
-		}
-		ctx := &filters.FilterContext{
-			StatusesByTimelineID: statusesByTL,
-			Tags:                 modelTags,
-		}
-		for _, a := range acts {
-			if filters.MatchesFilter(a, vc.Filter, ctx) {
-				filteredActs = append(filteredActs, a)
-			}
-		}
-	} else {
-		filteredActs = acts
-	}
-
-	// Build referenced-entity sets (prune to what surviving activities reference).
-	usedMemberIDs := make(map[string]bool)
-	usedStatusIDs := make(map[string]bool)
-	usedTagIDs := make(map[string]bool)
-	for _, a := range filteredActs {
-		for _, id := range a.AssignedMemberIDs {
-			usedMemberIDs[id] = true
-		}
-		if a.StatusID != nil {
-			usedStatusIDs[*a.StatusID] = true
-		}
-		for _, id := range a.TagIDs {
-			usedTagIDs[id] = true
-		}
-	}
-
-	// notes is included only for List shares whose creator left the Notes
-	// column visible — the only projection nuance beyond scope-locking and
-	// field-pruning (Phase 13.3 exit criteria).
-	notesEnabled := false
-	if share.ViewType == "list" {
-		for _, c := range vc.Columns {
-			if c.ID == "notes" && c.Visible {
-				notesEnabled = true
-				break
-			}
-		}
-	}
-
-	// Build PublicActivity slice.
-	pubActivities := make([]models.PublicActivity, 0, len(filteredActs))
-	for _, a := range filteredActs {
-		pub := models.PublicActivity{
-			ID:                a.ID,
-			Title:             a.Title,
-			Description:       a.Description,
-			Icon:              a.Icon,
-			Color:             a.Color,
-			StartAt:           a.StartAt,
-			EndAt:             a.EndAt,
-			AllDay:            a.AllDay,
-			StatusID:          a.StatusID,
-			ParentActivityID:  a.ParentActivityID,
-			PercentComplete:   a.PercentComplete,
-			AssignedMemberIDs: a.AssignedMemberIDs,
-			TagIDs:            a.TagIDs,
-		}
-		if notesEnabled {
-			pub.Notes = a.Notes
-		}
-		if pub.AssignedMemberIDs == nil {
-			pub.AssignedMemberIDs = []string{}
-		}
-		if pub.TagIDs == nil {
-			pub.TagIDs = []string{}
-		}
-		pubActivities = append(pubActivities, pub)
-	}
-
-	// Build PublicMember slice — never email/role/userId.
-	pubMembers := make([]models.PublicMember, 0)
-	for _, m := range members {
-		if !usedMemberIDs[m.ID] {
-			continue
-		}
-		name := m.DisplayName
-		if name == "" {
-			// The register endpoint requires a non-empty displayName, so this
-			// branch only fires for rows migrated from older data. Never fall
-			// back to the email address — this response is public and
-			// unauthenticated.
-			name = "Team member"
-		}
-		pubMembers = append(pubMembers, models.PublicMember{
-			ID:          m.ID,
-			DisplayName: name,
-			Color:       m.Color,
-			Icon:        m.Icon,
-		})
-	}
-
-	// Prune statuses to referenced ones — except for Kanban shares, where
-	// every status is a column regardless of whether it currently holds any
-	// activities (mirrors the in-app board, which always renders one column
-	// per timeline status). Pruning there would silently drop empty columns
-	// that anonymous viewers would otherwise see, e.g. an empty "Deferred"
-	// column that's still meaningful to the team.
-	pubStatuses := make([]models.Status, 0)
-	for _, st := range statuses {
-		if share.ViewType == "kanban" || usedStatusIDs[st.ID] {
-			pubStatuses = append(pubStatuses, *st)
-		}
-	}
-
-	// Prune tags to referenced ones.
-	pubTags := make([]models.Tag, 0)
-	for _, tg := range tags {
-		if usedTagIDs[tg.ID] {
-			pubTags = append(pubTags, *tg)
-		}
-	}
-
-	// Build the public share — only the fields anonymous callers need.
-	// Operational telemetry (view_count, last_viewed_at) and internal fields
-	// (created_by, revoked_at) are excluded from the public response.
-	pubShare := models.PublicShare{
-		ID:         share.ID,
-		TimelineID: share.TimelineID,
-		Token:      share.Token,
-		Name:       share.Name,
-		ViewType:   share.ViewType,
-		ViewConfig: share.ViewConfig,
-		CreatedAt:  share.CreatedAt,
-		ExpiresAt:  share.ExpiresAt,
-	}
-	proj := &models.ShareProjection{
-		Share:    pubShare,
-		TeamName: team.Name,
-		Timeline: models.PublicTimeline{
-			ID:        timeline.ID,
-			Name:      timeline.Name,
-			Color:     timeline.Color,
-			Icon:      timeline.Icon,
-			StartDate: timeline.StartDate,
-			EndDate:   timeline.EndDate,
-		},
-		Members:    pubMembers,
-		Statuses:   pubStatuses,
-		Tags:       pubTags,
-		Activities: pubActivities,
-	}
-	return proj, nil
-}
-
-// handleCreateShare handles POST /timelines/{id}/shares. The caller must be a
-// member of the timeline's team. The share captures the current view config.
-func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("id")
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-	if timeline.ArchivedAt != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
-	if !ok {
-		return
-	}
-
-	var req createShareBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if req.Kind == "" {
-		req.Kind = models.ShareKindView
-	}
-	if req.Kind != models.ShareKindView && req.Kind != models.ShareKindICS {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "kind must be 'view' or 'ics'")
-		return
-	}
-	if req.ViewType == "" {
-		req.ViewType = "gantt"
-	}
-	if req.ViewConfig == "" {
-		req.ViewConfig = "{}"
-	}
-
-	now := time.Now().UTC()
-	share := &models.Share{
-		ID:          newID(),
-		TimelineID:  timelineID,
-		Token:       newToken(),
-		Kind:        req.Kind,
-		Name:        req.Name,
-		Description: req.Description,
-		ViewType:    req.ViewType,
-		ViewConfig:  req.ViewConfig,
-		CreatedAt:   now,
-		ViewCount:   0,
-	}
-	// A superadmin managing a team they're not in arrives as a synthetic
-	// member with an empty ID (see requireTeamMember); created_by stays NULL
-	// for them rather than violating the team_members FK.
-	if member.ID != "" {
-		share.CreatedBy = &member.ID
-	}
-
-	if req.Kind == models.ShareKindICS {
-		// An ICS feed has no view semantics and no password — the token is the
-		// secret (calendar clients cannot unlock interactively). Scope is the
-		// only configuration: the whole timeline, or one member's assignments.
-		if req.Password != nil && strings.TrimSpace(*req.Password) != "" {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "ICS feeds cannot be password protected")
-			return
-		}
-		if req.Scope != models.ShareScopeTimeline && req.Scope != models.ShareScopeMember {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "scope must be 'timeline' or 'member' for ICS shares")
-			return
-		}
-		share.Scope = &req.Scope
-		share.ViewType = "calendar"
-		share.ViewConfig = "{}"
-		if req.Scope == models.ShareScopeMember {
-			if req.MemberID == nil || *req.MemberID == "" {
-				writeError(w, http.StatusBadRequest, "BAD_REQUEST", "memberId is required for member-scoped ICS shares")
-				return
-			}
-			// The member must belong to this timeline's team — a feed must not
-			// be creatable for an arbitrary member ID from another team.
-			feedMember, err := s.teams.GetMemberByID(*req.MemberID)
-			if err != nil || feedMember.TeamID != timeline.TeamID {
-				writeError(w, http.StatusBadRequest, "BAD_REQUEST", "memberId does not belong to this timeline's team")
-				return
-			}
-			share.MemberID = req.MemberID
-		}
-	}
-
-	// Optional password protection (view shares only). An empty/whitespace
-	// string means "no password" — the field stays NULL and the share is open.
-	if req.Kind == models.ShareKindView && req.Password != nil && strings.TrimSpace(*req.Password) != "" {
-		hash, err := auth.HashPassword(*req.Password)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to secure share")
-			return
-		}
-		share.PasswordHash = &hash
-	}
-
-	if err := s.shares.Create(share); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create share")
-		return
-	}
-
-	// Surface the derived flag in the create response (the repo sets it on reads).
-	share.Protected = share.PasswordHash != nil
-	writeJSON(w, http.StatusCreated, share)
-}
-
-// handleListShares handles GET /teams/{id}/timelines/{timelineId}/shares.
-// Only team members with access to the timeline may list its shares.
-func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("timelineId")
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	shares, err := s.shares.ListByTimeline(timelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list shares")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, shares)
-}
-
-// handleUpdateShare handles PATCH /shares/{id}. Any member of the timeline's
-// team may update it (shares are read-only projections — no creator/admin gate).
-func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
-	shareID := r.PathValue("id")
-
-	share, err := s.shares.GetByID(shareID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-
-	// Any member of the timeline's team may manage its shares. A share is a
-	// read-only projection that can never mutate app data, so there is no
-	// creator/admin gate (Phase 13.2 re-sequencing decision).
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	var req patchShareBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if req.Name != nil {
-		share.Name = req.Name
-	}
-	if req.Description != nil {
-		share.Description = req.Description
-	}
-	if req.ViewType != nil {
-		share.ViewType = *req.ViewType
-	}
-	if req.ViewConfig != nil {
-		share.ViewConfig = *req.ViewConfig
-	}
-	// Password: nil leaves it unchanged; an empty string clears protection; a
-	// non-empty string sets/replaces it. ICS feeds can never carry one —
-	// calendar clients have no interactive unlock.
-	if req.Password != nil && share.Kind == models.ShareKindICS && strings.TrimSpace(*req.Password) != "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "ICS feeds cannot be password protected")
-		return
-	}
-	if req.Password != nil {
-		if strings.TrimSpace(*req.Password) == "" {
-			share.PasswordHash = nil
-		} else {
-			hash, err := auth.HashPassword(*req.Password)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to secure share")
-				return
-			}
-			share.PasswordHash = &hash
-		}
-	}
-
-	if err := s.shares.Update(share); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update share")
-		return
-	}
-
-	// Invalidate caches so the next public request picks up the new config.
-	s.shareCache.invalidate(share.Token)
-	s.icsCache.invalidate(share.Token)
-
-	// Refresh the derived flag — the password may have just been set/cleared.
-	share.Protected = share.PasswordHash != nil
-	writeJSON(w, http.StatusOK, share)
-}
-
-// handleDeleteShare handles DELETE /shares/{id}. Any member of the timeline's
-// team may delete it (see handleUpdateShare).
-func (s *Server) handleDeleteShare(w http.ResponseWriter, r *http.Request) {
-	shareID := r.PathValue("id")
-
-	share, err := s.shares.GetByID(shareID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-
-	// Any member of the timeline's team may delete its shares — no creator/admin
-	// gate (see handleUpdateShare).
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	if err := s.shares.Delete(shareID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete share")
-		return
-	}
-
-	s.shareCache.invalidate(share.Token)
-	s.icsCache.invalidate(share.Token)
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleUnlockShare handles POST /shares/{token}/unlock. It is public (no auth
-// middleware): an anonymous viewer exchanges the share password for a
-// short-lived view token, which they then present on GET /shares/{token}.
-// Attempts are rate-limited per client IP to blunt brute-force guessing.
-func (s *Server) handleUnlockShare(w http.ResponseWriter, r *http.Request) {
-	if !s.unlockLimiter.allow(clientIP(r)) {
-		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "too many unlock attempts; try again later")
-		return
-	}
-
-	token := r.PathValue("token")
-
-	share, err := s.shares.GetByToken(token)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
-		return
-	}
-
-	// Mirror the GET gateway's revocation/expiry checks so a dead share cannot
-	// be unlocked.
-	if share.RevokedAt != nil {
-		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
-		return
-	}
-	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
-		writeError(w, http.StatusGone, "GONE", "this share has expired")
-		return
-	}
-	// ICS feeds are never password protected; mirror the projection gateway's
-	// 404 rather than confirming the token exists in another mode.
-	if share.Kind != models.ShareKindView {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-		return
-	}
-	// Mirror the GET gateway's archived-timeline 404 (Phase 13.5) — a dead
-	// share must not be unlockable, and the check precedes NOT_PROTECTED so an
-	// archived timeline reveals nothing about its shares' protection state.
-	if !s.shareTimelineLive(w, share) {
-		return
-	}
-	if share.PasswordHash == nil {
-		writeError(w, http.StatusBadRequest, "NOT_PROTECTED", "this share is not password protected")
-		return
-	}
-
-	var req unlockShareBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if auth.CheckPassword(*share.PasswordHash, req.Password) != nil {
-		writeError(w, http.StatusUnauthorized, "INVALID_PASSWORD", "incorrect password")
-		return
-	}
-
-	viewToken, err := s.tokens.IssueShareViewToken(share.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to issue view token")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"token": viewToken})
-}
-
-// bearerToken extracts a Bearer credential from the Authorization header, or
-// returns "" when absent or malformed.
-func bearerToken(r *http.Request) string {
-	header := r.Header.Get("Authorization")
-	if !strings.HasPrefix(header, "Bearer ") {
-		return ""
-	}
-	return strings.TrimPrefix(header, "Bearer ")
-}
-
-// ── Request bodies ────────────────────────────────────────────────────────────
-
-type createShareBody struct {
-	Kind        string  `json:"kind,omitempty"`
-	Scope       string  `json:"scope,omitempty"`
-	MemberID    *string `json:"memberId,omitempty"`
-	Name        *string `json:"name,omitempty"`
-	Description *string `json:"description,omitempty"`
-	ViewType    string  `json:"viewType"`
-	ViewConfig  string  `json:"viewConfig"`
-	Password    *string `json:"password,omitempty"`
-}
-
-type patchShareBody struct {
-	Name        *string `json:"name,omitempty"`
-	Description *string `json:"description,omitempty"`
-	ViewType    *string `json:"viewType,omitempty"`
-	ViewConfig  *string `json:"viewConfig,omitempty"`
-	Password    *string `json:"password,omitempty"`
-}
-
-type unlockShareBody struct {
-	Password string `json:"password"`
-}
-````
-
-## File: packages/api/internal/models/models.go
-````go
-// Package models holds the domain types shared across the API, db,
-// and event-bus packages. These types are persisted directly via sqlx
-// (db tags) and serialised on the wire (json tags); changing tags is a
-// schema change.
-package models
-
-import "time"
-
-// Activity is a scheduled item of work belonging to a Timeline. ArchivedAt is
-// non-nil when the activity is soft-deleted; list endpoints exclude archived
-// activities by default.
-//
-// AssignedMemberIDs is not stored on the activities table; it is populated by
-// the repository from activity_assignments after every list query.
-//
-// GoogleEventID and CaldavUID are preserved as-is — they identify the
-// corresponding records in external calendar systems (VEVENT identifiers).
-type Activity struct {
-	ID                string     `db:"id"                  json:"id"`
-	TimelineID        string     `db:"timeline_id"         json:"timelineId"`
-	Title             string     `db:"title"               json:"title"`
-	Description       *string    `db:"description"         json:"description,omitempty"`
-	Notes             *string    `db:"notes"               json:"notes,omitempty"`
-	Icon              *string    `db:"icon"                json:"icon,omitempty"`
-	Color             *string    `db:"color"               json:"color,omitempty"`
-	StartAt           time.Time  `db:"start_at"            json:"startAt"`
-	EndAt             time.Time  `db:"end_at"              json:"endAt"`
-	AllDay            bool       `db:"all_day"             json:"allDay"`
-	StatusID          *string    `db:"status_id"           json:"statusId,omitempty"`
-	ParentActivityID  *string    `db:"parent_activity_id"  json:"parentActivityId,omitempty"`
-	PercentComplete   *int       `db:"percent_complete"    json:"percentComplete,omitempty"`
-	Location          *string    `db:"location"            json:"location,omitempty"`
-	URL               *string    `db:"url"                 json:"url,omitempty"`
-	Rrule             *string    `db:"rrule"               json:"rrule,omitempty"`
-	CaldavUID         *string    `db:"caldav_uid"          json:"caldavUid,omitempty"`
-	GoogleEventID     *string    `db:"google_event_id"     json:"googleEventId,omitempty"`
-	CreatedBy         string     `db:"created_by"          json:"createdBy"`
-	CreatedAt         time.Time  `db:"created_at"          json:"createdAt"`
-	UpdatedAt         time.Time  `db:"updated_at"          json:"updatedAt"`
-	ArchivedAt        *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
-	AssignedMemberIDs []string   `db:"-"                   json:"assignedMemberIds"`
-	TagIDs            []string   `db:"-"                   json:"tagIds"`
-}
-
-// TeamMemberWithUser joins a TeamMember row with its associated User so
-// callers receive display names and emails in a single query. Participants
-// (no user account) have empty email and avatar; their display_name comes
-// from team_members.display_name via COALESCE in the query.
-type TeamMemberWithUser struct {
-	TeamMember
-	Email       string  `db:"email"        json:"email"`
-	DisplayName string  `db:"display_name" json:"displayName"`
-	AvatarURL   *string `db:"avatar_url"   json:"avatarUrl,omitempty"`
-}
-
-// User is an authenticated account. PasswordHash is omitted from JSON
-// to avoid leaking it through any handler that returns a User.
-// ArchivedAt is non-nil when the account is inactivated; login is rejected
-// for archived users. Color and Icon are user-level identity fields (migration
-// 010); they propagate to team_members rows for the user when changed.
-//
-// AuthProvider, OIDCIssuer, and OIDCSubject are added in migration 024. A
-// local user has AuthProvider "local" and a non-nil PasswordHash. An OIDC
-// (SSO) user has AuthProvider "oidc", a nil PasswordHash, and a non-nil
-// (OIDCIssuer, OIDCSubject) pair identifying them at the external IdP.
-type User struct {
-	ID           string     `db:"id"             json:"id"`
-	Email        string     `db:"email"          json:"email"`
-	PasswordHash *string    `db:"password_hash"  json:"-"`
-	DisplayName  string     `db:"display_name"   json:"displayName"`
-	AvatarURL    *string    `db:"avatar_url"     json:"avatarUrl,omitempty"`
-	Color        *string    `db:"color"          json:"color,omitempty"`
-	Icon         *string    `db:"icon"           json:"icon,omitempty"`
-	IsSuperadmin bool       `db:"is_superadmin"  json:"isSuperadmin"`
-	AuthProvider string     `db:"auth_provider"  json:"authProvider"`
-	OIDCIssuer   *string    `db:"oidc_issuer"    json:"-"`
-	OIDCSubject  *string    `db:"oidc_subject"   json:"-"`
-	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
-	UpdatedAt    time.Time  `db:"updated_at"     json:"updatedAt"`
-	ArchivedAt   *time.Time `db:"archived_at"    json:"archivedAt,omitempty"`
-}
-
-// Team is a workspace that groups users and their scheduled work. Color and
-// Icon are identity fields added in migration 006; both are nullable until
-// explicitly set by an admin. Description, Notes, and ArchivedAt are added in
-// migration 008; ArchivedAt is non-nil when the team is soft-deleted.
-// InviteLinkToken is a stable, reusable token added in migration 009; when
-// non-nil it can be used by anyone to join the team during registration.
-type Team struct {
-	ID              string     `db:"id"                  json:"id"`
-	Name            string     `db:"name"                json:"name"`
-	Slug            string     `db:"slug"                json:"slug"`
-	Description     *string    `db:"description"         json:"description,omitempty"`
-	Notes           *string    `db:"notes"               json:"notes,omitempty"`
-	Color           *string    `db:"color"               json:"color,omitempty"`
-	Icon            *string    `db:"icon"                json:"icon,omitempty"`
-	InviteLinkToken *string    `db:"invite_link_token"   json:"inviteLinkToken,omitempty"`
-	CreatedAt       time.Time  `db:"created_at"          json:"createdAt"`
-	UpdatedAt       time.Time  `db:"updated_at"          json:"updatedAt"`
-	ArchivedAt      *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
-}
-
-// TeamMember is the join row that puts a person in a Team. UserID is nil
-// for login-less Participants; DisplayName is populated for them instead.
-// Role is the team-level role: "admin" or "member". Color and Icon are
-// identity fields (migration 006); Color stores a color ID (e.g. "teal").
-// ArchivedAt is non-nil when the member is inactivated (migration 009);
-// inactivated members lose access but their data and assignments are preserved.
-type TeamMember struct {
-	ID          string     `db:"id"           json:"id"`
-	TeamID      string     `db:"team_id"      json:"teamId"`
-	UserID      *string    `db:"user_id"      json:"userId,omitempty"`
-	DisplayName *string    `db:"display_name" json:"displayName,omitempty"`
-	Role        string     `db:"role"         json:"role"`
-	Color       *string    `db:"color"        json:"color,omitempty"`
-	Icon        *string    `db:"icon"         json:"icon,omitempty"`
-	JoinedAt    time.Time  `db:"joined_at"    json:"joinedAt"`
-	ArchivedAt  *time.Time `db:"archived_at"  json:"archivedAt,omitempty"`
-}
-
-// MemberStats holds computed activity and timeline counts for a member.
-// All counts are date-relative and scoped to activities the member is assigned to.
-type MemberStats struct {
-	ActiveTimelines    int `json:"activeTimelines"`
-	ArchivedTimelines  int `json:"archivedTimelines"`
-	PastDue            int `json:"pastDue"`
-	Running            int `json:"running"`
-	Upcoming           int `json:"upcoming"`
-	Unscheduled        int `json:"unscheduled"`
-	ArchivedActivities int `json:"archivedActivities"`
-}
-
-// MemberDetail combines a TeamMemberWithUser with computed stats and the
-// member's full list of team memberships. Returned by GET /teams/:id/members/:memberId.
-// UserArchivedAt reflects users.archived_at (account-level deactivation), distinct
-// from ArchivedAt which is team_members.archived_at (membership-level inactivation).
-type MemberDetail struct {
-	TeamMemberWithUser
-	Stats          MemberStats          `json:"stats"`
-	Teams          []TeamMemberWithUser `json:"teams"`
-	Deletable      bool                 `json:"deletable"`
-	UserArchivedAt *time.Time           `json:"userArchivedAt,omitempty"`
-}
-
-// Timeline is a named date range over a team's events. It is not a data
-// container — it is a view over a team's events for a given date window.
-// Access is governed by timeline_access + team role; share_token allows
-// unauthenticated read access via a stable public URL. Color and Icon are
-// identity fields (migration 006). Description and Notes are free-text fields
-// added in migration 013.
-type Timeline struct {
-	ID          string     `db:"id"          json:"id"`
-	TeamID      string     `db:"team_id"     json:"teamId"`
-	Name        string     `db:"name"        json:"name"`
-	Description *string    `db:"description" json:"description,omitempty"`
-	Notes       *string    `db:"notes"       json:"notes,omitempty"`
-	StartDate   string     `db:"start_date"  json:"startDate"`
-	EndDate     string     `db:"end_date"    json:"endDate"`
-	Color       *string    `db:"color"       json:"color,omitempty"`
-	Icon        *string    `db:"icon"        json:"icon,omitempty"`
-	ShareToken  string     `db:"share_token" json:"shareToken"`
-	IcalToken   string     `db:"ical_token"  json:"icalToken"`
-	CreatedBy   string     `db:"created_by"  json:"createdBy"`
-	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
-	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
-	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
-	// ShareCount is a derived count of the timeline's active (non-revoked,
-	// non-expired) share links — view shares and ICS feeds alike. Populated by
-	// the repo read queries; it backs the timeline tile's share chip (13.5).
-	ShareCount int `db:"share_count" json:"shareCount"`
-}
-
-// SavedFilter is a user-owned, team-scoped named filter spec. Definition is
-// an opaque JSON string interpreted by the client; the server treats it as
-// arbitrary text and only validates that it parses as JSON.
-type SavedFilter struct {
-	ID           string    `db:"id"             json:"id"`
-	TeamID       string    `db:"team_id"        json:"teamId"`
-	UserID       string    `db:"user_id"        json:"userId"`
-	Name         string    `db:"name"           json:"name"`
-	Definition   string    `db:"definition"     json:"definition"`
-	IsTeamFilter bool      `db:"is_team_filter" json:"isTeamFilter"`
-	CreatedAt    time.Time `db:"created_at"     json:"createdAt"`
-	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
-}
-
-// UserPreference stores a single key/value setting for a user, optionally
-// scoped to a timeline. TimelineID is “” for global preferences so the
-// UNIQUE(user_id, timeline_id, key) DB constraint works without NULL handling.
-// Serialised JSON omits TimelineID when empty so callers see null for global prefs.
-type UserPreference struct {
-	ID         string    `db:"id"          json:"id"`
-	UserID     string    `db:"user_id"     json:"userId"`
-	TimelineID string    `db:"timeline_id" json:"timelineId,omitempty"`
-	Key        string    `db:"key"         json:"key"`
-	Value      string    `db:"value"       json:"value"`
-	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
-}
-
-// APIToken is a long-lived Bearer credential a user issues for programmatic
-// access. token_hash stores SHA-256(rawToken); the raw value is shown to the
-// caller only once on creation. RevokedAt is non-nil when the token has been
-// revoked; revoked tokens are not deleted so listing remains stable.
-type APIToken struct {
-	ID         string     `db:"id"           json:"id"`
-	UserID     string     `db:"user_id"      json:"userId"`
-	Name       string     `db:"name"         json:"name"`
-	TokenHash  string     `db:"token_hash"   json:"-"`
-	Scope      string     `db:"scope"        json:"scope"`
-	LastUsedAt *time.Time `db:"last_used_at" json:"lastUsedAt,omitempty"`
-	CreatedAt  time.Time  `db:"created_at"   json:"createdAt"`
-	RevokedAt  *time.Time `db:"revoked_at"   json:"revokedAt,omitempty"`
-}
-
-// InstanceSetting stores a single instance-level configuration value.
-// SMTP config and defaults live here. The value column is plain text;
-// the mailer package handles decryption of the SMTP password field.
-type InstanceSetting struct {
-	Key       string    `db:"key"        json:"key"`
-	Value     string    `db:"value"      json:"value"`
-	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
-}
-
-// PasswordResetToken is a single-use token for the forgot-password flow.
-// TokenHash stores SHA-256 of the raw token; the raw value is sent by email
-// and never stored. UsedAt is set when the token is consumed.
-type PasswordResetToken struct {
-	ID        string     `db:"id"         json:"id"`
-	UserID    string     `db:"user_id"    json:"userId"`
-	TokenHash string     `db:"token_hash" json:"-"`
-	ExpiresAt time.Time  `db:"expires_at" json:"expiresAt"`
-	UsedAt    *time.Time `db:"used_at"    json:"usedAt,omitempty"`
-	CreatedAt time.Time  `db:"created_at" json:"createdAt"`
-}
-
-// AdminUserRow is a flat view of a user for the admin users list. It includes
-// the user's fields plus the count of active team memberships.
-type AdminUserRow struct {
-	User
-	TeamCount int `db:"team_count" json:"teamCount"`
-}
-
-// Valid Share.Kind and Share.Scope values.
-const (
-	ShareKindView      = "view"
-	ShareKindICS       = "ics"
-	ShareScopeTimeline = "timeline"
-	ShareScopeMember   = "member"
-)
-
-// Share is a public read-only link scoped to one timeline. Kind discriminates
-// the two flavors (migration 022): "view" shares freeze one view configuration
-// and are served as a web snapshot at /s/{token}; "ics" shares are live
-// subscribable calendar feeds served at GET /shares/{token}.ics. ICS shares
-// carry Scope ("timeline" | "member") + MemberID and never a view config,
-// filter, or password — the unguessable token is their only secret.
-// PasswordHash is set only when a view share requires a password (Phase 13.2);
-// ExpiresAt and RevokedAt support lifecycle management (Phase 13.4/13.5).
-type Share struct {
-	ID           string     `db:"id"             json:"id"`
-	TimelineID   string     `db:"timeline_id"    json:"timelineId"`
-	Token        string     `db:"token"          json:"token"`
-	Kind         string     `db:"kind"           json:"kind"`
-	Scope        *string    `db:"scope"          json:"scope,omitempty"`
-	MemberID     *string    `db:"member_id"      json:"memberId,omitempty"`
-	Name         *string    `db:"name"           json:"name,omitempty"`
-	Description  *string    `db:"description"    json:"description,omitempty"`
-	ViewType     string     `db:"view_type"      json:"viewType"`
-	ViewConfig   string     `db:"view_config"    json:"viewConfig"`
-	PasswordHash *string    `db:"password_hash"  json:"-"`
-	ExpiresAt    *time.Time `db:"expires_at"     json:"expiresAt,omitempty"`
-	// CreatedBy is nil when the share was created by a superadmin who holds
-	// no team_members row in the timeline's team (migration 023).
-	CreatedBy    *string    `db:"created_by"     json:"createdBy,omitempty"`
-	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
-	LastViewedAt *time.Time `db:"last_viewed_at" json:"lastViewedAt,omitempty"`
-	ViewCount    int        `db:"view_count"     json:"viewCount"`
-	RevokedAt    *time.Time `db:"revoked_at"     json:"revokedAt,omitempty"`
-	// Protected is a derived, read-only flag (password_hash is never serialized).
-	// It is populated by the repo read methods so clients can show a lock badge
-	// without ever seeing the hash.
-	Protected bool `db:"-" json:"protected"`
-}
-
-// PublicMember is the safe projection of a team member for public share
-// responses. It exposes only display fields — never email, role, or user_id.
-type PublicMember struct {
-	ID          string  `json:"id"`
-	DisplayName string  `json:"displayName"`
-	Color       *string `json:"color,omitempty"`
-	Icon        *string `json:"icon,omitempty"`
-}
-
-// PublicActivity is the safe projection of an activity for public share
-// responses. It includes standard display fields but omits notes (unless
-// explicitly included for List shares with Notes enabled), caldav/google
-// identifiers, and any internal fields.
-type PublicActivity struct {
-	ID                string    `json:"id"`
-	Title             string    `json:"title"`
-	Description       *string   `json:"description,omitempty"`
-	Notes             *string   `json:"notes,omitempty"`
-	Icon              *string   `json:"icon,omitempty"`
-	Color             *string   `json:"color,omitempty"`
-	StartAt           time.Time `json:"startAt"`
-	EndAt             time.Time `json:"endAt"`
-	AllDay            bool      `json:"allDay"`
-	StatusID          *string   `json:"statusId,omitempty"`
-	ParentActivityID  *string   `json:"parentActivityId,omitempty"`
-	PercentComplete   *int      `json:"percentComplete,omitempty"`
-	AssignedMemberIDs []string  `json:"assignedMemberIds"`
-	TagIDs            []string  `json:"tagIds"`
-}
-
-// PublicTimeline is the safe timeline projection for share responses.
-type PublicTimeline struct {
-	ID        string  `json:"id"`
-	Name      string  `json:"name"`
-	Color     *string `json:"color,omitempty"`
-	Icon      *string `json:"icon,omitempty"`
-	StartDate string  `json:"startDate"`
-	EndDate   string  `json:"endDate"`
-}
-
-// PublicShare is the safe projection of a share row for the unauthenticated
-// gateway response. It omits operational telemetry (view_count, last_viewed_at)
-// and internal fields (created_by, revoked_at) that must not reach anonymous callers.
-type PublicShare struct {
-	ID         string     `json:"id"`
-	TimelineID string     `json:"timelineId"`
-	Token      string     `json:"token"`
-	Name       *string    `json:"name,omitempty"`
-	ViewType   string     `json:"viewType"`
-	ViewConfig string     `json:"viewConfig"`
-	CreatedAt  time.Time  `json:"createdAt"`
-	ExpiresAt  *time.Time `json:"expiresAt,omitempty"`
-}
-
-// ShareProjection is the full aggregate returned by GET /shares/{token}.
-// It contains all data the public viewer needs to render the configured view.
-type ShareProjection struct {
-	Share      PublicShare      `json:"share"`
-	Timeline   PublicTimeline   `json:"timeline"`
-	TeamName   string           `json:"teamName"`
-	Members    []PublicMember   `json:"members"`
-	Statuses   []Status         `json:"statuses"`
-	Tags       []Tag            `json:"tags"`
-	Activities []PublicActivity `json:"activities"`
-}
-
-// RevokeUserResult summarizes the outcome of POST /users/:id/revoke.
-// The three counters let the caller show a meaningful summary in the UI.
-type RevokeUserResult struct {
-	AccountDeactivated     bool `json:"accountDeactivated"`
-	MembershipsInactivated int  `json:"membershipsInactivated"`
-	MembershipsRemoved     int  `json:"membershipsRemoved"`
-}
-
-// StatusTemplate is a reusable named preset of statuses owned by a team.
-// When a timeline is created the team's chosen template's items are copied
-// into live Status rows for that timeline.
-type StatusTemplate struct {
-	ID          string    `db:"id"          json:"id"`
-	TeamID      string    `db:"team_id"     json:"teamId"`
-	Name        string    `db:"name"        json:"name"`
-	Description *string   `db:"description" json:"description,omitempty"`
-	Position    int       `db:"position"    json:"position"`
-	CreatedBy   string    `db:"created_by"  json:"createdBy"`
-	CreatedAt   time.Time `db:"created_at"  json:"createdAt"`
-	UpdatedAt   time.Time `db:"updated_at"  json:"updatedAt"`
-	// Items is populated by the repository when listing templates.
-	Items []StatusTemplateItem `db:"-" json:"items"`
-}
-
-// StatusTemplateItem is one status value within a StatusTemplate.
-type StatusTemplateItem struct {
-	ID         string  `db:"id"          json:"id"`
-	TemplateID string  `db:"template_id" json:"templateId"`
-	Name       string  `db:"name"        json:"name"`
-	Color      string  `db:"color"       json:"color"`
-	Icon       *string `db:"icon"        json:"icon,omitempty"`
-	IsClosed   bool    `db:"is_closed"   json:"isClosed"`
-	Position   int     `db:"position"    json:"position"`
-}
-
-// Status is a live status value on a specific timeline. Rows are copied from a
-// StatusTemplate's items when the timeline is created and then evolve independently.
-type Status struct {
-	ID         string    `db:"id"          json:"id"`
-	TimelineID string    `db:"timeline_id" json:"timelineId"`
-	Name       string    `db:"name"        json:"name"`
-	Color      string    `db:"color"       json:"color"`
-	Icon       *string   `db:"icon"        json:"icon,omitempty"`
-	IsClosed   bool      `db:"is_closed"   json:"isClosed"`
-	Position   int       `db:"position"    json:"position"`
-	CreatedAt  time.Time `db:"created_at"  json:"createdAt"`
-	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
-}
-
-// TimelineAccessEntry is a single timeline access grant joined with the team
-// member's display info. Returned by GET /teams/:id/timelines/:timelineId/access.
-type TimelineAccessEntry struct {
-	TimelineID   string  `db:"timeline_id"    json:"timelineId"`
-	TeamMemberID string  `db:"team_member_id" json:"teamMemberId"`
-	Role         string  `db:"role"           json:"role"`
-	DisplayName  string  `db:"display_name"   json:"displayName"`
-	Email        string  `db:"email"          json:"email"`
-	Color        *string `db:"color"          json:"color,omitempty"`
-	Icon         *string `db:"icon"           json:"icon,omitempty"`
-	UserID       *string `db:"user_id"        json:"userId,omitempty"`
-}
-
-// Tag is a team-scoped label that can be applied to activities. Tags are
-// normalized: a team_id+name pair is unique, enabling rename-all and
-// name-based filter matching across timelines.
-type Tag struct {
-	ID        string    `db:"id"         json:"id"`
-	TeamID    string    `db:"team_id"    json:"teamId"`
-	Name      string    `db:"name"       json:"name"`
-	Color     *string   `db:"color"      json:"color,omitempty"`
-	CreatedBy string    `db:"created_by" json:"createdBy"`
-	CreatedAt time.Time `db:"created_at" json:"createdAt"`
-}
-
-// Invite is a single-use token that grants an email address the right to
-// join a Team. AcceptedAt is non-nil once consumed; expired or accepted
-// invites are rejected by the registration handler.
-type Invite struct {
-	ID         string     `db:"id"          json:"id"`
-	TeamID     string     `db:"team_id"     json:"teamId"`
-	Email      string     `db:"email"       json:"email"`
-	Token      string     `db:"token"       json:"token"`
-	Role       string     `db:"role"        json:"role"`
-	InvitedBy  string     `db:"invited_by"  json:"invitedBy"`
-	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
-	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
-	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
 }
 ````
 
@@ -81000,6 +81000,14 @@ Adds i18n infrastructure and ships the first non-English locale. The "Default la
 ## File: docs/log.md
 ````markdown
 # Development Log
+
+---
+
+## 2026-07-09 — /test-phase 16.1
+- Subagents run: static-check, unit-test (Go + Vitest), schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass (8/8; ws-smoke live portion clean-skipped — no WS client on the dev box, covered by `TestHub_*` unit tests per precedent. docs/TESTING.md still has no Phase 15/16 sections, so 16.1 assertions were sourced from ROADMAP/plan §16.1 + the 2026-07-08 log entry — backfill remains 15.3/16.3 scope)
+- Smoke target: the test Docker host (reset via SSH before the run)
+- Notable: the test container is **no longer stale** — api-smoke confirmed the live binary serves all four `/admin/backup*` endpoints (status→backup→history→delete full cycle, traversal delete rejected, non-superadmin 403) *and* emits `[]` not `null` for empty import issue lists, closing the "rebuild before 15.3" open issue. security-review passed with one informational note: `POST /admin/backup` 500s return `err.Error()`, which can include an absolute temp path — superadmin-only audience, same paths status reports intentionally; accepted. Schema-check confirmed 16.1 added no migrations (directory-is-the-record design holds). web-e2e scope guard: zero "backup" references in packages/web/src — no 16.3 UI shipped early.
 
 ---
 
