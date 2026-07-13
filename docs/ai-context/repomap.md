@@ -169,6 +169,9 @@ packages/
         backup.go
         filename.go
         manager.go
+        notifier.go
+        schedule.go
+        scheduler.go
       buildinfo/
         buildinfo.go
       db/
@@ -17125,97 +17128,6 @@ func (r *UserPreferenceRepo) Upsert(p *models.UserPreference) error {
 		return fmt.Errorf("upserting user preference: %w", err)
 	}
 	return nil
-}
-````
-
-## File: packages/api/internal/events/bus.go
-````go
-// Package events provides the in-process pub/sub bus. Every write operation
-// publishes a typed Message; consumers such as the WebSocket hub and future
-// calendar-sync workers subscribe and react without the publisher knowing
-// about them.
-package events
-
-import "sync"
-
-// Type is a dot-separated string identifying the category and action of a
-// domain event (e.g. "activity.created").
-type Type string
-
-const (
-	// ActivityCreated is published after a new activity is persisted.
-	ActivityCreated Type = "activity.created"
-	// ActivityUpdated is published after an existing activity is modified.
-	ActivityUpdated Type = "activity.updated"
-	// ActivityDeleted is published after an activity is removed.
-	ActivityDeleted Type = "activity.deleted"
-
-	// TimelineCreated is published after a new timeline is persisted.
-	TimelineCreated Type = "timeline.created"
-	// TimelineUpdated is published after an existing timeline is modified
-	// (including archive / unarchive transitions).
-	TimelineUpdated Type = "timeline.updated"
-)
-
-// Message is a single domain event published on the Bus.
-type Message struct {
-	Type    Type   // identifies the action
-	TeamID  string // routes the message to team-scoped subscribers
-	Payload any    // the full model (e.g. *models.Activity) or a deletion stub
-}
-
-// Bus is a lightweight in-process pub/sub broker. Subscribers receive all
-// messages published after they subscribe. The bus never blocks the caller
-// of Publish — messages are dropped when a subscriber's buffer is full.
-type Bus struct {
-	mu   sync.RWMutex
-	subs []chan Message
-}
-
-// NewBus returns a ready-to-use Bus.
-func NewBus() *Bus {
-	return &Bus{}
-}
-
-// Subscribe returns a buffered channel that receives every Message published
-// after this call. Call Unsubscribe when the subscription is no longer needed
-// to release the channel.
-func (b *Bus) Subscribe() chan Message {
-	ch := make(chan Message, 64)
-	b.mu.Lock()
-	b.subs = append(b.subs, ch)
-	b.mu.Unlock()
-	return ch
-}
-
-// Unsubscribe removes a subscription created by Subscribe and closes the
-// channel. Calling Unsubscribe with a channel not returned by Subscribe is
-// a no-op.
-func (b *Bus) Unsubscribe(ch chan Message) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for i, s := range b.subs {
-		if s == ch {
-			b.subs = append(b.subs[:i], b.subs[i+1:]...)
-			close(ch)
-			return
-		}
-	}
-}
-
-// Publish delivers msg to every current subscriber. The send is non-blocking;
-// messages are silently dropped for any subscriber whose buffer is full so
-// that a slow consumer never stalls the caller.
-func (b *Bus) Publish(msg Message) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	for _, ch := range b.subs {
-		select {
-		case ch <- msg:
-		default:
-			// Slow subscriber — drop rather than block the publisher.
-		}
-	}
 }
 ````
 
@@ -44455,98 +44367,6 @@ func isValidPassword(p string) bool {
 }
 ````
 
-## File: packages/api/internal/api/backup_handler.go
-````go
-package api
-
-import (
-	"errors"
-	"net/http"
-
-	"github.com/I0-1O/draba/packages/api/internal/backup"
-)
-
-// handleGetBackupStatus handles GET /admin/backup/status. Reports the live
-// database file, the backup directory, the last backup, and the derived
-// health rating. Superadmin-only.
-func (s *Server) handleGetBackupStatus(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	st, err := s.backup.Status()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to read backup status")
-		return
-	}
-
-	// schedule is always null until Phase 16.2 lands the scheduler; the key
-	// is present so the response shape is stable for the web client.
-	writeJSON(w, http.StatusOK, map[string]any{
-		"database":   st.Database,
-		"backupDir":  st.BackupDir,
-		"lastBackup": st.LastBackup,
-		"health":     st.Health,
-		"running":    st.Running,
-		"schedule":   nil,
-	})
-}
-
-// handlePostBackup handles POST /admin/backup. Runs a manual backup
-// synchronously and returns the resulting history entry. Superadmin-only.
-func (s *Server) handlePostBackup(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	entry, err := s.backup.RunNow(r.Context(), backup.TriggerManual)
-	if errors.Is(err, backup.ErrBackupInProgress) {
-		writeError(w, http.StatusConflict, "BACKUP_IN_PROGRESS", "a backup is already in progress")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "BACKUP_FAILED", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusCreated, entry)
-}
-
-// handleGetBackupHistory handles GET /admin/backup/history. Lists the
-// backups in the backup directory, newest first. Superadmin-only.
-func (s *Server) handleGetBackupHistory(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	entries, err := s.backup.History()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list backups")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"backups": entries})
-}
-
-// handleDeleteBackup handles DELETE /admin/backup/{filename}. The manager
-// only deletes filenames that exactly match the backup pattern, which is
-// the path-traversal guard. Superadmin-only.
-func (s *Server) handleDeleteBackup(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	err := s.backup.Delete(r.PathValue("filename"))
-	if errors.Is(err, backup.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "backup not found")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete backup")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-````
-
 ## File: packages/api/internal/api/import_handler.go
 ````go
 package api
@@ -45893,6 +45713,367 @@ func ParseFilename(name string) (t time.Time, trigger Trigger, ok bool) {
 }
 ````
 
+## File: packages/api/internal/backup/notifier.go
+````go
+package backup
+
+import (
+	"fmt"
+	"html"
+	"log/slog"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/events"
+)
+
+// Failure is the payload of a backup.failed bus event.
+type Failure struct {
+	Trigger Trigger   `json:"trigger"`
+	Error   string    `json:"error"`
+	At      time.Time `json:"at"`
+}
+
+// MailSender is the subset of *mailer.Mailer the notifier uses. Send is
+// already a silent no-op when SMTP is unconfigured, so the notifier needs
+// no configuration awareness of its own.
+type MailSender interface {
+	Send(to, subject, htmlBody string) error
+}
+
+// SuperadminEmailLister supplies the failure-notification recipients.
+// The concrete implementation is *db.UserRepo.
+type SuperadminEmailLister interface {
+	ListSuperadminEmails() ([]string, error)
+}
+
+// Notifier consumes backup.failed events and emails every superadmin.
+// It is an event consumer, not scheduler code — the same shape as every
+// other side effect in the app.
+type Notifier struct {
+	ch     chan events.Message
+	mail   MailSender
+	admins SuperadminEmailLister
+}
+
+// NewNotifier subscribes to bus immediately (so no event published after
+// construction is missed) and returns a Notifier ready to Run.
+func NewNotifier(bus *events.Bus, mail MailSender, admins SuperadminEmailLister) *Notifier {
+	return &Notifier{ch: bus.Subscribe(), mail: mail, admins: admins}
+}
+
+// Run processes events until the bus subscription channel is closed; call
+// it in its own goroutine.
+func (n *Notifier) Run() {
+	for msg := range n.ch {
+		if msg.Type != events.BackupFailed {
+			continue
+		}
+		failure, ok := msg.Payload.(*Failure)
+		if !ok {
+			continue
+		}
+		emails, err := n.admins.ListSuperadminEmails()
+		if err != nil {
+			slog.Warn("backup: failure notification skipped; could not list superadmins", "err", err)
+			continue
+		}
+		subject := "draba backup failed"
+		body := failureEmailBody(failure)
+		for _, to := range emails {
+			if err := n.mail.Send(to, subject, body); err != nil {
+				slog.Warn("backup: failure notification email not sent", "to", to, "err", err)
+			}
+		}
+	}
+}
+
+// failureEmailBody renders the notification email. The error string is
+// HTML-escaped: it can contain arbitrary filesystem paths and driver text.
+func failureEmailBody(f *Failure) string {
+	return fmt.Sprintf(`<html><body>
+<p>A <strong>%s</strong> backup of your draba instance failed at %s.</p>
+<p><code>%s</code></p>
+<p>Check the server logs and the Settings &rsaquo; Backup page. Common causes
+are an unwritable backup directory or a full disk.</p>
+</body></html>`,
+		f.Trigger, f.At.UTC().Format(time.RFC3339), html.EscapeString(f.Error))
+}
+````
+
+## File: packages/api/internal/backup/schedule.go
+````go
+package backup
+
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+)
+
+// Preset names one of the supported schedule cadences. Presets, not cron
+// expressions: they cover the real use cases, need no parser dependency,
+// and render as dropdowns instead of a syntax textbox.
+type Preset string
+
+// The supported schedule presets.
+const (
+	PresetOff      Preset = "off"
+	PresetHourly   Preset = "hourly"
+	PresetEvery6h  Preset = "every6h"
+	PresetEvery12h Preset = "every12h"
+	PresetDaily    Preset = "daily"
+	PresetWeekly   Preset = "weekly"
+)
+
+// ScheduleKey is the instance_settings key holding the JSON-encoded
+// schedule. One key, no new table — the 010 key/value store is enough.
+const ScheduleKey = "backup.schedule"
+
+// Schedule is the backup schedule configuration. Time and Day only apply
+// to the presets that need them (daily/weekly and weekly respectively);
+// Normalize clears them otherwise. All times are UTC — the scheduler has
+// no timezone knob in v1, which keeps next-run computation DST-free.
+type Schedule struct {
+	Preset   Preset `json:"preset"`
+	Time     string `json:"time,omitempty"` // "HH:MM", daily and weekly only
+	Day      string `json:"day,omitempty"`  // "mon".."sun", weekly only
+	KeepLast int    `json:"keepLast"`
+}
+
+// DefaultSchedule is the configuration applied when an instance has never
+// stored one: daily at 02:00 UTC, keep the last 14. Default-on — safe by
+// default beats opt-in for a data-safety feature.
+func DefaultSchedule() Schedule {
+	return Schedule{Preset: PresetDaily, Time: "02:00", KeepLast: 14}
+}
+
+// weekdays maps the wire format for Schedule.Day to time.Weekday.
+var weekdays = map[string]time.Weekday{
+	"mon": time.Monday, "tue": time.Tuesday, "wed": time.Wednesday,
+	"thu": time.Thursday, "fri": time.Friday, "sat": time.Saturday,
+	"sun": time.Sunday,
+}
+
+// Validate checks the schedule for internal consistency and returns a
+// human-readable error suitable for a 400 response body.
+func (s Schedule) Validate() error {
+	switch s.Preset {
+	case PresetOff, PresetHourly, PresetEvery6h, PresetEvery12h:
+	case PresetDaily, PresetWeekly:
+		if _, _, err := parseHHMM(s.Time); err != nil {
+			return fmt.Errorf("time must be HH:MM for the %s preset: %w", s.Preset, err)
+		}
+		if s.Preset == PresetWeekly {
+			if _, ok := weekdays[s.Day]; !ok {
+				return fmt.Errorf("day must be one of mon..sun for the weekly preset")
+			}
+		}
+	default:
+		return fmt.Errorf("preset must be one of off, hourly, every6h, every12h, daily, weekly")
+	}
+	if s.KeepLast < 1 || s.KeepLast > 365 {
+		return fmt.Errorf("keepLast must be between 1 and 365")
+	}
+	return nil
+}
+
+// Normalize clears the fields the preset does not use, so a stored config
+// never carries stale leftovers from a previous preset choice.
+func (s Schedule) Normalize() Schedule {
+	if s.Preset != PresetDaily && s.Preset != PresetWeekly {
+		s.Time = ""
+	}
+	if s.Preset != PresetWeekly {
+		s.Day = ""
+	}
+	return s
+}
+
+// NextRun returns the first run time strictly after now, in UTC. The zero
+// time means the schedule never runs (preset off or invalid). Interval
+// presets are anchored to UTC midnight, so hourly runs at the top of each
+// hour and every6h at 00/06/12/18 — deterministic and table-testable.
+func (s Schedule) NextRun(now time.Time) time.Time {
+	now = now.UTC()
+	switch s.Preset {
+	case PresetHourly:
+		return now.Truncate(time.Hour).Add(time.Hour)
+	case PresetEvery6h:
+		return now.Truncate(6 * time.Hour).Add(6 * time.Hour)
+	case PresetEvery12h:
+		return now.Truncate(12 * time.Hour).Add(12 * time.Hour)
+	case PresetDaily, PresetWeekly:
+		hour, minute, err := parseHHMM(s.Time)
+		if err != nil {
+			return time.Time{}
+		}
+		candidate := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, time.UTC)
+		if !candidate.After(now) {
+			candidate = candidate.AddDate(0, 0, 1)
+		}
+		if s.Preset == PresetWeekly {
+			target, ok := weekdays[s.Day]
+			if !ok {
+				return time.Time{}
+			}
+			for candidate.Weekday() != target {
+				candidate = candidate.AddDate(0, 0, 1)
+			}
+		}
+		return candidate
+	default:
+		return time.Time{}
+	}
+}
+
+// parseHHMM parses a 24-hour "HH:MM" string.
+func parseHHMM(s string) (hour, minute int, err error) {
+	if len(s) != 5 || s[2] != ':' {
+		return 0, 0, fmt.Errorf("%q is not in HH:MM format", s)
+	}
+	if _, err := fmt.Sscanf(s, "%02d:%02d", &hour, &minute); err != nil {
+		return 0, 0, fmt.Errorf("%q is not in HH:MM format", s)
+	}
+	if hour < 0 || hour > 23 || minute < 0 || minute > 59 {
+		return 0, 0, fmt.Errorf("%q is out of range", s)
+	}
+	return hour, minute, nil
+}
+
+// SettingsStore is the subset of the instance-settings repository the
+// backup package needs to persist its schedule.
+type SettingsStore interface {
+	Get(key string) (string, error)
+	Set(key, value string) error
+}
+
+// LoadSchedule reads the stored schedule, applying the default-on
+// configuration when none has ever been saved. A stored value that fails
+// to parse is an error — the caller decides whether to fall back.
+func LoadSchedule(store SettingsStore) (Schedule, error) {
+	raw, err := store.Get(ScheduleKey)
+	if err != nil {
+		return Schedule{}, fmt.Errorf("loading backup schedule: %w", err)
+	}
+	if raw == "" {
+		return DefaultSchedule(), nil
+	}
+	var s Schedule
+	if err := json.Unmarshal([]byte(raw), &s); err != nil {
+		return Schedule{}, fmt.Errorf("parsing backup schedule: %w", err)
+	}
+	return s, nil
+}
+
+// SaveSchedule normalizes and persists s. Callers must Validate first.
+func SaveSchedule(store SettingsStore, s Schedule) error {
+	b, err := json.Marshal(s.Normalize())
+	if err != nil {
+		return fmt.Errorf("serialising backup schedule: %w", err)
+	}
+	if err := store.Set(ScheduleKey, string(b)); err != nil {
+		return fmt.Errorf("saving backup schedule: %w", err)
+	}
+	return nil
+}
+````
+
+## File: packages/api/internal/backup/scheduler.go
+````go
+package backup
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"time"
+)
+
+// Scheduler runs backups unattended: it loads the schedule, sleeps until
+// the next run, backs up, and repeats. It is a purpose-built goroutine,
+// deliberately not a job framework — the first background scheduler in the
+// codebase should stay exactly as small as its one consumer needs.
+//
+// Missed windows (container down at 2am) are not made up on boot: the next
+// window just runs, and the status health indicator reports the gap
+// honestly.
+type Scheduler struct {
+	manager *Manager
+	store   SettingsStore
+	// reload wakes the run loop to re-read the schedule after a config
+	// change. Buffered so Reload never blocks a request handler.
+	reload chan struct{}
+	// now and after are the clock, injectable in tests.
+	now   func() time.Time
+	after func(d time.Duration) <-chan time.Time
+}
+
+// NewScheduler returns a Scheduler driving m from the schedule stored in
+// store. Call Run in a goroutine to start it.
+func NewScheduler(m *Manager, store SettingsStore) *Scheduler {
+	return &Scheduler{
+		manager: m,
+		store:   store,
+		reload:  make(chan struct{}, 1),
+		now:     time.Now,
+		after:   time.After,
+	}
+}
+
+// Reload wakes the run loop to pick up a changed schedule. Non-blocking;
+// coalesces with an already-pending reload.
+func (s *Scheduler) Reload() {
+	select {
+	case s.reload <- struct{}{}:
+	default:
+	}
+}
+
+// Run executes the schedule until ctx is cancelled. Each iteration re-reads
+// the stored config, so a Reload after a PUT is all it takes to apply a
+// change — including the retention count, which is pushed to the manager
+// here so scheduled and manual runs sweep with the same keep-last-N.
+func (s *Scheduler) Run(ctx context.Context) {
+	for {
+		sched, err := LoadSchedule(s.store)
+		if err != nil {
+			// A corrupt stored value must not silently disable backups —
+			// fall back to the default-on schedule and say so.
+			slog.Warn("backup: stored schedule unreadable; using default", "err", err)
+			sched = DefaultSchedule()
+		}
+		s.manager.SetKeepLast(sched.KeepLast)
+
+		if sched.Preset == PresetOff {
+			select {
+			case <-ctx.Done():
+				return
+			case <-s.reload:
+				continue
+			}
+		}
+
+		next := sched.NextRun(s.now())
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.reload:
+			continue
+		case <-s.after(next.Sub(s.now())):
+			if _, err := s.manager.RunNow(ctx, TriggerScheduled); err != nil {
+				if errors.Is(err, ErrBackupInProgress) {
+					// A manual backup is mid-flight; this window is simply
+					// skipped rather than queued behind it.
+					slog.Info("backup: scheduled run skipped; another backup is in progress")
+				} else {
+					slog.Error("backup: scheduled run failed", "err", err)
+				}
+			}
+		}
+	}
+}
+````
+
 ## File: packages/api/internal/db/migrations/024_oidc_identity.sql
 ````sql
 -- Migration 024: OIDC / SSO identity support.
@@ -47152,369 +47333,102 @@ func (r *TimelineRepo) Delete(id string) error {
 }
 ````
 
-## File: packages/api/internal/db/user_repo.go
+## File: packages/api/internal/events/bus.go
 ````go
-package db
+// Package events provides the in-process pub/sub bus. Every write operation
+// publishes a typed Message; consumers such as the WebSocket hub and future
+// calendar-sync workers subscribe and react without the publisher knowing
+// about them.
+package events
 
-import (
-	"fmt"
-	"time"
+import "sync"
 
-	"github.com/jmoiron/sqlx"
+// Type is a dot-separated string identifying the category and action of a
+// domain event (e.g. "activity.created").
+type Type string
 
-	"github.com/I0-1O/draba/packages/api/internal/models"
+const (
+	// ActivityCreated is published after a new activity is persisted.
+	ActivityCreated Type = "activity.created"
+	// ActivityUpdated is published after an existing activity is modified.
+	ActivityUpdated Type = "activity.updated"
+	// ActivityDeleted is published after an activity is removed.
+	ActivityDeleted Type = "activity.deleted"
+
+	// TimelineCreated is published after a new timeline is persisted.
+	TimelineCreated Type = "timeline.created"
+	// TimelineUpdated is published after an existing timeline is modified
+	// (including archive / unarchive transitions).
+	TimelineUpdated Type = "timeline.updated"
+
+	// BackupCompleted is published after a backup file has been verified and
+	// finalized. Instance-scoped: TeamID is empty, so the WebSocket hub never
+	// routes it to team subscribers.
+	BackupCompleted Type = "backup.completed"
+	// BackupFailed is published when a backup attempt fails at any step.
+	// Instance-scoped, like BackupCompleted.
+	BackupFailed Type = "backup.failed"
 )
 
-// UserRepo is the persistence layer for User records.
-type UserRepo struct {
-	db *sqlx.DB
+// Message is a single domain event published on the Bus.
+type Message struct {
+	Type    Type   // identifies the action
+	TeamID  string // routes the message to team-scoped subscribers
+	Payload any    // the full model (e.g. *models.Activity) or a deletion stub
 }
 
-// NewUserRepo returns a UserRepo backed by db.
-func NewUserRepo(db *sqlx.DB) *UserRepo {
-	return &UserRepo{db: db}
+// Bus is a lightweight in-process pub/sub broker. Subscribers receive all
+// messages published after they subscribe. The bus never blocks the caller
+// of Publish — messages are dropped when a subscriber's buffer is full.
+type Bus struct {
+	mu   sync.RWMutex
+	subs []chan Message
 }
 
-// Create inserts u. Returns an error if the email already exists
-// (the users.email UNIQUE constraint surfaces as a wrapped driver error).
-func (r *UserRepo) Create(u *models.User) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO users (id, email, password_hash, display_name, avatar_url, is_superadmin, created_at, updated_at)
-		VALUES (:id, :email, :password_hash, :display_name, :avatar_url, :is_superadmin, :created_at, :updated_at)
-	`, u)
-	if err != nil {
-		return fmt.Errorf("creating user: %w", err)
-	}
-	return nil
+// NewBus returns a ready-to-use Bus.
+func NewBus() *Bus {
+	return &Bus{}
 }
 
-// GetByEmail looks up a user by exact email match. Callers are expected to
-// normalize (lowercase, trim) before calling. Returns sql.ErrNoRows wrapped
-// when no row matches.
-func (r *UserRepo) GetByEmail(email string) (*models.User, error) {
-	var u models.User
-	err := r.db.Get(&u, `SELECT * FROM users WHERE email = ?`, email)
-	if err != nil {
-		return nil, fmt.Errorf("getting user by email: %w", err)
-	}
-	return &u, nil
+// Subscribe returns a buffered channel that receives every Message published
+// after this call. Call Unsubscribe when the subscription is no longer needed
+// to release the channel.
+func (b *Bus) Subscribe() chan Message {
+	ch := make(chan Message, 64)
+	b.mu.Lock()
+	b.subs = append(b.subs, ch)
+	b.mu.Unlock()
+	return ch
 }
 
-// GetByOIDCSubject looks up a user by their external identity — the
-// (issuer, subject) pair from the IdP. This is the stable key for an SSO
-// account: email or display name may change at the IdP, but the subject does
-// not. Returns sql.ErrNoRows (wrapped) when no row matches.
-func (r *UserRepo) GetByOIDCSubject(issuer, subject string) (*models.User, error) {
-	var u models.User
-	err := r.db.Get(&u,
-		`SELECT * FROM users WHERE oidc_issuer = ? AND oidc_subject = ?`,
-		issuer, subject,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("getting user by oidc subject: %w", err)
-	}
-	return &u, nil
-}
-
-// CreateOIDC inserts a new SSO user. The account has no password; identity is
-// the (issuer, subject) pair. The row-level CHECK added in migration 024
-// rejects an oidc account missing either field, so a malformed insert fails at
-// the database rather than producing a half-formed account.
-func (r *UserRepo) CreateOIDC(u *models.User) error {
-	u.AuthProvider = "oidc"
-	u.PasswordHash = nil
-	_, err := r.db.NamedExec(`
-		INSERT INTO users (id, email, display_name, avatar_url, is_superadmin,
-		                   auth_provider, oidc_issuer, oidc_subject, created_at, updated_at)
-		VALUES (:id, :email, :display_name, :avatar_url, :is_superadmin,
-		        :auth_provider, :oidc_issuer, :oidc_subject, :created_at, :updated_at)
-	`, u)
-	if err != nil {
-		return fmt.Errorf("creating oidc user: %w", err)
-	}
-	return nil
-}
-
-// UpdateOIDCProfile refreshes the email and display name of an existing SSO
-// user from their latest IdP claims, so a name/email change upstream is
-// reflected on next login. The (issuer, subject) identity is never changed.
-func (r *UserRepo) UpdateOIDCProfile(id, email, displayName string) error {
-	_, err := r.db.Exec(
-		`UPDATE users SET email = ?, display_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		email, displayName, id,
-	)
-	if err != nil {
-		return fmt.Errorf("updating oidc profile: %w", err)
-	}
-	return nil
-}
-
-// GetByID looks up a user by primary key.
-func (r *UserRepo) GetByID(id string) (*models.User, error) {
-	var u models.User
-	err := r.db.Get(&u, `SELECT * FROM users WHERE id = ?`, id)
-	if err != nil {
-		return nil, fmt.Errorf("getting user by id: %w", err)
-	}
-	return &u, nil
-}
-
-// UpdatePasswordByEmail replaces the password hash for the user with the
-// given email. Returns sql.ErrNoRows (wrapped) when no matching user exists.
-func (r *UserRepo) UpdatePasswordByEmail(email, passwordHash string) error {
-	res, err := r.db.Exec(
-		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE email = ?`,
-		passwordHash, email,
-	)
-	if err != nil {
-		return fmt.Errorf("updating password: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("updating password: %w", err)
-	}
-	if n == 0 {
-		return fmt.Errorf("updating password: no user with email %q", email)
-	}
-	return nil
-}
-
-// Count returns the total number of users. Used by the registration flow
-// to detect first-user bootstrap and to enforce tier user limits.
-func (r *UserRepo) Count() (int, error) {
-	var count int
-	err := r.db.Get(&count, `SELECT COUNT(*) FROM users`)
-	if err != nil {
-		return 0, fmt.Errorf("counting users: %w", err)
-	}
-	return count, nil
-}
-
-// SearchByNameOrEmail returns up to 20 users whose display_name or email
-// contains the query (case-insensitive). Archived users are excluded.
-func (r *UserRepo) SearchByNameOrEmail(q string) ([]*models.User, error) {
-	var users []*models.User
-	like := "%" + q + "%"
-	err := r.db.Select(&users, `
-		SELECT * FROM users
-		WHERE archived_at IS NULL
-		  AND (display_name LIKE ? OR email LIKE ?)
-		ORDER BY display_name ASC
-		LIMIT 20
-	`, like, like)
-	if err != nil {
-		return nil, fmt.Errorf("searching users: %w", err)
-	}
-	return users, nil
-}
-
-// SetSuperadmin sets or clears the is_superadmin flag on a user.
-func (r *UserRepo) SetSuperadmin(id string, isSuperadmin bool) error {
-	_, err := r.db.Exec(
-		`UPDATE users SET is_superadmin = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		isSuperadmin, id,
-	)
-	if err != nil {
-		return fmt.Errorf("setting superadmin: %w", err)
-	}
-	return nil
-}
-
-// SetArchived sets or clears archived_at on a user. Archived users cannot log in.
-func (r *UserRepo) SetArchived(id string, at *time.Time) error {
-	_, err := r.db.Exec(
-		`UPDATE users SET archived_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		at, id,
-	)
-	if err != nil {
-		return fmt.Errorf("setting user archived: %w", err)
-	}
-	return nil
-}
-
-// Delete hard-deletes a user row. The caller must verify the user is deletable
-// (no active activities, single team membership) before calling this.
-func (r *UserRepo) Delete(id string) error {
-	_, err := r.db.Exec(`DELETE FROM users WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting user: %w", err)
-	}
-	return nil
-}
-
-// UpdateProfile sets display_name, color, and icon on a user. When color or
-// icon changes, the new value is propagated to all team_members rows for the
-// user where the member's value currently matches the user's old value or is NULL
-// (i.e. has not been explicitly overridden by a team admin).
-func (r *UserRepo) UpdateProfile(id, displayName string, color, icon *string) error {
-	// Fetch old values for propagation comparison.
-	var old models.User
-	if err := r.db.Get(&old, `SELECT * FROM users WHERE id = ?`, id); err != nil {
-		return fmt.Errorf("fetching user for profile update: %w", err)
-	}
-
-	tx, err := r.db.Beginx()
-	if err != nil {
-		return fmt.Errorf("beginning profile update transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	_, err = tx.Exec(
-		`UPDATE users SET display_name = ?, color = ?, icon = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		displayName, color, icon, id,
-	)
-	if err != nil {
-		return fmt.Errorf("updating user profile: %w", err)
-	}
-
-	// Propagate color if changed: update team_members rows where color matches
-	// the old value or is NULL (not explicitly overridden).
-	if !ptrEqual(old.Color, color) {
-		_, err = tx.Exec(
-			`UPDATE team_members SET color = ? WHERE user_id = ? AND (color IS NULL OR color = ?)`,
-			color, id, old.Color,
-		)
-		if err != nil {
-			return fmt.Errorf("propagating color to team_members: %w", err)
+// Unsubscribe removes a subscription created by Subscribe and closes the
+// channel. Calling Unsubscribe with a channel not returned by Subscribe is
+// a no-op.
+func (b *Bus) Unsubscribe(ch chan Message) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for i, s := range b.subs {
+		if s == ch {
+			b.subs = append(b.subs[:i], b.subs[i+1:]...)
+			close(ch)
+			return
 		}
 	}
+}
 
-	if !ptrEqual(old.Icon, icon) {
-		_, err = tx.Exec(
-			`UPDATE team_members SET icon = ? WHERE user_id = ? AND (icon IS NULL OR icon = ?)`,
-			icon, id, old.Icon,
-		)
-		if err != nil {
-			return fmt.Errorf("propagating icon to team_members: %w", err)
+// Publish delivers msg to every current subscriber. The send is non-blocking;
+// messages are silently dropped for any subscriber whose buffer is full so
+// that a slow consumer never stalls the caller.
+func (b *Bus) Publish(msg Message) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	for _, ch := range b.subs {
+		select {
+		case ch <- msg:
+		default:
+			// Slow subscriber — drop rather than block the publisher.
 		}
 	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("committing profile update: %w", err)
-	}
-	return nil
-}
-
-// UpdatePassword sets the password_hash on a user.
-func (r *UserRepo) UpdatePassword(id, passwordHash string) error {
-	_, err := r.db.Exec(
-		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		passwordHash, id,
-	)
-	if err != nil {
-		return fmt.Errorf("updating password: %w", err)
-	}
-	return nil
-}
-
-// ListAll returns all users with their active team membership count.
-// When orphanedOnly is true, only users with zero active memberships are returned.
-func (r *UserRepo) ListAll(orphanedOnly bool) ([]*models.AdminUserRow, error) {
-	q := `
-		SELECT u.*,
-		       (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) AS team_count
-		FROM users u
-		ORDER BY u.display_name ASC
-	`
-	if orphanedOnly {
-		q = `
-			SELECT u.*,
-			       0 AS team_count
-			FROM users u
-			WHERE (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) = 0
-			ORDER BY u.display_name ASC
-		`
-	}
-	var rows []*models.AdminUserRow
-	if err := r.db.Select(&rows, q); err != nil {
-		return nil, fmt.Errorf("listing admin users: %w", err)
-	}
-	return rows, nil
-}
-
-// RevokeUser atomically revokes all access for a user:
-//  1. Sets users.archived_at (blocks login everywhere).
-//  2. For each team_members row for the user:
-//     – if assignment count is 0: deletes timeline_access then the row.
-//     – otherwise: sets team_members.archived_at (inactivates without data loss).
-//
-// Returns a summary of the actions taken. The caller must ensure the user
-// exists and is not a participant before calling.
-func (r *UserRepo) RevokeUser(userID string) (*models.RevokeUserResult, error) {
-	tx, err := r.db.Beginx()
-	if err != nil {
-		return nil, fmt.Errorf("beginning revoke transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	now := time.Now()
-
-	// Step 1: deactivate the account.
-	if _, err := tx.Exec(
-		`UPDATE users SET archived_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		now, userID,
-	); err != nil {
-		return nil, fmt.Errorf("deactivating user account: %w", err)
-	}
-
-	// Step 2: collect all team_members rows for the user.
-	var memberIDs []string
-	if err := tx.Select(&memberIDs,
-		`SELECT id FROM team_members WHERE user_id = ?`, userID,
-	); err != nil {
-		return nil, fmt.Errorf("listing memberships: %w", err)
-	}
-
-	result := &models.RevokeUserResult{AccountDeactivated: true}
-
-	for _, memberID := range memberIDs {
-		var assignCount int
-		if err := tx.Get(&assignCount,
-			`SELECT COUNT(*) FROM activity_assignments WHERE team_member_id = ?`, memberID,
-		); err != nil {
-			return nil, fmt.Errorf("counting assignments for member %s: %w", memberID, err)
-		}
-
-		if assignCount == 0 {
-			// No history — delete timeline_access then the member row.
-			if _, err := tx.Exec(
-				`DELETE FROM timeline_access WHERE team_member_id = ?`, memberID,
-			); err != nil {
-				return nil, fmt.Errorf("deleting timeline access for member %s: %w", memberID, err)
-			}
-			if _, err := tx.Exec(
-				`DELETE FROM team_members WHERE id = ?`, memberID,
-			); err != nil {
-				return nil, fmt.Errorf("deleting member %s: %w", memberID, err)
-			}
-			result.MembershipsRemoved++
-		} else {
-			// Has activity history — inactivate without deleting.
-			if _, err := tx.Exec(
-				`UPDATE team_members SET archived_at = ? WHERE id = ?`, now, memberID,
-			); err != nil {
-				return nil, fmt.Errorf("inactivating member %s: %w", memberID, err)
-			}
-			result.MembershipsInactivated++
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("committing revoke transaction: %w", err)
-	}
-	return result, nil
-}
-
-// ptrEqual reports whether two string pointers point to equal values,
-// treating nil and a pointer to "" as distinct.
-func ptrEqual(a, b *string) bool {
-	if a == nil && b == nil {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	return *a == *b
 }
 ````
 
@@ -56577,6 +56491,175 @@ Messy-file corpus e2e (European CSV, Excel dates, mixed formats, dupes, unknown 
 - `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean; `pnpm --filter web test` passes
 ````
 
+## File: packages/api/internal/api/backup_handler.go
+````go
+package api
+
+import (
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/backup"
+)
+
+// handleGetBackupStatus handles GET /admin/backup/status. Reports the live
+// database file, the backup directory, the last backup, and the derived
+// health rating. Superadmin-only.
+func (s *Server) handleGetBackupStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	st, err := s.backup.Status()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to read backup status")
+		return
+	}
+
+	// schedule is a summary of the active configuration; null means
+	// scheduling is off (or the stored value is unreadable — the scheduler
+	// logs that case and falls back to the default on its own).
+	var schedule any
+	if sched, err := backup.LoadSchedule(s.instanceSets); err == nil && sched.Preset != backup.PresetOff {
+		schedule = sched
+	} else if err != nil {
+		slog.Warn("backup: status omitting unreadable schedule", "err", err)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"database":   st.Database,
+		"backupDir":  st.BackupDir,
+		"lastBackup": st.LastBackup,
+		"health":     st.Health,
+		"running":    st.Running,
+		"schedule":   schedule,
+	})
+}
+
+// handlePostBackup handles POST /admin/backup. Runs a manual backup
+// synchronously and returns the resulting history entry. Superadmin-only.
+func (s *Server) handlePostBackup(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	entry, err := s.backup.RunNow(r.Context(), backup.TriggerManual)
+	if errors.Is(err, backup.ErrBackupInProgress) {
+		writeError(w, http.StatusConflict, "BACKUP_IN_PROGRESS", "a backup is already in progress")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "BACKUP_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, entry)
+}
+
+// handleGetBackupHistory handles GET /admin/backup/history. Lists the
+// backups in the backup directory, newest first. Superadmin-only.
+func (s *Server) handleGetBackupHistory(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	entries, err := s.backup.History()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list backups")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"backups": entries})
+}
+
+// handleGetBackupSchedule handles GET /admin/backup/schedule. Returns the
+// stored configuration (the default-on schedule when none was ever saved)
+// with the computed next run time. Superadmin-only.
+func (s *Server) handleGetBackupSchedule(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	sched, err := backup.LoadSchedule(s.instanceSets)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load backup schedule")
+		return
+	}
+	writeJSON(w, http.StatusOK, scheduleResponse(sched))
+}
+
+// handlePutBackupSchedule handles PUT /admin/backup/schedule. Validates and
+// persists the configuration, pushes the retention count to the manager,
+// and wakes the scheduler so the new schedule takes effect immediately.
+// Superadmin-only.
+func (s *Server) handlePutBackupSchedule(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	var sched backup.Schedule
+	if err := json.NewDecoder(r.Body).Decode(&sched); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if err := sched.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+		return
+	}
+	sched = sched.Normalize()
+
+	if err := backup.SaveSchedule(s.instanceSets, sched); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save backup schedule")
+		return
+	}
+	// Apply retention directly too: the scheduler also does this on reload,
+	// but manual backups must sweep with the new count even if the schedule
+	// is off.
+	s.backup.SetKeepLast(sched.KeepLast)
+	if s.backupSched != nil {
+		s.backupSched.Reload()
+	}
+	writeJSON(w, http.StatusOK, scheduleResponse(sched))
+}
+
+// scheduleResponse renders a schedule as the wire shape shared by the GET
+// and PUT schedule endpoints: the config fields plus the computed
+// nextRunAt (null when the preset is off).
+func scheduleResponse(sched backup.Schedule) map[string]any {
+	var nextRunAt any
+	if next := sched.NextRun(time.Now()); !next.IsZero() {
+		nextRunAt = next
+	}
+	return map[string]any{
+		"preset":    sched.Preset,
+		"time":      sched.Time,
+		"day":       sched.Day,
+		"keepLast":  sched.KeepLast,
+		"nextRunAt": nextRunAt,
+	}
+}
+
+// handleDeleteBackup handles DELETE /admin/backup/{filename}. The manager
+// only deletes filenames that exactly match the backup pattern, which is
+// the path-traversal guard. Superadmin-only.
+func (s *Server) handleDeleteBackup(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	err := s.backup.Delete(r.PathValue("filename"))
+	if errors.Is(err, backup.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "backup not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete backup")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+````
+
 ## File: packages/api/internal/api/share_handler.go
 ````go
 package api
@@ -57347,6 +57430,328 @@ type unlockShareBody struct {
 }
 ````
 
+## File: packages/api/internal/api/share_ics_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/ics"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// ── In-memory ICS feed cache ──────────────────────────────────────────────────
+//
+// Mirrors shareCache, but stores the rendered text/calendar payload. Calendar
+// clients poll on their own cadence (minutes to hours), so the same short TTL
+// keeps feeds near-live while absorbing aggressive pollers.
+
+type icsCacheEntry struct {
+	builtAt time.Time
+	payload string
+}
+
+type icsFeedCache struct {
+	mu      sync.RWMutex
+	entries map[string]*icsCacheEntry
+	ttl     time.Duration
+}
+
+func newICSFeedCache(ttl time.Duration) *icsFeedCache {
+	return &icsFeedCache{entries: make(map[string]*icsCacheEntry), ttl: ttl}
+}
+
+func (c *icsFeedCache) get(token string) (string, bool) {
+	c.mu.RLock()
+	e, ok := c.entries[token]
+	c.mu.RUnlock()
+	if !ok || time.Since(e.builtAt) > c.ttl {
+		return "", false
+	}
+	return e.payload, true
+}
+
+func (c *icsFeedCache) set(token, payload string) {
+	c.mu.Lock()
+	c.entries[token] = &icsCacheEntry{builtAt: time.Now(), payload: payload}
+	c.mu.Unlock()
+}
+
+func (c *icsFeedCache) invalidate(token string) {
+	c.mu.Lock()
+	delete(c.entries, token)
+	c.mu.Unlock()
+}
+
+// ── Handlers ──────────────────────────────────────────────────────────────────
+
+// serveICSFeed handles GET /shares/{token}.ics — the public, unauthenticated
+// calendar feed. It is dispatched from handleGetShareProjection when the token
+// path value carries the .ics suffix (Go 1.22 mux wildcards span the whole
+// segment, so the suffix arrives inside {token}).
+//
+// The feed serves live data scoped server-side to the share's timeline — or,
+// for member feeds, to one member's assigned activities. There is no password
+// gate: calendar clients cannot unlock interactively, so the unguessable token
+// is the secret and revocation is rotate-or-delete.
+func (s *Server) serveICSFeed(w http.ResponseWriter, r *http.Request, token string) {
+	share, err := s.shares.GetByToken(token)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
+		return
+	}
+	// A view share is not a feed — 404 rather than leaking that the token
+	// exists in another mode.
+	if share.Kind != models.ShareKindICS {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return
+	}
+	if share.RevokedAt != nil {
+		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
+		return
+	}
+	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
+		writeError(w, http.StatusGone, "GONE", "this share has expired")
+		return
+	}
+
+	// Archived timeline → the feed stops serving (Phase 13.5). 404, not 410:
+	// unarchiving must resurrect the feed, and 410 makes calendar clients
+	// drop the subscription for good. Checked before the cache read so
+	// archiving takes effect immediately.
+	if !s.shareTimelineLive(w, share) {
+		return
+	}
+
+	body, ok := s.icsCache.get(token)
+	if !ok {
+		body, err = s.buildICSFeed(share)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build calendar feed")
+			return
+		}
+		s.icsCache.set(token, body)
+	}
+
+	go func() { _ = s.shares.RecordView(share.ID) }()
+	w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
+	// no-store: the token is the secret and rotate/delete is the only kill
+	// switch for a feed, so a revoked URL must not keep serving from browser
+	// or proxy caches. Server-side load is already absorbed by icsCache.
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write([]byte(body))
+}
+
+// buildICSFeed renders the iCalendar document for an ICS share. Scope is
+// hard-locked server-side: the timeline comes from the share row, and member
+// feeds drop every activity the member is not assigned to before
+// serialization.
+//
+// Each VEVENT projects the activity's display fields: status (+ percent
+// complete), assignee display names, and tag names go into DESCRIPTION (and
+// tags into CATEGORIES); whole-timeline feeds also append assignee names to
+// SUMMARY so the month grid shows who owns what. Member display names are the
+// only person-identifying field a feed may carry — never emails, user IDs, or
+// roles.
+func (s *Server) buildICSFeed(share *models.Share) (string, error) {
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		return "", err
+	}
+
+	acts, err := s.activities.ListByTimeline(share.TimelineID, nil, nil, false)
+	if err != nil {
+		return "", err
+	}
+
+	// Display-name / tag / status lookups for the event field projection.
+	statuses, err := s.statuses.ListStatuses(share.TimelineID)
+	if err != nil {
+		return "", err
+	}
+	statusName := make(map[string]string, len(statuses))
+	for _, st := range statuses {
+		statusName[st.ID] = st.Name
+	}
+	members, err := s.teams.ListMembers(timeline.TeamID)
+	if err != nil {
+		return "", err
+	}
+	memberName := make(map[string]string, len(members))
+	for _, m := range members {
+		if m.DisplayName != "" {
+			memberName[m.ID] = m.DisplayName
+		}
+	}
+	tags, err := s.tags.ListByTeam(timeline.TeamID)
+	if err != nil {
+		return "", err
+	}
+	tagName := make(map[string]string, len(tags))
+	for _, tg := range tags {
+		tagName[tg.ID] = tg.Name
+	}
+
+	memberScoped := share.Scope != nil && *share.Scope == models.ShareScopeMember && share.MemberID != nil
+
+	name := timeline.Name
+	if memberScoped {
+		filtered := acts[:0]
+		for _, a := range acts {
+			for _, id := range a.AssignedMemberIDs {
+				if id == *share.MemberID {
+					filtered = append(filtered, a)
+					break
+				}
+			}
+		}
+		acts = filtered
+
+		if n, ok := memberName[*share.MemberID]; ok {
+			name = timeline.Name + " — " + n
+		}
+	}
+
+	// A member feed is one person's calendar — repeating their name on every
+	// event is noise. The whole-timeline feed is the team overview, where
+	// who-owns-what belongs in the month grid.
+	events := activitiesToICSEvents(acts, memberName, tagName, statusName, !memberScoped)
+	return ics.Calendar(name, events), nil
+}
+
+// activitiesToICSEvents projects activities into iCalendar VEVENTs. Each
+// event's DESCRIPTION carries structured field lines (status + percent
+// complete, assignee display names, tag names) followed by the free-text
+// activity description; CATEGORIES carries tag names. If
+// includeAssigneesInSummary is set, assignee names are appended to SUMMARY.
+func activitiesToICSEvents(acts []*models.Activity, memberName, tagName, statusName map[string]string, includeAssigneesInSummary bool) []ics.Event {
+	events := make([]ics.Event, 0, len(acts))
+	for _, a := range acts {
+		assignees := make([]string, 0, len(a.AssignedMemberIDs))
+		for _, id := range a.AssignedMemberIDs {
+			if n, ok := memberName[id]; ok {
+				assignees = append(assignees, n)
+			}
+		}
+		tagNames := make([]string, 0, len(a.TagIDs))
+		for _, id := range a.TagIDs {
+			if n, ok := tagName[id]; ok {
+				tagNames = append(tagNames, n)
+			}
+		}
+
+		summary := a.Title
+		if includeAssigneesInSummary && len(assignees) > 0 {
+			summary += " — " + strings.Join(assignees, ", ")
+		}
+
+		// Structured field lines first, then a blank line, then the
+		// free-text activity description.
+		meta := make([]string, 0, 3)
+		if a.StatusID != nil {
+			if n, ok := statusName[*a.StatusID]; ok {
+				line := "Status: " + n
+				if a.PercentComplete != nil {
+					line += fmt.Sprintf(" (%d%%)", *a.PercentComplete)
+				}
+				meta = append(meta, line)
+			}
+		} else if a.PercentComplete != nil {
+			meta = append(meta, fmt.Sprintf("Progress: %d%%", *a.PercentComplete))
+		}
+		if len(assignees) > 0 {
+			meta = append(meta, "Assigned: "+strings.Join(assignees, ", "))
+		}
+		if len(tagNames) > 0 {
+			meta = append(meta, "Tags: "+strings.Join(tagNames, ", "))
+		}
+		desc := strings.Join(meta, "\n")
+		if a.Description != nil && *a.Description != "" {
+			if desc != "" {
+				desc += "\n\n"
+			}
+			desc += *a.Description
+		}
+
+		events = append(events, ics.Event{
+			UID:         a.ID + "@draba",
+			Summary:     summary,
+			Description: desc,
+			Categories:  tagNames,
+			Start:       a.StartAt,
+			End:         a.EndAt,
+			Stamp:       a.UpdatedAt,
+		})
+	}
+	return events
+}
+
+// handleGetShareICSNamed handles GET /shares/{token}/{file}. The file segment
+// must end in .ics but is otherwise cosmetic: most calendar clients
+// (Thunderbird included) default the new calendar's name from the URL's
+// filename, so the modal links carry a readable slug (e.g. .../sales-kick-off.ics).
+// The token alone is authoritative.
+func (s *Server) handleGetShareICSNamed(w http.ResponseWriter, r *http.Request) {
+	if !strings.HasSuffix(r.PathValue("file"), ".ics") {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return
+	}
+	s.serveICSFeed(w, r, r.PathValue("token"))
+}
+
+// handleRegenerateShare handles POST /shares/{id}/regenerate. It rotates the
+// share's token, immediately invalidating the old URL — the revocation story
+// for ICS feeds, which cannot carry a password. It works for view shares too
+// (rotating is strictly safer than nothing), and any member of the timeline's
+// team may do it, consistent with PATCH/DELETE.
+func (s *Server) handleRegenerateShare(w http.ResponseWriter, r *http.Request) {
+	shareID := r.PathValue("id")
+
+	share, err := s.shares.GetByID(shareID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	oldToken := share.Token
+	share.Token = newToken()
+	if err := s.shares.RotateToken(share.ID, share.Token); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to regenerate share link")
+		return
+	}
+
+	// Kill both caches for the dead token so it stops serving immediately.
+	s.shareCache.invalidate(oldToken)
+	s.icsCache.invalidate(oldToken)
+
+	writeJSON(w, http.StatusOK, share)
+}
+````
+
 ## File: packages/api/internal/auth/oidc.go
 ````go
 // OIDC / SSO support. This file is the ONLY place draba talks to an external
@@ -57548,329 +57953,381 @@ func randomURLToken() (string, error) {
 }
 ````
 
-## File: packages/api/internal/backup/manager.go
+## File: packages/api/internal/db/user_repo.go
 ````go
-package backup
+package db
 
 import (
-	"context"
-	"errors"
 	"fmt"
-	"io/fs"
-	"log/slog"
-	"os"
-	"path/filepath"
-	"sort"
-	"sync"
-	"sync/atomic"
 	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
 )
 
-// Sentinel errors surfaced to the HTTP layer.
-var (
-	// ErrBackupInProgress is returned when a backup is requested while one
-	// is already running. One backup at a time, always.
-	ErrBackupInProgress = errors.New("a backup is already in progress")
-	// ErrNotFound is returned by Delete when the filename does not match
-	// the backup pattern or no such backup exists.
-	ErrNotFound = errors.New("backup not found")
-)
-
-// tempName is the in-progress copy's filename. It never matches
-// filenamePattern, so an interrupted backup is invisible to history and
-// retention, and is simply overwritten by the next run.
-const tempName = "draba-inprogress.tmp"
-
-// DefaultKeepLast is the retention count applied until a schedule config
-// says otherwise.
-const DefaultKeepLast = 14
-
-// Entry describes one backup file, as listed in history and returned from
-// a manual run. CreatedAt is the timestamp embedded in the filename — the
-// filename is the record.
-type Entry struct {
-	Filename  string    `json:"filename"`
-	SizeBytes int64     `json:"sizeBytes"`
-	CreatedAt time.Time `json:"createdAt"`
-	Trigger   Trigger   `json:"trigger"`
+// UserRepo is the persistence layer for User records.
+type UserRepo struct {
+	db *sqlx.DB
 }
 
-// DatabaseInfo reports facts about the live database file for the status
-// endpoint.
-type DatabaseInfo struct {
-	Driver       string     `json:"driver"`
-	Path         string     `json:"path"`
-	SizeBytes    int64      `json:"sizeBytes"`
-	WalSizeBytes int64      `json:"walSizeBytes"`
-	ModifiedAt   *time.Time `json:"modifiedAt"`
+// NewUserRepo returns a UserRepo backed by db.
+func NewUserRepo(db *sqlx.DB) *UserRepo {
+	return &UserRepo{db: db}
 }
 
-// DirInfo reports where backups land and whether that directory is
-// currently writable.
-type DirInfo struct {
-	Path     string `json:"path"`
-	Writable bool   `json:"writable"`
-}
-
-// Status is the aggregate state the admin status endpoint reports.
-type Status struct {
-	Database   DatabaseInfo `json:"database"`
-	BackupDir  DirInfo      `json:"backupDir"`
-	LastBackup *Entry       `json:"lastBackup"`
-	Health     string       `json:"health"`
-	Running    bool         `json:"running"`
-}
-
-// Health thresholds are fixed in v1: a backup younger than 24h is healthy,
-// older than 7 days (or absent) is critical, anything between is stale.
-const (
-	HealthOK       = "ok"
-	HealthStale    = "stale"
-	HealthCritical = "critical"
-)
-
-// HealthFor classifies backup freshness. last is the most recent backup's
-// timestamp, nil when no backup exists.
-func HealthFor(last *time.Time, now time.Time) string {
-	switch {
-	case last == nil:
-		return HealthCritical
-	case now.Sub(*last) < 24*time.Hour:
-		return HealthOK
-	case now.Sub(*last) <= 7*24*time.Hour:
-		return HealthStale
-	default:
-		return HealthCritical
-	}
-}
-
-// Manager owns the backup directory: it names, runs, verifies, lists,
-// deletes, and prunes backups, and enforces that only one backup runs at
-// a time.
-type Manager struct {
-	engine   Engine
-	dir      string
-	dbPath   string
-	keepLast int
-	running  atomic.Bool
-	// mu serializes runs; TryLock (not Lock) so a second caller gets an
-	// immediate ErrBackupInProgress instead of queueing.
-	mu sync.Mutex
-	// now is the clock, injectable in tests.
-	now func() time.Time
-}
-
-// NewManager returns a Manager writing backups of the database file at
-// dbPath into dir, using engine to produce and verify copies. Retention
-// keeps DefaultKeepLast files.
-func NewManager(engine Engine, dir, dbPath string) *Manager {
-	return &Manager{engine: engine, dir: dir, dbPath: dbPath, keepLast: DefaultKeepLast, now: time.Now}
-}
-
-// Running reports whether a backup is currently executing.
-func (m *Manager) Running() bool { return m.running.Load() }
-
-// RunNow performs one backup synchronously: copy to a temp name, verify
-// the copy, rename to the final pattern-matching name, then sweep
-// retention. A failure at any step removes the partial file — a file that
-// looks like a backup always is one. Returns ErrBackupInProgress when
-// another backup is running.
-func (m *Manager) RunNow(ctx context.Context, trigger Trigger) (*Entry, error) {
-	if !m.mu.TryLock() {
-		return nil, ErrBackupInProgress
-	}
-	defer m.mu.Unlock()
-	m.running.Store(true)
-	defer m.running.Store(false)
-
-	if err := EnsureDir(m.dir); err != nil {
-		return nil, fmt.Errorf("backup dir: %w", err)
-	}
-
-	tmp := filepath.Join(m.dir, tempName)
-	// A stale temp file from a killed process would make VACUUM INTO fail.
-	_ = os.Remove(tmp)
-
-	if err := m.engine.Backup(ctx, tmp); err != nil {
-		_ = os.Remove(tmp)
-		return nil, fmt.Errorf("creating backup: %w", err)
-	}
-	// The engine creates the copy with umask-default permissions; tighten to
-	// owner-only before the file gets its backup name (see EnsureDir on why).
-	if err := os.Chmod(tmp, 0o600); err != nil {
-		_ = os.Remove(tmp)
-		return nil, fmt.Errorf("restricting backup permissions: %w", err)
-	}
-	if err := m.engine.Verify(ctx, tmp); err != nil {
-		_ = os.Remove(tmp)
-		return nil, fmt.Errorf("verifying backup: %w", err)
-	}
-
-	info, err := os.Stat(tmp)
+// Create inserts u. Returns an error if the email already exists
+// (the users.email UNIQUE constraint surfaces as a wrapped driver error).
+func (r *UserRepo) Create(u *models.User) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO users (id, email, password_hash, display_name, avatar_url, is_superadmin, created_at, updated_at)
+		VALUES (:id, :email, :password_hash, :display_name, :avatar_url, :is_superadmin, :created_at, :updated_at)
+	`, u)
 	if err != nil {
-		_ = os.Remove(tmp)
-		return nil, fmt.Errorf("inspecting backup: %w", err)
-	}
-
-	// Bump the timestamp until the name is free: two backups within the
-	// same second must not overwrite each other.
-	ts := m.now().UTC().Truncate(time.Second)
-	var final string
-	for {
-		final = filepath.Join(m.dir, FormatFilename(ts, trigger))
-		if _, err := os.Stat(final); errors.Is(err, fs.ErrNotExist) {
-			break
-		}
-		ts = ts.Add(time.Second)
-	}
-	if err := os.Rename(tmp, final); err != nil {
-		_ = os.Remove(tmp)
-		return nil, fmt.Errorf("finalizing backup: %w", err)
-	}
-
-	m.sweepRetention()
-
-	return &Entry{
-		Filename:  filepath.Base(final),
-		SizeBytes: info.Size(),
-		CreatedAt: ts,
-		Trigger:   trigger,
-	}, nil
-}
-
-// sweepRetention deletes the oldest pattern-matching backups beyond the
-// keep-last-N count. Sweep failures are logged, never propagated — the
-// backup that just succeeded is not undone by a cleanup problem.
-func (m *Manager) sweepRetention() {
-	keep := m.keepLast
-	entries, err := m.History()
-	if err != nil {
-		slog.Warn("backup: retention sweep skipped", "err", err)
-		return
-	}
-	if len(entries) <= keep {
-		return
-	}
-	for _, e := range entries[keep:] {
-		if err := os.Remove(filepath.Join(m.dir, e.Filename)); err != nil {
-			slog.Warn("backup: retention delete failed", "file", e.Filename, "err", err)
-		}
-	}
-}
-
-// History lists the backups in the directory, newest first. The filesystem
-// is the source of truth: files deleted out-of-band disappear, and files
-// that don't match the backup pattern are never listed. A missing directory
-// is an empty history, not an error.
-func (m *Manager) History() ([]Entry, error) {
-	dirents, err := os.ReadDir(m.dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return []Entry{}, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("reading backup dir: %w", err)
-	}
-
-	entries := []Entry{}
-	for _, d := range dirents {
-		if d.IsDir() {
-			continue
-		}
-		ts, trigger, ok := ParseFilename(d.Name())
-		if !ok {
-			continue
-		}
-		var size int64
-		if info, err := d.Info(); err == nil {
-			size = info.Size()
-		}
-		entries = append(entries, Entry{
-			Filename:  d.Name(),
-			SizeBytes: size,
-			CreatedAt: ts,
-			Trigger:   trigger,
-		})
-	}
-	sort.Slice(entries, func(i, j int) bool {
-		if !entries[i].CreatedAt.Equal(entries[j].CreatedAt) {
-			return entries[i].CreatedAt.After(entries[j].CreatedAt)
-		}
-		return entries[i].Filename > entries[j].Filename
-	})
-	return entries, nil
-}
-
-// Delete removes one backup by filename. The strict pattern match is the
-// path-traversal guard: nothing containing a separator (or any name this
-// package didn't create) can ever resolve to a deletable path. Returns
-// ErrNotFound for pattern mismatches and missing files alike.
-func (m *Manager) Delete(filename string) error {
-	if _, _, ok := ParseFilename(filename); !ok {
-		return ErrNotFound
-	}
-	err := os.Remove(filepath.Join(m.dir, filename))
-	if errors.Is(err, fs.ErrNotExist) {
-		return ErrNotFound
-	}
-	if err != nil {
-		return fmt.Errorf("deleting backup: %w", err)
+		return fmt.Errorf("creating user: %w", err)
 	}
 	return nil
 }
 
-// Status reports the live database file's stats, the backup directory's
-// writability, the most recent backup, and the derived health rating.
-func (m *Manager) Status() (*Status, error) {
-	st := &Status{
-		Database:  DatabaseInfo{Driver: "sqlite", Path: m.dbPath},
-		BackupDir: DirInfo{Path: m.dir, Writable: EnsureDir(m.dir) == nil},
-		Running:   m.Running(),
-	}
-
-	// Stat failures (e.g. an in-memory DSN in tests) leave sizes at zero
-	// rather than failing the whole status call.
-	if info, err := os.Stat(m.dbPath); err == nil {
-		st.Database.SizeBytes = info.Size()
-		mod := info.ModTime().UTC()
-		st.Database.ModifiedAt = &mod
-	}
-	if info, err := os.Stat(m.dbPath + "-wal"); err == nil {
-		st.Database.WalSizeBytes = info.Size()
-	}
-
-	history, err := m.History()
+// GetByEmail looks up a user by exact email match. Callers are expected to
+// normalize (lowercase, trim) before calling. Returns sql.ErrNoRows wrapped
+// when no row matches.
+func (r *UserRepo) GetByEmail(email string) (*models.User, error) {
+	var u models.User
+	err := r.db.Get(&u, `SELECT * FROM users WHERE email = ?`, email)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("getting user by email: %w", err)
 	}
-	var last *time.Time
-	if len(history) > 0 {
-		st.LastBackup = &history[0]
-		last = &history[0].CreatedAt
-	}
-	st.Health = HealthFor(last, m.now().UTC())
-	return st, nil
+	return &u, nil
 }
 
-// EnsureDir creates dir if needed and probes that it is writable by
-// creating and removing a marker file. Called at startup (so a broken
-// volume mount is loud in the logs from boot) and before every run.
-func EnsureDir(dir string) error {
-	// 0700/0600 throughout: a backup is the full database — password hashes
-	// and encrypted credentials included — so nothing but the app's own user
-	// should be able to read it.
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("creating %s: %w", dir, err)
-	}
-	probe := filepath.Join(dir, ".draba-writecheck")
-	f, err := os.Create(probe)
+// GetByOIDCSubject looks up a user by their external identity — the
+// (issuer, subject) pair from the IdP. This is the stable key for an SSO
+// account: email or display name may change at the IdP, but the subject does
+// not. Returns sql.ErrNoRows (wrapped) when no row matches.
+func (r *UserRepo) GetByOIDCSubject(issuer, subject string) (*models.User, error) {
+	var u models.User
+	err := r.db.Get(&u,
+		`SELECT * FROM users WHERE oidc_issuer = ? AND oidc_subject = ?`,
+		issuer, subject,
+	)
 	if err != nil {
-		return fmt.Errorf("%s is not writable: %w", dir, err)
+		return nil, fmt.Errorf("getting user by oidc subject: %w", err)
 	}
-	_ = f.Close()
-	if err := os.Remove(probe); err != nil {
-		return fmt.Errorf("cleaning up write probe in %s: %w", dir, err)
+	return &u, nil
+}
+
+// CreateOIDC inserts a new SSO user. The account has no password; identity is
+// the (issuer, subject) pair. The row-level CHECK added in migration 024
+// rejects an oidc account missing either field, so a malformed insert fails at
+// the database rather than producing a half-formed account.
+func (r *UserRepo) CreateOIDC(u *models.User) error {
+	u.AuthProvider = "oidc"
+	u.PasswordHash = nil
+	_, err := r.db.NamedExec(`
+		INSERT INTO users (id, email, display_name, avatar_url, is_superadmin,
+		                   auth_provider, oidc_issuer, oidc_subject, created_at, updated_at)
+		VALUES (:id, :email, :display_name, :avatar_url, :is_superadmin,
+		        :auth_provider, :oidc_issuer, :oidc_subject, :created_at, :updated_at)
+	`, u)
+	if err != nil {
+		return fmt.Errorf("creating oidc user: %w", err)
 	}
 	return nil
+}
+
+// UpdateOIDCProfile refreshes the email and display name of an existing SSO
+// user from their latest IdP claims, so a name/email change upstream is
+// reflected on next login. The (issuer, subject) identity is never changed.
+func (r *UserRepo) UpdateOIDCProfile(id, email, displayName string) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET email = ?, display_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		email, displayName, id,
+	)
+	if err != nil {
+		return fmt.Errorf("updating oidc profile: %w", err)
+	}
+	return nil
+}
+
+// GetByID looks up a user by primary key.
+func (r *UserRepo) GetByID(id string) (*models.User, error) {
+	var u models.User
+	err := r.db.Get(&u, `SELECT * FROM users WHERE id = ?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("getting user by id: %w", err)
+	}
+	return &u, nil
+}
+
+// UpdatePasswordByEmail replaces the password hash for the user with the
+// given email. Returns sql.ErrNoRows (wrapped) when no matching user exists.
+func (r *UserRepo) UpdatePasswordByEmail(email, passwordHash string) error {
+	res, err := r.db.Exec(
+		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE email = ?`,
+		passwordHash, email,
+	)
+	if err != nil {
+		return fmt.Errorf("updating password: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("updating password: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("updating password: no user with email %q", email)
+	}
+	return nil
+}
+
+// Count returns the total number of users. Used by the registration flow
+// to detect first-user bootstrap and to enforce tier user limits.
+func (r *UserRepo) Count() (int, error) {
+	var count int
+	err := r.db.Get(&count, `SELECT COUNT(*) FROM users`)
+	if err != nil {
+		return 0, fmt.Errorf("counting users: %w", err)
+	}
+	return count, nil
+}
+
+// SearchByNameOrEmail returns up to 20 users whose display_name or email
+// contains the query (case-insensitive). Archived users are excluded.
+func (r *UserRepo) SearchByNameOrEmail(q string) ([]*models.User, error) {
+	var users []*models.User
+	like := "%" + q + "%"
+	err := r.db.Select(&users, `
+		SELECT * FROM users
+		WHERE archived_at IS NULL
+		  AND (display_name LIKE ? OR email LIKE ?)
+		ORDER BY display_name ASC
+		LIMIT 20
+	`, like, like)
+	if err != nil {
+		return nil, fmt.Errorf("searching users: %w", err)
+	}
+	return users, nil
+}
+
+// ListSuperadminEmails returns the email addresses of all active
+// superadmins. Used by the backup failure notifier.
+func (r *UserRepo) ListSuperadminEmails() ([]string, error) {
+	var emails []string
+	err := r.db.Select(&emails,
+		`SELECT email FROM users WHERE is_superadmin = 1 AND archived_at IS NULL ORDER BY email ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("listing superadmin emails: %w", err)
+	}
+	return emails, nil
+}
+
+// SetSuperadmin sets or clears the is_superadmin flag on a user.
+func (r *UserRepo) SetSuperadmin(id string, isSuperadmin bool) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET is_superadmin = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		isSuperadmin, id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting superadmin: %w", err)
+	}
+	return nil
+}
+
+// SetArchived sets or clears archived_at on a user. Archived users cannot log in.
+func (r *UserRepo) SetArchived(id string, at *time.Time) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET archived_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		at, id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting user archived: %w", err)
+	}
+	return nil
+}
+
+// Delete hard-deletes a user row. The caller must verify the user is deletable
+// (no active activities, single team membership) before calling this.
+func (r *UserRepo) Delete(id string) error {
+	_, err := r.db.Exec(`DELETE FROM users WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting user: %w", err)
+	}
+	return nil
+}
+
+// UpdateProfile sets display_name, color, and icon on a user. When color or
+// icon changes, the new value is propagated to all team_members rows for the
+// user where the member's value currently matches the user's old value or is NULL
+// (i.e. has not been explicitly overridden by a team admin).
+func (r *UserRepo) UpdateProfile(id, displayName string, color, icon *string) error {
+	// Fetch old values for propagation comparison.
+	var old models.User
+	if err := r.db.Get(&old, `SELECT * FROM users WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("fetching user for profile update: %w", err)
+	}
+
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("beginning profile update transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	_, err = tx.Exec(
+		`UPDATE users SET display_name = ?, color = ?, icon = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		displayName, color, icon, id,
+	)
+	if err != nil {
+		return fmt.Errorf("updating user profile: %w", err)
+	}
+
+	// Propagate color if changed: update team_members rows where color matches
+	// the old value or is NULL (not explicitly overridden).
+	if !ptrEqual(old.Color, color) {
+		_, err = tx.Exec(
+			`UPDATE team_members SET color = ? WHERE user_id = ? AND (color IS NULL OR color = ?)`,
+			color, id, old.Color,
+		)
+		if err != nil {
+			return fmt.Errorf("propagating color to team_members: %w", err)
+		}
+	}
+
+	if !ptrEqual(old.Icon, icon) {
+		_, err = tx.Exec(
+			`UPDATE team_members SET icon = ? WHERE user_id = ? AND (icon IS NULL OR icon = ?)`,
+			icon, id, old.Icon,
+		)
+		if err != nil {
+			return fmt.Errorf("propagating icon to team_members: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing profile update: %w", err)
+	}
+	return nil
+}
+
+// UpdatePassword sets the password_hash on a user.
+func (r *UserRepo) UpdatePassword(id, passwordHash string) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		passwordHash, id,
+	)
+	if err != nil {
+		return fmt.Errorf("updating password: %w", err)
+	}
+	return nil
+}
+
+// ListAll returns all users with their active team membership count.
+// When orphanedOnly is true, only users with zero active memberships are returned.
+func (r *UserRepo) ListAll(orphanedOnly bool) ([]*models.AdminUserRow, error) {
+	q := `
+		SELECT u.*,
+		       (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) AS team_count
+		FROM users u
+		ORDER BY u.display_name ASC
+	`
+	if orphanedOnly {
+		q = `
+			SELECT u.*,
+			       0 AS team_count
+			FROM users u
+			WHERE (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) = 0
+			ORDER BY u.display_name ASC
+		`
+	}
+	var rows []*models.AdminUserRow
+	if err := r.db.Select(&rows, q); err != nil {
+		return nil, fmt.Errorf("listing admin users: %w", err)
+	}
+	return rows, nil
+}
+
+// RevokeUser atomically revokes all access for a user:
+//  1. Sets users.archived_at (blocks login everywhere).
+//  2. For each team_members row for the user:
+//     – if assignment count is 0: deletes timeline_access then the row.
+//     – otherwise: sets team_members.archived_at (inactivates without data loss).
+//
+// Returns a summary of the actions taken. The caller must ensure the user
+// exists and is not a participant before calling.
+func (r *UserRepo) RevokeUser(userID string) (*models.RevokeUserResult, error) {
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return nil, fmt.Errorf("beginning revoke transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	now := time.Now()
+
+	// Step 1: deactivate the account.
+	if _, err := tx.Exec(
+		`UPDATE users SET archived_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		now, userID,
+	); err != nil {
+		return nil, fmt.Errorf("deactivating user account: %w", err)
+	}
+
+	// Step 2: collect all team_members rows for the user.
+	var memberIDs []string
+	if err := tx.Select(&memberIDs,
+		`SELECT id FROM team_members WHERE user_id = ?`, userID,
+	); err != nil {
+		return nil, fmt.Errorf("listing memberships: %w", err)
+	}
+
+	result := &models.RevokeUserResult{AccountDeactivated: true}
+
+	for _, memberID := range memberIDs {
+		var assignCount int
+		if err := tx.Get(&assignCount,
+			`SELECT COUNT(*) FROM activity_assignments WHERE team_member_id = ?`, memberID,
+		); err != nil {
+			return nil, fmt.Errorf("counting assignments for member %s: %w", memberID, err)
+		}
+
+		if assignCount == 0 {
+			// No history — delete timeline_access then the member row.
+			if _, err := tx.Exec(
+				`DELETE FROM timeline_access WHERE team_member_id = ?`, memberID,
+			); err != nil {
+				return nil, fmt.Errorf("deleting timeline access for member %s: %w", memberID, err)
+			}
+			if _, err := tx.Exec(
+				`DELETE FROM team_members WHERE id = ?`, memberID,
+			); err != nil {
+				return nil, fmt.Errorf("deleting member %s: %w", memberID, err)
+			}
+			result.MembershipsRemoved++
+		} else {
+			// Has activity history — inactivate without deleting.
+			if _, err := tx.Exec(
+				`UPDATE team_members SET archived_at = ? WHERE id = ?`, now, memberID,
+			); err != nil {
+				return nil, fmt.Errorf("inactivating member %s: %w", memberID, err)
+			}
+			result.MembershipsInactivated++
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing revoke transaction: %w", err)
+	}
+	return result, nil
+}
+
+// ptrEqual reports whether two string pointers point to equal values,
+// treating nil and a pointer to "" as distinct.
+func ptrEqual(a, b *string) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
 }
 ````
 
@@ -63472,325 +63929,371 @@ func buildTimelineExportICS(timeline *models.Timeline, acts []*models.Activity, 
 }
 ````
 
-## File: packages/api/internal/api/share_ics_handler.go
+## File: packages/api/internal/backup/manager.go
 ````go
-package api
+package backup
 
 import (
-	"database/sql"
+	"context"
 	"errors"
 	"fmt"
-	"net/http"
-	"strings"
+	"io/fs"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/I0-1O/draba/packages/api/internal/ics"
-	"github.com/I0-1O/draba/packages/api/internal/models"
+	"github.com/I0-1O/draba/packages/api/internal/events"
 )
 
-// ── In-memory ICS feed cache ──────────────────────────────────────────────────
-//
-// Mirrors shareCache, but stores the rendered text/calendar payload. Calendar
-// clients poll on their own cadence (minutes to hours), so the same short TTL
-// keeps feeds near-live while absorbing aggressive pollers.
+// Sentinel errors surfaced to the HTTP layer.
+var (
+	// ErrBackupInProgress is returned when a backup is requested while one
+	// is already running. One backup at a time, always.
+	ErrBackupInProgress = errors.New("a backup is already in progress")
+	// ErrNotFound is returned by Delete when the filename does not match
+	// the backup pattern or no such backup exists.
+	ErrNotFound = errors.New("backup not found")
+)
 
-type icsCacheEntry struct {
-	builtAt time.Time
-	payload string
+// tempName is the in-progress copy's filename. It never matches
+// filenamePattern, so an interrupted backup is invisible to history and
+// retention, and is simply overwritten by the next run.
+const tempName = "draba-inprogress.tmp"
+
+// DefaultKeepLast is the retention count applied until a schedule config
+// says otherwise.
+const DefaultKeepLast = 14
+
+// Entry describes one backup file, as listed in history and returned from
+// a manual run. CreatedAt is the timestamp embedded in the filename — the
+// filename is the record.
+type Entry struct {
+	Filename  string    `json:"filename"`
+	SizeBytes int64     `json:"sizeBytes"`
+	CreatedAt time.Time `json:"createdAt"`
+	Trigger   Trigger   `json:"trigger"`
 }
 
-type icsFeedCache struct {
-	mu      sync.RWMutex
-	entries map[string]*icsCacheEntry
-	ttl     time.Duration
+// DatabaseInfo reports facts about the live database file for the status
+// endpoint.
+type DatabaseInfo struct {
+	Driver       string     `json:"driver"`
+	Path         string     `json:"path"`
+	SizeBytes    int64      `json:"sizeBytes"`
+	WalSizeBytes int64      `json:"walSizeBytes"`
+	ModifiedAt   *time.Time `json:"modifiedAt"`
 }
 
-func newICSFeedCache(ttl time.Duration) *icsFeedCache {
-	return &icsFeedCache{entries: make(map[string]*icsCacheEntry), ttl: ttl}
+// DirInfo reports where backups land and whether that directory is
+// currently writable.
+type DirInfo struct {
+	Path     string `json:"path"`
+	Writable bool   `json:"writable"`
 }
 
-func (c *icsFeedCache) get(token string) (string, bool) {
-	c.mu.RLock()
-	e, ok := c.entries[token]
-	c.mu.RUnlock()
-	if !ok || time.Since(e.builtAt) > c.ttl {
-		return "", false
+// Status is the aggregate state the admin status endpoint reports.
+type Status struct {
+	Database   DatabaseInfo `json:"database"`
+	BackupDir  DirInfo      `json:"backupDir"`
+	LastBackup *Entry       `json:"lastBackup"`
+	Health     string       `json:"health"`
+	Running    bool         `json:"running"`
+}
+
+// Health thresholds are fixed in v1: a backup younger than 24h is healthy,
+// older than 7 days (or absent) is critical, anything between is stale.
+const (
+	HealthOK       = "ok"
+	HealthStale    = "stale"
+	HealthCritical = "critical"
+)
+
+// HealthFor classifies backup freshness. last is the most recent backup's
+// timestamp, nil when no backup exists.
+func HealthFor(last *time.Time, now time.Time) string {
+	switch {
+	case last == nil:
+		return HealthCritical
+	case now.Sub(*last) < 24*time.Hour:
+		return HealthOK
+	case now.Sub(*last) <= 7*24*time.Hour:
+		return HealthStale
+	default:
+		return HealthCritical
 	}
-	return e.payload, true
 }
 
-func (c *icsFeedCache) set(token, payload string) {
-	c.mu.Lock()
-	c.entries[token] = &icsCacheEntry{builtAt: time.Now(), payload: payload}
-	c.mu.Unlock()
+// Manager owns the backup directory: it names, runs, verifies, lists,
+// deletes, and prunes backups, and enforces that only one backup runs at
+// a time.
+type Manager struct {
+	engine Engine
+	dir    string
+	dbPath string
+	// keepLast is atomic because SetKeepLast is called from the scheduler
+	// and the schedule PUT handler while a run may be sweeping retention.
+	keepLast atomic.Int32
+	running  atomic.Bool
+	// bus receives backup.completed / backup.failed events when set.
+	bus *events.Bus
+	// mu serializes runs; TryLock (not Lock) so a second caller gets an
+	// immediate ErrBackupInProgress instead of queueing.
+	mu sync.Mutex
+	// now is the clock, injectable in tests.
+	now func() time.Time
 }
 
-func (c *icsFeedCache) invalidate(token string) {
-	c.mu.Lock()
-	delete(c.entries, token)
-	c.mu.Unlock()
+// NewManager returns a Manager writing backups of the database file at
+// dbPath into dir, using engine to produce and verify copies. Retention
+// keeps DefaultKeepLast files until SetKeepLast says otherwise.
+func NewManager(engine Engine, dir, dbPath string) *Manager {
+	m := &Manager{engine: engine, dir: dir, dbPath: dbPath, now: time.Now}
+	m.keepLast.Store(DefaultKeepLast)
+	return m
 }
 
-// ── Handlers ──────────────────────────────────────────────────────────────────
+// WithBus makes the manager publish backup.completed / backup.failed
+// events on bus. Instance-scoped events: TeamID is left empty so the
+// WebSocket hub never routes them to team subscribers.
+func (m *Manager) WithBus(bus *events.Bus) *Manager {
+	m.bus = bus
+	return m
+}
 
-// serveICSFeed handles GET /shares/{token}.ics — the public, unauthenticated
-// calendar feed. It is dispatched from handleGetShareProjection when the token
-// path value carries the .ics suffix (Go 1.22 mux wildcards span the whole
-// segment, so the suffix arrives inside {token}).
-//
-// The feed serves live data scoped server-side to the share's timeline — or,
-// for member feeds, to one member's assigned activities. There is no password
-// gate: calendar clients cannot unlock interactively, so the unguessable token
-// is the secret and revocation is rotate-or-delete.
-func (s *Server) serveICSFeed(w http.ResponseWriter, r *http.Request, token string) {
-	share, err := s.shares.GetByToken(token)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
+// SetKeepLast changes the retention count applied after each successful
+// backup. Values below 1 are ignored — retention can shrink, never vanish.
+func (m *Manager) SetKeepLast(n int) {
+	if n < 1 {
 		return
 	}
-	// A view share is not a feed — 404 rather than leaking that the token
-	// exists in another mode.
-	if share.Kind != models.ShareKindICS {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-		return
-	}
-	if share.RevokedAt != nil {
-		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
-		return
-	}
-	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
-		writeError(w, http.StatusGone, "GONE", "this share has expired")
-		return
-	}
+	m.keepLast.Store(int32(n)) //nolint:gosec // bounded by schedule validation (1–365)
+}
 
-	// Archived timeline → the feed stops serving (Phase 13.5). 404, not 410:
-	// unarchiving must resurrect the feed, and 410 makes calendar clients
-	// drop the subscription for good. Checked before the cache read so
-	// archiving takes effect immediately.
-	if !s.shareTimelineLive(w, share) {
-		return
-	}
+// Running reports whether a backup is currently executing.
+func (m *Manager) Running() bool { return m.running.Load() }
 
-	body, ok := s.icsCache.get(token)
-	if !ok {
-		body, err = s.buildICSFeed(share)
+// RunNow performs one backup synchronously: copy to a temp name, verify
+// the copy, rename to the final pattern-matching name, then sweep
+// retention. A failure at any step removes the partial file — a file that
+// looks like a backup always is one. Returns ErrBackupInProgress when
+// another backup is running (no event is published for that: nothing was
+// attempted, so there is nothing to report).
+func (m *Manager) RunNow(ctx context.Context, trigger Trigger) (*Entry, error) {
+	if !m.mu.TryLock() {
+		return nil, ErrBackupInProgress
+	}
+	defer m.mu.Unlock()
+	m.running.Store(true)
+	defer m.running.Store(false)
+
+	entry, err := m.run(ctx, trigger)
+	if m.bus != nil {
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build calendar feed")
-			return
+			m.bus.Publish(events.Message{Type: events.BackupFailed, Payload: &Failure{
+				Trigger: trigger, Error: err.Error(), At: m.now().UTC(),
+			}})
+		} else {
+			m.bus.Publish(events.Message{Type: events.BackupCompleted, Payload: entry})
 		}
-		s.icsCache.set(token, body)
 	}
-
-	go func() { _ = s.shares.RecordView(share.ID) }()
-	w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
-	// no-store: the token is the secret and rotate/delete is the only kill
-	// switch for a feed, so a revoked URL must not keep serving from browser
-	// or proxy caches. Server-side load is already absorbed by icsCache.
-	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write([]byte(body))
+	return entry, err
 }
 
-// buildICSFeed renders the iCalendar document for an ICS share. Scope is
-// hard-locked server-side: the timeline comes from the share row, and member
-// feeds drop every activity the member is not assigned to before
-// serialization.
-//
-// Each VEVENT projects the activity's display fields: status (+ percent
-// complete), assignee display names, and tag names go into DESCRIPTION (and
-// tags into CATEGORIES); whole-timeline feeds also append assignee names to
-// SUMMARY so the month grid shows who owns what. Member display names are the
-// only person-identifying field a feed may carry — never emails, user IDs, or
-// roles.
-func (s *Server) buildICSFeed(share *models.Share) (string, error) {
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if err != nil {
-		return "", err
+// run is RunNow's body, split out so event publication sees one
+// entry-or-error result regardless of which step failed.
+func (m *Manager) run(ctx context.Context, trigger Trigger) (*Entry, error) {
+	if err := EnsureDir(m.dir); err != nil {
+		return nil, fmt.Errorf("backup dir: %w", err)
 	}
 
-	acts, err := s.activities.ListByTimeline(share.TimelineID, nil, nil, false)
-	if err != nil {
-		return "", err
+	tmp := filepath.Join(m.dir, tempName)
+	// A stale temp file from a killed process would make VACUUM INTO fail.
+	_ = os.Remove(tmp)
+
+	if err := m.engine.Backup(ctx, tmp); err != nil {
+		_ = os.Remove(tmp)
+		return nil, fmt.Errorf("creating backup: %w", err)
+	}
+	// The engine creates the copy with umask-default permissions; tighten to
+	// owner-only before the file gets its backup name (see EnsureDir on why).
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		_ = os.Remove(tmp)
+		return nil, fmt.Errorf("restricting backup permissions: %w", err)
+	}
+	if err := m.engine.Verify(ctx, tmp); err != nil {
+		_ = os.Remove(tmp)
+		return nil, fmt.Errorf("verifying backup: %w", err)
 	}
 
-	// Display-name / tag / status lookups for the event field projection.
-	statuses, err := s.statuses.ListStatuses(share.TimelineID)
+	info, err := os.Stat(tmp)
 	if err != nil {
-		return "", err
+		_ = os.Remove(tmp)
+		return nil, fmt.Errorf("inspecting backup: %w", err)
 	}
-	statusName := make(map[string]string, len(statuses))
-	for _, st := range statuses {
-		statusName[st.ID] = st.Name
-	}
-	members, err := s.teams.ListMembers(timeline.TeamID)
-	if err != nil {
-		return "", err
-	}
-	memberName := make(map[string]string, len(members))
-	for _, m := range members {
-		if m.DisplayName != "" {
-			memberName[m.ID] = m.DisplayName
+
+	// Bump the timestamp until the name is free: two backups within the
+	// same second must not overwrite each other.
+	ts := m.now().UTC().Truncate(time.Second)
+	var final string
+	for {
+		final = filepath.Join(m.dir, FormatFilename(ts, trigger))
+		if _, err := os.Stat(final); errors.Is(err, fs.ErrNotExist) {
+			break
 		}
+		ts = ts.Add(time.Second)
 	}
-	tags, err := s.tags.ListByTeam(timeline.TeamID)
-	if err != nil {
-		return "", err
-	}
-	tagName := make(map[string]string, len(tags))
-	for _, tg := range tags {
-		tagName[tg.ID] = tg.Name
+	if err := os.Rename(tmp, final); err != nil {
+		_ = os.Remove(tmp)
+		return nil, fmt.Errorf("finalizing backup: %w", err)
 	}
 
-	memberScoped := share.Scope != nil && *share.Scope == models.ShareScopeMember && share.MemberID != nil
+	m.sweepRetention()
 
-	name := timeline.Name
-	if memberScoped {
-		filtered := acts[:0]
-		for _, a := range acts {
-			for _, id := range a.AssignedMemberIDs {
-				if id == *share.MemberID {
-					filtered = append(filtered, a)
-					break
-				}
-			}
-		}
-		acts = filtered
-
-		if n, ok := memberName[*share.MemberID]; ok {
-			name = timeline.Name + " — " + n
-		}
-	}
-
-	// A member feed is one person's calendar — repeating their name on every
-	// event is noise. The whole-timeline feed is the team overview, where
-	// who-owns-what belongs in the month grid.
-	events := activitiesToICSEvents(acts, memberName, tagName, statusName, !memberScoped)
-	return ics.Calendar(name, events), nil
+	return &Entry{
+		Filename:  filepath.Base(final),
+		SizeBytes: info.Size(),
+		CreatedAt: ts,
+		Trigger:   trigger,
+	}, nil
 }
 
-// activitiesToICSEvents projects activities into iCalendar VEVENTs. Each
-// event's DESCRIPTION carries structured field lines (status + percent
-// complete, assignee display names, tag names) followed by the free-text
-// activity description; CATEGORIES carries tag names. If
-// includeAssigneesInSummary is set, assignee names are appended to SUMMARY.
-func activitiesToICSEvents(acts []*models.Activity, memberName, tagName, statusName map[string]string, includeAssigneesInSummary bool) []ics.Event {
-	events := make([]ics.Event, 0, len(acts))
-	for _, a := range acts {
-		assignees := make([]string, 0, len(a.AssignedMemberIDs))
-		for _, id := range a.AssignedMemberIDs {
-			if n, ok := memberName[id]; ok {
-				assignees = append(assignees, n)
-			}
+// sweepRetention deletes the oldest pattern-matching backups beyond the
+// keep-last-N count. Sweep failures are logged, never propagated — the
+// backup that just succeeded is not undone by a cleanup problem.
+func (m *Manager) sweepRetention() {
+	keep := int(m.keepLast.Load())
+	entries, err := m.History()
+	if err != nil {
+		slog.Warn("backup: retention sweep skipped", "err", err)
+		return
+	}
+	if len(entries) <= keep {
+		return
+	}
+	for _, e := range entries[keep:] {
+		if err := os.Remove(filepath.Join(m.dir, e.Filename)); err != nil {
+			slog.Warn("backup: retention delete failed", "file", e.Filename, "err", err)
 		}
-		tagNames := make([]string, 0, len(a.TagIDs))
-		for _, id := range a.TagIDs {
-			if n, ok := tagName[id]; ok {
-				tagNames = append(tagNames, n)
-			}
-		}
+	}
+}
 
-		summary := a.Title
-		if includeAssigneesInSummary && len(assignees) > 0 {
-			summary += " — " + strings.Join(assignees, ", ")
-		}
+// History lists the backups in the directory, newest first. The filesystem
+// is the source of truth: files deleted out-of-band disappear, and files
+// that don't match the backup pattern are never listed. A missing directory
+// is an empty history, not an error.
+func (m *Manager) History() ([]Entry, error) {
+	dirents, err := os.ReadDir(m.dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return []Entry{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading backup dir: %w", err)
+	}
 
-		// Structured field lines first, then a blank line, then the
-		// free-text activity description.
-		meta := make([]string, 0, 3)
-		if a.StatusID != nil {
-			if n, ok := statusName[*a.StatusID]; ok {
-				line := "Status: " + n
-				if a.PercentComplete != nil {
-					line += fmt.Sprintf(" (%d%%)", *a.PercentComplete)
-				}
-				meta = append(meta, line)
-			}
-		} else if a.PercentComplete != nil {
-			meta = append(meta, fmt.Sprintf("Progress: %d%%", *a.PercentComplete))
+	entries := []Entry{}
+	for _, d := range dirents {
+		if d.IsDir() {
+			continue
 		}
-		if len(assignees) > 0 {
-			meta = append(meta, "Assigned: "+strings.Join(assignees, ", "))
+		ts, trigger, ok := ParseFilename(d.Name())
+		if !ok {
+			continue
 		}
-		if len(tagNames) > 0 {
-			meta = append(meta, "Tags: "+strings.Join(tagNames, ", "))
+		var size int64
+		if info, err := d.Info(); err == nil {
+			size = info.Size()
 		}
-		desc := strings.Join(meta, "\n")
-		if a.Description != nil && *a.Description != "" {
-			if desc != "" {
-				desc += "\n\n"
-			}
-			desc += *a.Description
-		}
-
-		events = append(events, ics.Event{
-			UID:         a.ID + "@draba",
-			Summary:     summary,
-			Description: desc,
-			Categories:  tagNames,
-			Start:       a.StartAt,
-			End:         a.EndAt,
-			Stamp:       a.UpdatedAt,
+		entries = append(entries, Entry{
+			Filename:  d.Name(),
+			SizeBytes: size,
+			CreatedAt: ts,
+			Trigger:   trigger,
 		})
 	}
-	return events
-}
-
-// handleGetShareICSNamed handles GET /shares/{token}/{file}. The file segment
-// must end in .ics but is otherwise cosmetic: most calendar clients
-// (Thunderbird included) default the new calendar's name from the URL's
-// filename, so the modal links carry a readable slug (e.g. .../sales-kick-off.ics).
-// The token alone is authoritative.
-func (s *Server) handleGetShareICSNamed(w http.ResponseWriter, r *http.Request) {
-	if !strings.HasSuffix(r.PathValue("file"), ".ics") {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-		return
-	}
-	s.serveICSFeed(w, r, r.PathValue("token"))
-}
-
-// handleRegenerateShare handles POST /shares/{id}/regenerate. It rotates the
-// share's token, immediately invalidating the old URL — the revocation story
-// for ICS feeds, which cannot carry a password. It works for view shares too
-// (rotating is strictly safer than nothing), and any member of the timeline's
-// team may do it, consistent with PATCH/DELETE.
-func (s *Server) handleRegenerateShare(w http.ResponseWriter, r *http.Request) {
-	shareID := r.PathValue("id")
-
-	share, err := s.shares.GetByID(shareID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
+	sort.Slice(entries, func(i, j int) bool {
+		if !entries[i].CreatedAt.Equal(entries[j].CreatedAt) {
+			return entries[i].CreatedAt.After(entries[j].CreatedAt)
 		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
+		return entries[i].Filename > entries[j].Filename
+	})
+	return entries, nil
+}
 
-	timeline, err := s.timelines.GetByID(share.TimelineID)
+// Delete removes one backup by filename. The strict pattern match is the
+// path-traversal guard: nothing containing a separator (or any name this
+// package didn't create) can ever resolve to a deletable path. Returns
+// ErrNotFound for pattern mismatches and missing files alike.
+func (m *Manager) Delete(filename string) error {
+	if _, _, ok := ParseFilename(filename); !ok {
+		return ErrNotFound
+	}
+	err := os.Remove(filepath.Join(m.dir, filename))
+	if errors.Is(err, fs.ErrNotExist) {
+		return ErrNotFound
+	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
+		return fmt.Errorf("deleting backup: %w", err)
 	}
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
+	return nil
+}
+
+// Status reports the live database file's stats, the backup directory's
+// writability, the most recent backup, and the derived health rating.
+func (m *Manager) Status() (*Status, error) {
+	st := &Status{
+		Database:  DatabaseInfo{Driver: "sqlite", Path: m.dbPath},
+		BackupDir: DirInfo{Path: m.dir, Writable: EnsureDir(m.dir) == nil},
+		Running:   m.Running(),
 	}
 
-	oldToken := share.Token
-	share.Token = newToken()
-	if err := s.shares.RotateToken(share.ID, share.Token); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to regenerate share link")
-		return
+	// Stat failures (e.g. an in-memory DSN in tests) leave sizes at zero
+	// rather than failing the whole status call.
+	if info, err := os.Stat(m.dbPath); err == nil {
+		st.Database.SizeBytes = info.Size()
+		mod := info.ModTime().UTC()
+		st.Database.ModifiedAt = &mod
+	}
+	if info, err := os.Stat(m.dbPath + "-wal"); err == nil {
+		st.Database.WalSizeBytes = info.Size()
 	}
 
-	// Kill both caches for the dead token so it stops serving immediately.
-	s.shareCache.invalidate(oldToken)
-	s.icsCache.invalidate(oldToken)
+	history, err := m.History()
+	if err != nil {
+		return nil, err
+	}
+	var last *time.Time
+	if len(history) > 0 {
+		st.LastBackup = &history[0]
+		last = &history[0].CreatedAt
+	}
+	st.Health = HealthFor(last, m.now().UTC())
+	return st, nil
+}
 
-	writeJSON(w, http.StatusOK, share)
+// EnsureDir creates dir if needed and probes that it is writable by
+// creating and removing a marker file. Called at startup (so a broken
+// volume mount is loud in the logs from boot) and before every run.
+func EnsureDir(dir string) error {
+	// 0700/0600 throughout: a backup is the full database — password hashes
+	// and encrypted credentials included — so nothing but the app's own user
+	// should be able to read it.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("creating %s: %w", dir, err)
+	}
+	probe := filepath.Join(dir, ".draba-writecheck")
+	f, err := os.Create(probe)
+	if err != nil {
+		return fmt.Errorf("%s is not writable: %w", dir, err)
+	}
+	_ = f.Close()
+	if err := os.Remove(probe); err != nil {
+		return fmt.Errorf("cleaning up write probe in %s: %w", dir, err)
+	}
+	return nil
 }
 ````
 
@@ -64931,230 +65434,6 @@ export function buildCalendarHtml(
 }
 ````
 
-## File: packages/api/cmd/draba/main.go
-````go
-// Command draba is the API server entry point. It wires repositories,
-// the auth token service, and tier configuration into the HTTP server,
-// then listens for requests until the process is killed.
-package main
-
-import (
-	"context"
-	"fmt"
-	"io/fs"
-	"log/slog"
-	"net/http"
-	"os"
-	"strings"
-
-	"github.com/I0-1O/draba/packages/api/internal/api"
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/backup"
-	"github.com/I0-1O/draba/packages/api/internal/buildinfo"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-	sampledata "github.com/I0-1O/draba/packages/api/sample_data"
-	drabui "github.com/I0-1O/draba/packages/api/ui"
-)
-
-const banner = "\n" +
-	"      _           _\n" +
-	"     | |         | |\n" +
-	"   __| |_ __ __ _| |__   __ _\n" +
-	"  / _` | '__/ _` | '_ \\ / _` |\n" +
-	" | (_| | | | (_| | |_) | (_| |\n" +
-	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
-	"\n" +
-	"  see who's doing what, when.\n\n"
-
-func main() {
-	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
-		runResetPassword(os.Args[2:])
-		return
-	}
-
-	setupLogger()
-	fmt.Print(banner)
-	slog.Info("build", "commit", buildinfo.Short(), "built", buildinfo.Built)
-
-	port := getenv("DRABA_PORT", "8080")
-	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
-	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
-	if jwtSecret == "" {
-		slog.Error("DRABA_JWT_SECRET must be set")
-		os.Exit(1)
-	}
-
-	t, err := tier.Load()
-	if err != nil {
-		slog.Error("tier load failed", "err", err)
-		os.Exit(1)
-	}
-	l := t.Limits()
-	if l.MaxUsers == 0 {
-		slog.Info("tier", "tier", t)
-	} else {
-		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
-	}
-
-	database, err := db.Open(dsn)
-	if err != nil {
-		slog.Error("db: open failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: opened", "dsn", dsn)
-
-	if err := db.Migrate(database); err != nil {
-		slog.Error("db: migrate failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: migrations applied")
-
-	// Optional pre-launch convenience: seed the canonical sample dataset into an
-	// empty database so a freshly-wiped dev/test instance comes up populated.
-	// Gated by DRABA_SEED_SAMPLE_DATA and a no-op once the DB has any users — it
-	// must stay unset in any real deployment.
-	if os.Getenv("DRABA_SEED_SAMPLE_DATA") == "1" {
-		sql, err := sampledata.SQL()
-		if err != nil {
-			slog.Error("db: reading embedded sample data failed", "err", err)
-			os.Exit(1)
-		}
-		seeded, err := db.SeedSampleDataIfEmpty(database, sql)
-		if err != nil {
-			slog.Error("db: sample-data seed failed", "err", err)
-			os.Exit(1)
-		}
-		if seeded {
-			slog.Info("db: sample data seeded (database was empty)")
-		} else {
-			slog.Info("db: sample-data seed skipped (database already populated)")
-		}
-	}
-
-	users := db.NewUserRepo(database)
-	invites := db.NewInviteRepo(database)
-	teams := db.NewTeamRepo(database)
-	activityRepo := db.NewActivityRepo(database)
-	timelineRepo := db.NewTimelineRepo(database)
-	savedFilterRepo := db.NewSavedFilterRepo(database)
-	preferenceRepo := db.NewUserPreferenceRepo(database)
-	apiTokenRepo := db.NewAPITokenRepo(database)
-	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
-	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
-	statusRepo := db.NewStatusRepo(database)
-	tagRepo := db.NewTagRepo(database)
-	shareRepo := db.NewShareRepo(database)
-	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
-	tokens := auth.NewTokenService(jwtSecret)
-
-	bus := events.NewBus()
-	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
-		_, err := teams.GetMember(teamID, userID)
-		return err
-	})
-	go hub.Run()
-	slog.Info("ws: hub running")
-
-	if mods := tier.Registered(); len(mods) > 0 {
-		slog.Info("modules loaded", "count", len(mods))
-	}
-
-	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagRepo, shareRepo, m, tokens, t, bus, hub)
-
-	// An unwritable backup dir is loud at boot but not fatal — the status
-	// endpoint reports it and runs fail cleanly, so a misconfigured volume
-	// never blocks the app itself from serving.
-	backupDir := getenv("DRABA_BACKUP_DIR", "/data/backups")
-	if err := backup.EnsureDir(backupDir); err != nil {
-		slog.Warn("backup: directory not writable; backups will fail until fixed", "dir", backupDir, "err", err)
-	} else {
-		slog.Info("backup: directory ready", "dir", backupDir)
-	}
-	srv.WithBackup(backup.NewManager(backup.NewSQLiteEngine(database), backupDir, dsn))
-
-	// Wire up the embedded React SPA when a production build is present.
-	// In dev the static/ directory only has .gitkeep so this is a no-op.
-	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
-		if _, err := sub.Open("index.html"); err == nil {
-			srv.WithUI(sub)
-			slog.Info("ui: serving embedded SPA")
-		}
-	}
-
-	// Optional SSO. OIDC is disabled unless DRABA_OIDC_ISSUER is set. When it
-	// is, discovery runs against the issuer at startup; a failure here is fatal
-	// so a broken SSO setup is caught at boot rather than presenting users a
-	// dead login button. The client secret is read once and never leaves the
-	// process.
-	oidcSvc, err := auth.NewOIDCService(context.Background(), &auth.OIDCConfig{
-		Issuer:       os.Getenv("DRABA_OIDC_ISSUER"),
-		ClientID:     os.Getenv("DRABA_OIDC_CLIENT_ID"),
-		ClientSecret: os.Getenv("DRABA_OIDC_CLIENT_SECRET"),
-		RedirectURL:  oidcRedirectURL(),
-	})
-	if err != nil {
-		slog.Error("oidc: configuration failed", "err", err)
-		os.Exit(1)
-	}
-	if oidcSvc != nil {
-		// Auto-provisioning defaults ON (first SSO login creates the account),
-		// matching the password-register bootstrap. Set DRABA_OIDC_AUTO_CREATE=0
-		// to require accounts be pre-created before SSO login is allowed.
-		autoCreate := os.Getenv("DRABA_OIDC_AUTO_CREATE") != "0"
-		srv.WithOIDC(oidcSvc, autoCreate)
-		slog.Info("oidc: SSO enabled", "issuer", os.Getenv("DRABA_OIDC_ISSUER"), "autoCreate", autoCreate)
-	}
-
-	slog.Info("listening", "port", port)
-	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
-		slog.Error("server error", "err", err)
-		os.Exit(1)
-	}
-}
-
-// oidcRedirectURL returns the OIDC callback URL the IdP must redirect back to.
-// It honours an explicit DRABA_OIDC_REDIRECT_URL override, otherwise derives it
-// from DRABA_BASE_URL so a single base-URL setting covers both the app and the
-// SSO callback.
-func oidcRedirectURL() string {
-	if v := os.Getenv("DRABA_OIDC_REDIRECT_URL"); v != "" {
-		return v
-	}
-	if os.Getenv("DRABA_OIDC_ISSUER") == "" {
-		return "" // SSO disabled; no redirect needed.
-	}
-	return strings.TrimRight(getenv("DRABA_BASE_URL", "http://localhost:8080"), "/") + "/auth/oidc/callback"
-}
-
-// setupLogger initialises the global slog logger. Level is controlled by
-// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
-// All output goes to stdout so Docker captures it in `docker logs`.
-func setupLogger() {
-	level := slog.LevelInfo
-	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
-}
-
-// getenv returns the env var value or fallback when unset/empty.
-func getenv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-````
-
 ## File: packages/web/src/components/export/PresentationFrame.tsx
 ````typescript
 /**
@@ -65594,6 +65873,280 @@ export function buildExportFilename(timelineName: string, ext: string, view?: Ex
 }
 ````
 
+## File: packages/api/cmd/draba/main.go
+````go
+// Command draba is the API server entry point. It wires repositories,
+// the auth token service, and tier configuration into the HTTP server,
+// then listens for requests until the process is killed.
+package main
+
+import (
+	"context"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
+
+	"github.com/I0-1O/draba/packages/api/internal/api"
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/backup"
+	"github.com/I0-1O/draba/packages/api/internal/buildinfo"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+	sampledata "github.com/I0-1O/draba/packages/api/sample_data"
+	drabui "github.com/I0-1O/draba/packages/api/ui"
+)
+
+const banner = "\n" +
+	"      _           _\n" +
+	"     | |         | |\n" +
+	"   __| |_ __ __ _| |__   __ _\n" +
+	"  / _` | '__/ _` | '_ \\ / _` |\n" +
+	" | (_| | | | (_| | |_) | (_| |\n" +
+	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
+	"\n" +
+	"  see who's doing what, when.\n\n"
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
+		runResetPassword(os.Args[2:])
+		return
+	}
+
+	setupLogger()
+	fmt.Print(banner)
+	slog.Info("build", "commit", buildinfo.Short(), "built", buildinfo.Built)
+
+	port := getenv("DRABA_PORT", "8080")
+	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
+	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
+	if jwtSecret == "" {
+		slog.Error("DRABA_JWT_SECRET must be set")
+		os.Exit(1)
+	}
+
+	t, err := tier.Load()
+	if err != nil {
+		slog.Error("tier load failed", "err", err)
+		os.Exit(1)
+	}
+	l := t.Limits()
+	if l.MaxUsers == 0 {
+		slog.Info("tier", "tier", t)
+	} else {
+		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
+	}
+
+	database, err := db.Open(dsn)
+	if err != nil {
+		slog.Error("db: open failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: opened", "dsn", dsn)
+
+	if err := db.Migrate(database); err != nil {
+		slog.Error("db: migrate failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: migrations applied")
+
+	// Optional pre-launch convenience: seed the canonical sample dataset into an
+	// empty database so a freshly-wiped dev/test instance comes up populated.
+	// Gated by DRABA_SEED_SAMPLE_DATA and a no-op once the DB has any users — it
+	// must stay unset in any real deployment.
+	if os.Getenv("DRABA_SEED_SAMPLE_DATA") == "1" {
+		sql, err := sampledata.SQL()
+		if err != nil {
+			slog.Error("db: reading embedded sample data failed", "err", err)
+			os.Exit(1)
+		}
+		seeded, err := db.SeedSampleDataIfEmpty(database, sql)
+		if err != nil {
+			slog.Error("db: sample-data seed failed", "err", err)
+			os.Exit(1)
+		}
+		if seeded {
+			slog.Info("db: sample data seeded (database was empty)")
+		} else {
+			slog.Info("db: sample-data seed skipped (database already populated)")
+		}
+	}
+
+	users := db.NewUserRepo(database)
+	invites := db.NewInviteRepo(database)
+	teams := db.NewTeamRepo(database)
+	activityRepo := db.NewActivityRepo(database)
+	timelineRepo := db.NewTimelineRepo(database)
+	savedFilterRepo := db.NewSavedFilterRepo(database)
+	preferenceRepo := db.NewUserPreferenceRepo(database)
+	apiTokenRepo := db.NewAPITokenRepo(database)
+	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
+	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
+	statusRepo := db.NewStatusRepo(database)
+	tagRepo := db.NewTagRepo(database)
+	shareRepo := db.NewShareRepo(database)
+	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
+	tokens := auth.NewTokenService(jwtSecret)
+
+	bus := events.NewBus()
+	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
+		_, err := teams.GetMember(teamID, userID)
+		return err
+	})
+	go hub.Run()
+	slog.Info("ws: hub running")
+
+	if mods := tier.Registered(); len(mods) > 0 {
+		slog.Info("modules loaded", "count", len(mods))
+	}
+
+	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagRepo, shareRepo, m, tokens, t, bus, hub)
+
+	// An unwritable backup dir is loud at boot but not fatal — the status
+	// endpoint reports it and runs fail cleanly, so a misconfigured volume
+	// never blocks the app itself from serving.
+	backupDir := getenv("DRABA_BACKUP_DIR", "/data/backups")
+	if err := backup.EnsureDir(backupDir); err != nil {
+		slog.Warn("backup: directory not writable; backups will fail until fixed", "dir", backupDir, "err", err)
+	} else {
+		slog.Info("backup: directory ready", "dir", backupDir)
+	}
+	backupMgr := backup.NewManager(backup.NewSQLiteEngine(database), backupDir, dsn).WithBus(bus)
+	backupSched := backup.NewScheduler(backupMgr, instanceSetsRepo)
+	go backupSched.Run(context.Background())
+	go backup.NewNotifier(bus, m, users).Run()
+	slog.Info("backup: scheduler running")
+	srv.WithBackup(backupMgr, backupSched)
+
+	// Wire up the embedded React SPA when a production build is present.
+	// In dev the static/ directory only has .gitkeep so this is a no-op.
+	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
+		if _, err := sub.Open("index.html"); err == nil {
+			srv.WithUI(sub)
+			slog.Info("ui: serving embedded SPA")
+		}
+	}
+
+	// Optional SSO. OIDC is disabled unless DRABA_OIDC_ISSUER is set. When it
+	// is, discovery runs against the issuer at startup; a failure here is fatal
+	// so a broken SSO setup is caught at boot rather than presenting users a
+	// dead login button. The client secret is read once and never leaves the
+	// process.
+	oidcSvc, err := auth.NewOIDCService(context.Background(), &auth.OIDCConfig{
+		Issuer:       os.Getenv("DRABA_OIDC_ISSUER"),
+		ClientID:     os.Getenv("DRABA_OIDC_CLIENT_ID"),
+		ClientSecret: os.Getenv("DRABA_OIDC_CLIENT_SECRET"),
+		RedirectURL:  oidcRedirectURL(),
+	})
+	if err != nil {
+		slog.Error("oidc: configuration failed", "err", err)
+		os.Exit(1)
+	}
+	if oidcSvc != nil {
+		// Auto-provisioning defaults ON (first SSO login creates the account),
+		// matching the password-register bootstrap. Set DRABA_OIDC_AUTO_CREATE=0
+		// to require accounts be pre-created before SSO login is allowed.
+		autoCreate := os.Getenv("DRABA_OIDC_AUTO_CREATE") != "0"
+		srv.WithOIDC(oidcSvc, autoCreate)
+		slog.Info("oidc: SSO enabled", "issuer", os.Getenv("DRABA_OIDC_ISSUER"), "autoCreate", autoCreate)
+	}
+
+	slog.Info("listening", "port", port)
+	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
+		slog.Error("server error", "err", err)
+		os.Exit(1)
+	}
+}
+
+// oidcRedirectURL returns the OIDC callback URL the IdP must redirect back to.
+// It honours an explicit DRABA_OIDC_REDIRECT_URL override, otherwise derives it
+// from DRABA_BASE_URL so a single base-URL setting covers both the app and the
+// SSO callback.
+func oidcRedirectURL() string {
+	if v := os.Getenv("DRABA_OIDC_REDIRECT_URL"); v != "" {
+		return v
+	}
+	if os.Getenv("DRABA_OIDC_ISSUER") == "" {
+		return "" // SSO disabled; no redirect needed.
+	}
+	return strings.TrimRight(getenv("DRABA_BASE_URL", "http://localhost:8080"), "/") + "/auth/oidc/callback"
+}
+
+// setupLogger initialises the global slog logger. Level is controlled by
+// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
+// All output goes to stdout so Docker captures it in `docker logs`.
+func setupLogger() {
+	level := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+}
+
+// getenv returns the env var value or fallback when unset/empty.
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+````
+
+## File: .golangci.yml
+````yaml
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+    - gocritic
+    - revive
+    - misspell
+    - nolintlint
+
+  settings:
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+    revive:
+      rules:
+        - name: exported
+          severity: warning
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+````
+
 ## File: packages/api/internal/api/server.go
 ````go
 // Package api hosts the HTTP handlers, routing, and middleware for the
@@ -65671,6 +66224,10 @@ type Server struct {
 	// production; opt-in for tests). When nil the /admin/backup* routes are
 	// not registered. Set via WithBackup.
 	backup *backup.Manager
+	// backupSched, when non-nil, is woken after a schedule change so the
+	// new configuration takes effect without a restart. Tests that only
+	// exercise the HTTP surface may leave it nil.
+	backupSched *backup.Scheduler
 }
 
 // NewServer constructs a Server with its required dependencies. It does not
@@ -65744,10 +66301,12 @@ func (s *Server) WithOIDC(svc *auth.OIDCService, autoCreate bool) *Server {
 // local account on first SSO login.
 func (s *Server) oidcAutoCreate() bool { return s.oidcAutoCreateUsers }
 
-// WithBackup enables the backup admin endpoints backed by m. Call before
+// WithBackup enables the backup admin endpoints backed by m. sched may be
+// nil (HTTP-surface tests); when set, schedule changes wake it. Call before
 // Routes; when never called, the /admin/backup* routes do not exist.
-func (s *Server) WithBackup(m *backup.Manager) *Server {
+func (s *Server) WithBackup(m *backup.Manager, sched *backup.Scheduler) *Server {
 	s.backup = m
+	s.backupSched = sched
 	return s
 }
 
@@ -65790,6 +66349,8 @@ func (s *Server) Routes() http.Handler {
 		mux.HandleFunc("GET /admin/backup/status", chain(s.handleGetBackupStatus, s.authMiddleware))
 		mux.HandleFunc("POST /admin/backup", chain(s.handlePostBackup, s.authMiddleware))
 		mux.HandleFunc("GET /admin/backup/history", chain(s.handleGetBackupHistory, s.authMiddleware))
+		mux.HandleFunc("GET /admin/backup/schedule", chain(s.handleGetBackupSchedule, s.authMiddleware))
+		mux.HandleFunc("PUT /admin/backup/schedule", chain(s.handlePutBackupSchedule, s.authMiddleware))
 		mux.HandleFunc("DELETE /admin/backup/{filename}", chain(s.handleDeleteBackup, s.authMiddleware))
 	}
 
@@ -65975,51 +66536,6 @@ func spaHandler(uiFS fs.FS) http.Handler {
 		fserver.ServeHTTP(w, r)
 	})
 }
-````
-
-## File: .golangci.yml
-````yaml
-version: "2"
-
-run:
-  timeout: 5m
-
-linters:
-  default: none
-  enable:
-    - errcheck
-    - govet
-    - staticcheck
-    - ineffassign
-    - gocritic
-    - revive
-    - misspell
-    - nolintlint
-
-  settings:
-    gocritic:
-      enabled-tags:
-        - diagnostic
-        - style
-        - performance
-    revive:
-      rules:
-        - name: exported
-          severity: warning
-    nolintlint:
-      require-explanation: true
-      require-specific: true
-
-  exclusions:
-    rules:
-      - path: _test\.go
-        linters:
-          - errcheck
-
-formatters:
-  enable:
-    - gofmt
-    - goimports
 ````
 
 ## File: packages/shared/src/index.ts
@@ -67007,6 +67523,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/backup/schedule": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get the backup schedule
+         * @description Returns the stored configuration. An instance that has never saved one reports the default-on schedule (daily 02:00 UTC, keep 14).
+         */
+        get: operations["getBackupSchedule"];
+        /**
+         * Update the backup schedule
+         * @description Validates and persists the configuration, then wakes the scheduler so it takes effect without a restart.
+         */
+        put: operations["putBackupSchedule"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/backup/{filename}": {
         parameters: {
             query?: never;
@@ -67541,8 +68081,29 @@ export interface components {
              */
             health: "ok" | "stale" | "critical";
             running: boolean;
-            /** @description Reserved for the backup scheduler; always null until that ships (and when scheduling is off). */
-            schedule?: Record<string, never> | null;
+            /** @description Summary of the active schedule; null when scheduling is off. */
+            schedule?: components["schemas"]["BackupSchedule"] | null;
+        };
+        /** @description Backup schedule configuration. Presets, not cron expressions. All times are UTC. New instances default to daily at 02:00, keep 14. */
+        BackupSchedule: {
+            /** @enum {string} */
+            preset: "off" | "hourly" | "every6h" | "every12h" | "daily" | "weekly";
+            /** @description "HH:MM" (24h, UTC). Required for daily and weekly presets. */
+            time?: string;
+            /**
+             * @description Required for the weekly preset.
+             * @enum {string}
+             */
+            day?: "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
+            /** @description Retention count enforced after every successful backup. */
+            keepLast: number;
+        };
+        BackupScheduleResponse: components["schemas"]["BackupSchedule"] & {
+            /**
+             * Format: date-time
+             * @description Computed next run; null when the preset is off.
+             */
+            nextRunAt?: string | null;
         };
         Team: {
             id: string;
@@ -70401,6 +70962,55 @@ export interface operations {
             403: components["responses"]["Forbidden"];
         };
     };
+    getBackupSchedule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current schedule with the computed next run time. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupScheduleResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    putBackupSchedule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BackupSchedule"];
+            };
+        };
+        responses: {
+            /** @description Saved schedule with the computed next run time. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupScheduleResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
     deleteBackup: {
         parameters: {
             query?: never;
@@ -71531,9 +72141,44 @@ components:
         running:
           type: boolean
         schedule:
-          type: object
+          allOf:
+            - $ref: '#/components/schemas/BackupSchedule'
           nullable: true
-          description: Reserved for the backup scheduler; always null until that ships (and when scheduling is off).
+          description: Summary of the active schedule; null when scheduling is off.
+
+    BackupSchedule:
+      type: object
+      description: >
+        Backup schedule configuration. Presets, not cron expressions. All
+        times are UTC. New instances default to daily at 02:00, keep 14.
+      required: [preset, keepLast]
+      properties:
+        preset:
+          type: string
+          enum: [off, hourly, every6h, every12h, daily, weekly]
+        time:
+          type: string
+          description: '"HH:MM" (24h, UTC). Required for daily and weekly presets.'
+        day:
+          type: string
+          enum: [mon, tue, wed, thu, fri, sat, sun]
+          description: Required for the weekly preset.
+        keepLast:
+          type: integer
+          minimum: 1
+          maximum: 365
+          description: Retention count enforced after every successful backup.
+
+    BackupScheduleResponse:
+      allOf:
+        - $ref: '#/components/schemas/BackupSchedule'
+        - type: object
+          properties:
+            nextRunAt:
+              type: string
+              format: date-time
+              nullable: true
+              description: Computed next run; null when the preset is off.
 
     Team:
       type: object
@@ -75007,6 +75652,52 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/BackupEntry"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/backup/schedule:
+    get:
+      operationId: getBackupSchedule
+      summary: Get the backup schedule
+      description: >
+        Returns the stored configuration. An instance that has never saved
+        one reports the default-on schedule (daily 02:00 UTC, keep 14).
+      tags: [admin]
+      responses:
+        "200":
+          description: Current schedule with the computed next run time.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupScheduleResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    put:
+      operationId: putBackupSchedule
+      summary: Update the backup schedule
+      description: >
+        Validates and persists the configuration, then wakes the scheduler
+        so it takes effect without a restart.
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BackupSchedule"
+      responses:
+        "200":
+          description: Saved schedule with the computed next run time.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupScheduleResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -79023,13 +79714,13 @@ _Planned 2026-07-08 — see [docs/plans/phase-16-backup.md](plans/phase-16-backu
 - [x] Tests: vacuum under concurrent writes, verify-failure cleanup, filename round-trip + foreign-file exclusion + traversal rejection, retention sweep, concurrency guard, status shape (incl. unwritable dir)
 - [x] `/review-phase 16.1` (2026-07-09): 0 blockers; fixes applied — 0700/0600 backup permissions, `SetKeepLast` removed (plain field until 16.2), schedule schema deferred, phase-tag comments dropped
 
-**16.2 Server — scheduler, retention-in-anger, failure notification:**
-- [ ] `internal/backup.Scheduler`: preset → next-run computation (injected clock), timer loop, config-change recompute, skip-while-running; no catch-up for missed windows (v1)
-- [ ] `GET`/`PUT /admin/backup/schedule` — presets `off|hourly|every6h|every12h|daily@HH:MM|weekly@day+HH:MM` + `keepLast` 1–365, validated; one `instance_settings` JSON key; response echoes `nextRunAt`; add the `BackupSchedule` OpenAPI schema (deferred from 16.1) + a `Manager` retention setter (`SetKeepLast` was removed in the 16.1 review as caller-less)
-- [ ] Default-on for instances with no stored config: daily 02:00, keep-last-14
-- [ ] `backup.completed` / `backup.failed` bus events (instance-scoped, not team-broadcast); failure consumer emails superadmins via existing mailer, silent no-op without SMTP config
-- [ ] `main.go` wiring: `backup.Manager` + `go scheduler.Run(ctx)` beside the WS hub
-- [ ] Tests: fake-clock runs across every preset, recompute on config change, failure → one email per superadmin, no-SMTP no-op
+**16.2 Server — scheduler, retention-in-anger, failure notification:** ✅ 2026-07-13
+- [x] `internal/backup.Scheduler`: preset → next-run computation (injected clock), timer loop, config-change recompute, skip-while-running; no catch-up for missed windows (v1)
+- [x] `GET`/`PUT /admin/backup/schedule` — presets `off|hourly|every6h|every12h|daily@HH:MM|weekly@day+HH:MM` + `keepLast` 1–365, validated; one `instance_settings` JSON key (`backup.schedule`); response echoes `nextRunAt`; `BackupSchedule` OpenAPI schema added (deferred from 16.1) + `Manager.SetKeepLast` restored (atomic — scheduler and PUT handler call it concurrently with runs); status `schedule` field now live (null when off)
+- [x] Default-on for instances with no stored config: daily 02:00, keep-last-14
+- [x] `backup.completed` / `backup.failed` bus events (instance-scoped, empty TeamID — the hub only routes to team subscribers, so they never reach WS clients); `backup.Notifier` consumer emails superadmins via existing mailer (`UserRepo.ListSuperadminEmails`), silent no-op without SMTP config
+- [x] `main.go` wiring: `Manager.WithBus(bus)` + `go scheduler.Run(ctx)` + `go notifier.Run()` beside the WS hub
+- [x] Tests: fake-clock waits verified across every preset, recompute on config change + Reload, off-waits-for-reload, skip-while-running, failure → one email per superadmin, no-SMTP no-op, schedule validation table, NextRun table, default-on load, manager event emission, SetKeepLast retention
 
 **16.3 Web + ops docs + hardening:**
 - [ ] Settings › Backup section (superadmin-gated like SMTP): status card + health badge with thresholds spelled out, backup-dir warning when unwritable
@@ -80805,7 +81496,7 @@ Get data *into* draba from a spreadsheet — CSV / Excel import with a mandatory
 ---
 
 ### Phase 16 — Backup & Restore
-**Status:** 🔄 In Progress (16.1 built 2026-07-08, all automated checks pass; 16.2 scheduler + 16.3 web/ops next) | **Effort:** M (2.5–3 days across three pausable sub-phases) | **Plan:** [docs/plans/phase-16-backup.md](plans/phase-16-backup.md)
+**Status:** 🔄 In Progress (16.1 built 2026-07-08; 16.2 scheduler built 2026-07-13, all automated checks pass; 16.3 web/ops next) | **Effort:** M (2.5–3 days across three pausable sub-phases) | **Plan:** [docs/plans/phase-16-backup.md](plans/phase-16-backup.md)
 
 Admin tools for database backup visibility, manual backups, and scheduled backup configuration. Self-hosted deployments need a way to know their data is safe without SSH-ing into the container. **Pulled ahead of the remaining phases** because once real teams start putting real data in (via [import](#phase-15--import--tabular) and [shared](#phase-13--shares--multi-share-views-with-passwords) workflows), data safety stops being optional.
 
@@ -80966,6 +81657,30 @@ Adds i18n infrastructure and ships the first non-English locale. The "Default la
 ## File: docs/log.md
 ````markdown
 # Development Log
+
+---
+
+## 2026-07-13 — Phase 16.2: Backup scheduler, retention-in-anger, failure notification
+
+**Goal:** The unattended half of Backup per [the plan](plans/phase-16-backup.md) §16.2: a preset-driven background scheduler (the first background scheduler in the codebase — deliberately a purpose-built goroutine, not a job framework), schedule GET/PUT with `instance_settings` persistence, default-on daily 02:00 UTC / keep-last-14, and `backup.completed`/`backup.failed` bus events with an SMTP failure-notification consumer.
+
+**Backend (`packages/api`):**
+- `internal/backup/schedule.go` (new) — `Schedule` type (`preset` `off|hourly|every6h|every12h|daily|weekly`, `time` "HH:MM", `day` "mon..sun", `keepLast` 1–365) with `Validate` (human-readable 400 messages), `Normalize` (clears fields the preset doesn't use, so stored configs never carry stale leftovers), and pure `NextRun(now)` — all UTC, no timezone knob in v1, which keeps next-run computation DST-free. Interval presets anchor to UTC midnight (`Truncate` works because 1h/6h/12h divide the day and the epoch is UTC midnight), so hourly fires at :00 and every6h at 00/06/12/18 — deterministic and table-testable. `LoadSchedule`/`SaveSchedule` persist one JSON value under the `backup.schedule` `instance_settings` key via a `SettingsStore` interface (satisfied by `InstanceSettingsRepo`); empty store → `DefaultSchedule()` (daily 02:00, keep 14) — **default-on**, safe-by-default for a data-safety feature.
+- `internal/backup/scheduler.go` (new) — `Scheduler`: loop of load-config → `SetKeepLast` → compute next run → wait → `RunNow(TriggerScheduled)` → repeat. Clock injected as `now`/`after` funcs (not a Clock interface — two fields are all one consumer needs). `Reload()` is a non-blocking buffered-channel poke that abandons the pending timer and re-reads config; `preset: off` parks on the reload channel with no timer at all. A corrupt stored value falls back to the default-on schedule with a loud warn (never silently disables backups). A tick landing while another backup runs is **skipped, not queued** (`ErrBackupInProgress` → info log). No catch-up for missed windows (v1; health indicator covers the gap).
+- `internal/backup/notifier.go` (new) — `Failure` payload type + `Notifier`: subscribes in `NewNotifier` (synchronously, so no event published after construction is missed), `Run()` consumes `backup.failed`, emails every superadmin via a `MailSender` seam (the real `mailer.Mailer.Send` is already a silent no-op without SMTP config, so the notifier needs no config awareness). Recipients via new `UserRepo.ListSuperadminEmails` (active superadmins only). Error text HTML-escaped into the body.
+- `internal/backup/manager.go` — `RunNow` split into lock/publish shell + `run` body; publishes `backup.completed` (payload `*Entry`) or `backup.failed` (payload `*Failure`) on an optional bus (`WithBus`). Events are instance-scoped — empty `TeamID`, and the WS hub only routes to team subscribers, so they never reach browser clients. A `409`-style in-progress rejection publishes nothing (nothing was attempted). `SetKeepLast` restored (removed in the 16.1 review as caller-less; now the scheduler and the PUT handler call it) — `keepLast` is atomic because those callers race a run's retention sweep; values <1 ignored.
+- `internal/events/bus.go` — `BackupCompleted`/`BackupFailed` event types.
+- `internal/api/backup_handler.go` — `GET /admin/backup/schedule` (stored config or default-on, plus computed `nextRunAt`, null when off), `PUT /admin/backup/schedule` (validate → normalize → persist → `SetKeepLast` directly (manual backups must sweep with the new count even when scheduling is off) → `Scheduler.Reload()`), both superadmin-only. Status `schedule` stub goes live: the summary of the active config, null when `off`.
+- `internal/api/server.go` — `WithBackup` now takes `(manager, scheduler)`; scheduler may be nil for HTTP-surface tests. Two new routes registered in the same gated block.
+- `cmd/draba/main.go` — `Manager.WithBus(bus)`, `go scheduler.Run(ctx)` + `go notifier.Run()` beside the WS hub, `srv.WithBackup(mgr, sched)`.
+
+**API contract:** `openapi.yaml` — `BackupSchedule` schema (deferred from 16.1) + `BackupScheduleResponse` (`allOf` + nullable `nextRunAt`), `/admin/backup/schedule` GET/PUT paths, `BackupStatus.schedule` now `allOf`-refs `BackupSchedule` (nullable). `packages/shared/src/index.ts` regenerated.
+
+**Tests:** `schedule_test.go` — validation table (9 invalid shapes incl. `24:00`, `12:60`, long day names, keepLast 0/366), `Normalize`, 13-case `NextRun` table across every preset (boundary-is-strictly-after, midnight wraps, weekly week-wrap), default-on load, save/load round-trip, corrupt-value rejection. `scheduler_test.go` — fake clock (`now`/`after` swapped, waits recorded on a channel, ticks fired by the test): requested wait matches `NextRun` for every preset and a fired tick lands a `scheduled` file + recomputes; default-on with an empty store; `Reload` mid-wait recomputes and applies the new `keepLast`; `off` requests no timer until a reload turns it on; a tick during a held manual backup is skipped (no scheduled file, loop continues). `notifier_test.go` — one email per superadmin on `backup.failed`, completed events and lister errors ignored, no-SMTP no-op proven through the real `mailer.Mailer` (Send reached, returns nil, no dial). `manager_test.go` — completed/failed event emission (instance-scoped, correct payloads), `SetKeepLast` drives the sweep (keep-2 deletes the oldest of three; 0 ignored). `backup_handler_test.go` — schedule routes added to the superadmin-gating table; default-on GET with future `nextRunAt`; PUT weekly round-trip; PUT `off` → null `nextRunAt` + null status summary; 7-case PUT validation table with nothing-invalid-persisted check; fresh-instance status now asserts the default-on schedule summary.
+
+**Checks:** `golangci-lint run` 0 issues; `go test ./...` all pass; `pnpm --filter web lint` clean; `pnpm --filter web build` clean.
+
+Next: 16.3 (Settings › Backup UI, `docs/OPERATIONS.md` restore runbook, live Docker verification incl. walking the runbook once for real, `/test-phase 16`, TESTING.md Phase 16 assertions).
 
 ---
 
