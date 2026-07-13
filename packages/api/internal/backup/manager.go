@@ -12,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/events"
 )
 
 // Sentinel errors surfaced to the HTTP layer.
@@ -96,11 +98,15 @@ func HealthFor(last *time.Time, now time.Time) string {
 // deletes, and prunes backups, and enforces that only one backup runs at
 // a time.
 type Manager struct {
-	engine   Engine
-	dir      string
-	dbPath   string
-	keepLast int
+	engine Engine
+	dir    string
+	dbPath string
+	// keepLast is atomic because SetKeepLast is called from the scheduler
+	// and the schedule PUT handler while a run may be sweeping retention.
+	keepLast atomic.Int32
 	running  atomic.Bool
+	// bus receives backup.completed / backup.failed events when set.
+	bus *events.Bus
 	// mu serializes runs; TryLock (not Lock) so a second caller gets an
 	// immediate ErrBackupInProgress instead of queueing.
 	mu sync.Mutex
@@ -110,9 +116,28 @@ type Manager struct {
 
 // NewManager returns a Manager writing backups of the database file at
 // dbPath into dir, using engine to produce and verify copies. Retention
-// keeps DefaultKeepLast files.
+// keeps DefaultKeepLast files until SetKeepLast says otherwise.
 func NewManager(engine Engine, dir, dbPath string) *Manager {
-	return &Manager{engine: engine, dir: dir, dbPath: dbPath, keepLast: DefaultKeepLast, now: time.Now}
+	m := &Manager{engine: engine, dir: dir, dbPath: dbPath, now: time.Now}
+	m.keepLast.Store(DefaultKeepLast)
+	return m
+}
+
+// WithBus makes the manager publish backup.completed / backup.failed
+// events on bus. Instance-scoped events: TeamID is left empty so the
+// WebSocket hub never routes them to team subscribers.
+func (m *Manager) WithBus(bus *events.Bus) *Manager {
+	m.bus = bus
+	return m
+}
+
+// SetKeepLast changes the retention count applied after each successful
+// backup. Values below 1 are ignored — retention can shrink, never vanish.
+func (m *Manager) SetKeepLast(n int) {
+	if n < 1 {
+		return
+	}
+	m.keepLast.Store(int32(n)) //nolint:gosec // bounded by schedule validation (1–365)
 }
 
 // Running reports whether a backup is currently executing.
@@ -122,7 +147,8 @@ func (m *Manager) Running() bool { return m.running.Load() }
 // the copy, rename to the final pattern-matching name, then sweep
 // retention. A failure at any step removes the partial file — a file that
 // looks like a backup always is one. Returns ErrBackupInProgress when
-// another backup is running.
+// another backup is running (no event is published for that: nothing was
+// attempted, so there is nothing to report).
 func (m *Manager) RunNow(ctx context.Context, trigger Trigger) (*Entry, error) {
 	if !m.mu.TryLock() {
 		return nil, ErrBackupInProgress
@@ -131,6 +157,22 @@ func (m *Manager) RunNow(ctx context.Context, trigger Trigger) (*Entry, error) {
 	m.running.Store(true)
 	defer m.running.Store(false)
 
+	entry, err := m.run(ctx, trigger)
+	if m.bus != nil {
+		if err != nil {
+			m.bus.Publish(events.Message{Type: events.BackupFailed, Payload: &Failure{
+				Trigger: trigger, Error: err.Error(), At: m.now().UTC(),
+			}})
+		} else {
+			m.bus.Publish(events.Message{Type: events.BackupCompleted, Payload: entry})
+		}
+	}
+	return entry, err
+}
+
+// run is RunNow's body, split out so event publication sees one
+// entry-or-error result regardless of which step failed.
+func (m *Manager) run(ctx context.Context, trigger Trigger) (*Entry, error) {
 	if err := EnsureDir(m.dir); err != nil {
 		return nil, fmt.Errorf("backup dir: %w", err)
 	}
@@ -190,7 +232,7 @@ func (m *Manager) RunNow(ctx context.Context, trigger Trigger) (*Entry, error) {
 // keep-last-N count. Sweep failures are logged, never propagated — the
 // backup that just succeeded is not undone by a cleanup problem.
 func (m *Manager) sweepRetention() {
-	keep := m.keepLast
+	keep := int(m.keepLast.Load())
 	entries, err := m.History()
 	if err != nil {
 		slog.Warn("backup: retention sweep skipped", "err", err)

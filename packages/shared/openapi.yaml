@@ -192,9 +192,44 @@ components:
         running:
           type: boolean
         schedule:
-          type: object
+          allOf:
+            - $ref: '#/components/schemas/BackupSchedule'
           nullable: true
-          description: Reserved for the backup scheduler; always null until that ships (and when scheduling is off).
+          description: Summary of the active schedule; null when scheduling is off.
+
+    BackupSchedule:
+      type: object
+      description: >
+        Backup schedule configuration. Presets, not cron expressions. All
+        times are UTC. New instances default to daily at 02:00, keep 14.
+      required: [preset, keepLast]
+      properties:
+        preset:
+          type: string
+          enum: [off, hourly, every6h, every12h, daily, weekly]
+        time:
+          type: string
+          description: '"HH:MM" (24h, UTC). Required for daily and weekly presets.'
+        day:
+          type: string
+          enum: [mon, tue, wed, thu, fri, sat, sun]
+          description: Required for the weekly preset.
+        keepLast:
+          type: integer
+          minimum: 1
+          maximum: 365
+          description: Retention count enforced after every successful backup.
+
+    BackupScheduleResponse:
+      allOf:
+        - $ref: '#/components/schemas/BackupSchedule'
+        - type: object
+          properties:
+            nextRunAt:
+              type: string
+              format: date-time
+              nullable: true
+              description: Computed next run; null when the preset is off.
 
     Team:
       type: object
@@ -3668,6 +3703,52 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/BackupEntry"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/backup/schedule:
+    get:
+      operationId: getBackupSchedule
+      summary: Get the backup schedule
+      description: >
+        Returns the stored configuration. An instance that has never saved
+        one reports the default-on schedule (daily 02:00 UTC, keep 14).
+      tags: [admin]
+      responses:
+        "200":
+          description: Current schedule with the computed next run time.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupScheduleResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    put:
+      operationId: putBackupSchedule
+      summary: Update the backup schedule
+      description: >
+        Validates and persists the configuration, then wakes the scheduler
+        so it takes effect without a restart.
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BackupSchedule"
+      responses:
+        "200":
+          description: Saved schedule with the computed next run time.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupScheduleResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":

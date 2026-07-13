@@ -1312,13 +1312,13 @@ _Planned 2026-07-08 — see [docs/plans/phase-16-backup.md](plans/phase-16-backu
 - [x] Tests: vacuum under concurrent writes, verify-failure cleanup, filename round-trip + foreign-file exclusion + traversal rejection, retention sweep, concurrency guard, status shape (incl. unwritable dir)
 - [x] `/review-phase 16.1` (2026-07-09): 0 blockers; fixes applied — 0700/0600 backup permissions, `SetKeepLast` removed (plain field until 16.2), schedule schema deferred, phase-tag comments dropped
 
-**16.2 Server — scheduler, retention-in-anger, failure notification:**
-- [ ] `internal/backup.Scheduler`: preset → next-run computation (injected clock), timer loop, config-change recompute, skip-while-running; no catch-up for missed windows (v1)
-- [ ] `GET`/`PUT /admin/backup/schedule` — presets `off|hourly|every6h|every12h|daily@HH:MM|weekly@day+HH:MM` + `keepLast` 1–365, validated; one `instance_settings` JSON key; response echoes `nextRunAt`; add the `BackupSchedule` OpenAPI schema (deferred from 16.1) + a `Manager` retention setter (`SetKeepLast` was removed in the 16.1 review as caller-less)
-- [ ] Default-on for instances with no stored config: daily 02:00, keep-last-14
-- [ ] `backup.completed` / `backup.failed` bus events (instance-scoped, not team-broadcast); failure consumer emails superadmins via existing mailer, silent no-op without SMTP config
-- [ ] `main.go` wiring: `backup.Manager` + `go scheduler.Run(ctx)` beside the WS hub
-- [ ] Tests: fake-clock runs across every preset, recompute on config change, failure → one email per superadmin, no-SMTP no-op
+**16.2 Server — scheduler, retention-in-anger, failure notification:** ✅ 2026-07-13
+- [x] `internal/backup.Scheduler`: preset → next-run computation (injected clock), timer loop, config-change recompute, skip-while-running; no catch-up for missed windows (v1)
+- [x] `GET`/`PUT /admin/backup/schedule` — presets `off|hourly|every6h|every12h|daily@HH:MM|weekly@day+HH:MM` + `keepLast` 1–365, validated; one `instance_settings` JSON key (`backup.schedule`); response echoes `nextRunAt`; `BackupSchedule` OpenAPI schema added (deferred from 16.1) + `Manager.SetKeepLast` restored (atomic — scheduler and PUT handler call it concurrently with runs); status `schedule` field now live (null when off)
+- [x] Default-on for instances with no stored config: daily 02:00, keep-last-14
+- [x] `backup.completed` / `backup.failed` bus events (instance-scoped, empty TeamID — the hub only routes to team subscribers, so they never reach WS clients); `backup.Notifier` consumer emails superadmins via existing mailer (`UserRepo.ListSuperadminEmails`), silent no-op without SMTP config
+- [x] `main.go` wiring: `Manager.WithBus(bus)` + `go scheduler.Run(ctx)` + `go notifier.Run()` beside the WS hub
+- [x] Tests: fake-clock waits verified across every preset, recompute on config change + Reload, off-waits-for-reload, skip-while-running, failure → one email per superadmin, no-SMTP no-op, schedule validation table, NextRun table, default-on load, manager event emission, SetKeepLast retention
 
 **16.3 Web + ops docs + hardening:**
 - [ ] Settings › Backup section (superadmin-gated like SMTP): status card + health badge with thresholds spelled out, backup-dir warning when unwritable

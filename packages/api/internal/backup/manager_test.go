@@ -13,6 +13,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
+
+	"github.com/I0-1O/draba/packages/api/internal/events"
 )
 
 // fakeEngine lets tests script backup/verify outcomes without a database.
@@ -168,7 +170,7 @@ func TestManager_BackupFailureRemovesPartialFile(t *testing.T) {
 func TestManager_RetentionSweep(t *testing.T) {
 	dir := t.TempDir()
 	m := NewManager(&fakeEngine{}, dir, "unused")
-	m.keepLast = 2
+	m.SetKeepLast(2)
 
 	// A foreign file the admin dropped in must survive every sweep.
 	foreign := filepath.Join(dir, "pre-upgrade.db")
@@ -333,4 +335,69 @@ func TestHealthFor_Thresholds(t *testing.T) {
 			assert.Equal(t, c.want, HealthFor(c.last, now))
 		})
 	}
+}
+
+// nextBusMessage reads one message from a bus subscription with a timeout.
+func nextBusMessage(t *testing.T, ch chan events.Message) events.Message {
+	t.Helper()
+	select {
+	case msg := <-ch:
+		return msg
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected a bus event")
+		return events.Message{}
+	}
+}
+
+func TestManager_PublishesCompletedEvent(t *testing.T) {
+	bus := events.NewBus()
+	ch := bus.Subscribe()
+	m := NewManager(&fakeEngine{}, t.TempDir(), "unused").WithBus(bus)
+
+	entry, err := m.RunNow(context.Background(), TriggerManual)
+	require.NoError(t, err)
+
+	msg := nextBusMessage(t, ch)
+	assert.Equal(t, events.BackupCompleted, msg.Type)
+	assert.Empty(t, msg.TeamID, "backup events are instance-scoped")
+	assert.Equal(t, entry, msg.Payload)
+}
+
+func TestManager_PublishesFailedEvent(t *testing.T) {
+	bus := events.NewBus()
+	ch := bus.Subscribe()
+	eng := &fakeEngine{backup: func(context.Context, string) error {
+		return errors.New("disk full")
+	}}
+	m := NewManager(eng, t.TempDir(), "unused").WithBus(bus)
+
+	_, err := m.RunNow(context.Background(), TriggerScheduled)
+	require.Error(t, err)
+
+	msg := nextBusMessage(t, ch)
+	assert.Equal(t, events.BackupFailed, msg.Type)
+	failure, ok := msg.Payload.(*Failure)
+	require.True(t, ok)
+	assert.Equal(t, TriggerScheduled, failure.Trigger)
+	assert.Contains(t, failure.Error, "disk full")
+}
+
+func TestManager_SetKeepLastDrivesRetention(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManager(&fakeEngine{}, dir, "unused")
+	m.SetKeepLast(2)
+	m.SetKeepLast(0) // ignored: retention can shrink, never vanish
+
+	base := time.Date(2026, 7, 8, 2, 0, 0, 0, time.UTC)
+	for i := 0; i < 3; i++ {
+		m.now = func() time.Time { return base.Add(time.Duration(i) * time.Hour) }
+		_, err := m.RunNow(context.Background(), TriggerScheduled)
+		require.NoError(t, err)
+	}
+
+	entries, err := m.History()
+	require.NoError(t, err)
+	require.Len(t, entries, 2, "keep-last-2 must delete the oldest of three")
+	assert.Equal(t, "draba-20260708T040000Z-scheduled.db", entries[0].Filename)
+	assert.Equal(t, "draba-20260708T030000Z-scheduled.db", entries[1].Filename)
 }

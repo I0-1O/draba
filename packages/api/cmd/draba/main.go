@@ -139,7 +139,12 @@ func main() {
 	} else {
 		slog.Info("backup: directory ready", "dir", backupDir)
 	}
-	srv.WithBackup(backup.NewManager(backup.NewSQLiteEngine(database), backupDir, dsn))
+	backupMgr := backup.NewManager(backup.NewSQLiteEngine(database), backupDir, dsn).WithBus(bus)
+	backupSched := backup.NewScheduler(backupMgr, instanceSetsRepo)
+	go backupSched.Run(context.Background())
+	go backup.NewNotifier(bus, m, users).Run()
+	slog.Info("backup: scheduler running")
+	srv.WithBackup(backupMgr, backupSched)
 
 	// Wire up the embedded React SPA when a production build is present.
 	// In dev the static/ directory only has .gitkeep so this is a no-op.

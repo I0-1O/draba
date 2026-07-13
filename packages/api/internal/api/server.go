@@ -73,6 +73,10 @@ type Server struct {
 	// production; opt-in for tests). When nil the /admin/backup* routes are
 	// not registered. Set via WithBackup.
 	backup *backup.Manager
+	// backupSched, when non-nil, is woken after a schedule change so the
+	// new configuration takes effect without a restart. Tests that only
+	// exercise the HTTP surface may leave it nil.
+	backupSched *backup.Scheduler
 }
 
 // NewServer constructs a Server with its required dependencies. It does not
@@ -146,10 +150,12 @@ func (s *Server) WithOIDC(svc *auth.OIDCService, autoCreate bool) *Server {
 // local account on first SSO login.
 func (s *Server) oidcAutoCreate() bool { return s.oidcAutoCreateUsers }
 
-// WithBackup enables the backup admin endpoints backed by m. Call before
+// WithBackup enables the backup admin endpoints backed by m. sched may be
+// nil (HTTP-surface tests); when set, schedule changes wake it. Call before
 // Routes; when never called, the /admin/backup* routes do not exist.
-func (s *Server) WithBackup(m *backup.Manager) *Server {
+func (s *Server) WithBackup(m *backup.Manager, sched *backup.Scheduler) *Server {
 	s.backup = m
+	s.backupSched = sched
 	return s
 }
 
@@ -192,6 +198,8 @@ func (s *Server) Routes() http.Handler {
 		mux.HandleFunc("GET /admin/backup/status", chain(s.handleGetBackupStatus, s.authMiddleware))
 		mux.HandleFunc("POST /admin/backup", chain(s.handlePostBackup, s.authMiddleware))
 		mux.HandleFunc("GET /admin/backup/history", chain(s.handleGetBackupHistory, s.authMiddleware))
+		mux.HandleFunc("GET /admin/backup/schedule", chain(s.handleGetBackupSchedule, s.authMiddleware))
+		mux.HandleFunc("PUT /admin/backup/schedule", chain(s.handlePutBackupSchedule, s.authMiddleware))
 		mux.HandleFunc("DELETE /admin/backup/{filename}", chain(s.handleDeleteBackup, s.authMiddleware))
 	}
 

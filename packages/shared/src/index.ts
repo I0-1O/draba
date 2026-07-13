@@ -981,6 +981,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/backup/schedule": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get the backup schedule
+         * @description Returns the stored configuration. An instance that has never saved one reports the default-on schedule (daily 02:00 UTC, keep 14).
+         */
+        get: operations["getBackupSchedule"];
+        /**
+         * Update the backup schedule
+         * @description Validates and persists the configuration, then wakes the scheduler so it takes effect without a restart.
+         */
+        put: operations["putBackupSchedule"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/backup/{filename}": {
         parameters: {
             query?: never;
@@ -1515,8 +1539,29 @@ export interface components {
              */
             health: "ok" | "stale" | "critical";
             running: boolean;
-            /** @description Reserved for the backup scheduler; always null until that ships (and when scheduling is off). */
-            schedule?: Record<string, never> | null;
+            /** @description Summary of the active schedule; null when scheduling is off. */
+            schedule?: components["schemas"]["BackupSchedule"] | null;
+        };
+        /** @description Backup schedule configuration. Presets, not cron expressions. All times are UTC. New instances default to daily at 02:00, keep 14. */
+        BackupSchedule: {
+            /** @enum {string} */
+            preset: "off" | "hourly" | "every6h" | "every12h" | "daily" | "weekly";
+            /** @description "HH:MM" (24h, UTC). Required for daily and weekly presets. */
+            time?: string;
+            /**
+             * @description Required for the weekly preset.
+             * @enum {string}
+             */
+            day?: "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
+            /** @description Retention count enforced after every successful backup. */
+            keepLast: number;
+        };
+        BackupScheduleResponse: components["schemas"]["BackupSchedule"] & {
+            /**
+             * Format: date-time
+             * @description Computed next run; null when the preset is off.
+             */
+            nextRunAt?: string | null;
         };
         Team: {
             id: string;
@@ -4371,6 +4416,55 @@ export interface operations {
                     };
                 };
             };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    getBackupSchedule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current schedule with the computed next run time. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupScheduleResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    putBackupSchedule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BackupSchedule"];
+            };
+        };
+        responses: {
+            /** @description Saved schedule with the computed next run time. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupScheduleResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
         };

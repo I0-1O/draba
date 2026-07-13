@@ -23,6 +23,14 @@ const (
 	// TimelineUpdated is published after an existing timeline is modified
 	// (including archive / unarchive transitions).
 	TimelineUpdated Type = "timeline.updated"
+
+	// BackupCompleted is published after a backup file has been verified and
+	// finalized. Instance-scoped: TeamID is empty, so the WebSocket hub never
+	// routes it to team subscribers.
+	BackupCompleted Type = "backup.completed"
+	// BackupFailed is published when a backup attempt fails at any step.
+	// Instance-scoped, like BackupCompleted.
+	BackupFailed Type = "backup.failed"
 )
 
 // Message is a single domain event published on the Bus.

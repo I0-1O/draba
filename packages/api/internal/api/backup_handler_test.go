@@ -50,7 +50,7 @@ func newBackupTestServer(t *testing.T, mgr *backup.Manager) (srv http.Handler, b
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 	isr := db.NewInstanceSettingsRepo(database)
 
-	srv = api.NewServer(users, invites, teams, db.NewActivityRepo(database), db.NewTimelineRepo(database), db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isr, db.NewPasswordResetTokenRepo(database), db.NewStatusRepo(database), db.NewTagRepo(database), db.NewShareRepo(database), mailer.New(isr, nil), tokens, tier.Unlimited, bus, hub).WithBackup(mgr).Routes()
+	srv = api.NewServer(users, invites, teams, db.NewActivityRepo(database), db.NewTimelineRepo(database), db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isr, db.NewPasswordResetTokenRepo(database), db.NewStatusRepo(database), db.NewTagRepo(database), db.NewShareRepo(database), mailer.New(isr, nil), tokens, tier.Unlimited, bus, hub).WithBackup(mgr, nil).Routes()
 	return srv, backupDir
 }
 
@@ -85,6 +85,8 @@ func TestBackup_RequiresSuperadmin(t *testing.T) {
 		{http.MethodGet, "/admin/backup/status"},
 		{http.MethodPost, "/admin/backup"},
 		{http.MethodGet, "/admin/backup/history"},
+		{http.MethodGet, "/admin/backup/schedule"},
+		{http.MethodPut, "/admin/backup/schedule"},
 		{http.MethodDelete, "/admin/backup/draba-20260708T020000Z-manual.db"},
 	}
 	for _, p := range paths {
@@ -112,7 +114,12 @@ func TestBackup_ManualRunStatusAndHistory(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&status))
 	assert.Equal(t, "critical", status["health"])
 	assert.Nil(t, status["lastBackup"])
-	assert.Nil(t, status["schedule"])
+	// Default-on: a fresh instance reports the daily 02:00 / keep-14 schedule.
+	require.NotNil(t, status["schedule"])
+	sched := status["schedule"].(map[string]any)
+	assert.Equal(t, "daily", sched["preset"])
+	assert.Equal(t, "02:00", sched["time"])
+	assert.Equal(t, float64(14), sched["keepLast"])
 	database := status["database"].(map[string]any)
 	assert.Equal(t, "sqlite", database["driver"])
 	assert.Greater(t, database["sizeBytes"].(float64), float64(0))
@@ -251,4 +258,91 @@ func TestBackup_FailureReturns500AndLeavesNoFile(t *testing.T) {
 	dirents, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	assert.Empty(t, dirents, "a failed backup must leave no file behind")
+}
+
+func TestBackupSchedule_DefaultOnAndRoundTrip(t *testing.T) {
+	srv, _ := newBackupTestServer(t, nil)
+	adminToken, _ := seedUser(t, srv, "admin@example.com", "password1", "Admin")
+
+	// A fresh instance reports the default-on schedule with a next run.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodGet, "/admin/backup/schedule", nil, adminToken))
+	require.Equal(t, http.StatusOK, w.Code)
+	var sched map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&sched))
+	assert.Equal(t, "daily", sched["preset"])
+	assert.Equal(t, "02:00", sched["time"])
+	assert.Equal(t, float64(14), sched["keepLast"])
+	require.NotNil(t, sched["nextRunAt"])
+	next, err := time.Parse(time.RFC3339, sched["nextRunAt"].(string))
+	require.NoError(t, err)
+	assert.True(t, next.After(time.Now()), "nextRunAt must be in the future")
+
+	// PUT persists a weekly schedule and echoes it with a next run.
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPut, "/admin/backup/schedule",
+		map[string]any{"preset": "weekly", "time": "03:30", "day": "sun", "keepLast": 30}, adminToken))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&sched))
+	assert.Equal(t, "weekly", sched["preset"])
+	assert.Equal(t, "sun", sched["day"])
+	assert.Equal(t, float64(30), sched["keepLast"])
+	require.NotNil(t, sched["nextRunAt"])
+
+	// The saved config survives a re-read.
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodGet, "/admin/backup/schedule", nil, adminToken))
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&sched))
+	assert.Equal(t, "weekly", sched["preset"])
+	assert.Equal(t, "03:30", sched["time"])
+}
+
+func TestBackupSchedule_OffDisablesNextRunAndStatusSummary(t *testing.T) {
+	srv, _ := newBackupTestServer(t, nil)
+	adminToken, _ := seedUser(t, srv, "admin@example.com", "password1", "Admin")
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPut, "/admin/backup/schedule",
+		map[string]any{"preset": "off", "keepLast": 14}, adminToken))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var sched map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&sched))
+	assert.Nil(t, sched["nextRunAt"], "off has no next run")
+
+	// The status summary reports null when scheduling is off.
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodGet, "/admin/backup/status", nil, adminToken))
+	require.Equal(t, http.StatusOK, w.Code)
+	var status map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&status))
+	assert.Nil(t, status["schedule"])
+}
+
+func TestBackupSchedule_PutValidation(t *testing.T) {
+	srv, _ := newBackupTestServer(t, nil)
+	adminToken, _ := seedUser(t, srv, "admin@example.com", "password1", "Admin")
+
+	bad := []map[string]any{
+		{"preset": "cron", "keepLast": 14},                                // unknown preset
+		{"preset": "daily", "keepLast": 14},                               // missing time
+		{"preset": "daily", "time": "25:00", "keepLast": 14},              // invalid time
+		{"preset": "weekly", "time": "02:00", "keepLast": 14},             // missing day
+		{"preset": "weekly", "time": "02:00", "day": "x", "keepLast": 14}, // invalid day
+		{"preset": "hourly", "keepLast": 0},                               // keepLast too small
+		{"preset": "hourly", "keepLast": 400},                             // keepLast too large
+	}
+	for _, body := range bad {
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, authReq(http.MethodPut, "/admin/backup/schedule", body, adminToken))
+		assert.Equal(t, http.StatusBadRequest, w.Code, "%v", body)
+	}
+
+	// Nothing invalid was persisted: the default is still in place.
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodGet, "/admin/backup/schedule", nil, adminToken))
+	require.Equal(t, http.StatusOK, w.Code)
+	var sched map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&sched))
+	assert.Equal(t, "daily", sched["preset"])
 }

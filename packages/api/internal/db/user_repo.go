@@ -152,6 +152,18 @@ func (r *UserRepo) SearchByNameOrEmail(q string) ([]*models.User, error) {
 	return users, nil
 }
 
+// ListSuperadminEmails returns the email addresses of all active
+// superadmins. Used by the backup failure notifier.
+func (r *UserRepo) ListSuperadminEmails() ([]string, error) {
+	var emails []string
+	err := r.db.Select(&emails,
+		`SELECT email FROM users WHERE is_superadmin = 1 AND archived_at IS NULL ORDER BY email ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("listing superadmin emails: %w", err)
+	}
+	return emails, nil
+}
+
 // SetSuperadmin sets or clears the is_superadmin flag on a user.
 func (r *UserRepo) SetSuperadmin(id string, isSuperadmin bool) error {
 	_, err := r.db.Exec(
